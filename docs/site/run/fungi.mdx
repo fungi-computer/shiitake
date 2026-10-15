@@ -1,0 +1,32 @@
+---
+title: Run your Agent on Fungi
+description:
+  Use Fungi's hosted models from your own host, or run Agents on Fungi.
+---
+
+Shiitake is the Agent runtime behind [Fungi](https://fungi.computer/). You can
+use Fungi in two ways while keeping your own Shiitake host, or let Fungi host
+the Agent for you.
+
+## Use Fungi's models from your own host
+
+Fungi exposes an OpenAI-compatible model endpoint for each Team. Your
+self-hosted Shiitake can use it the way any other client does: make a **Team
+key** in Fungi, then point a Pi `openai-completions` model at your Team's
+endpoint with that key as its API key. Usage is paid from your Team's balance.
+
+[Call Fungi models with a Team key](https://docs.fungi.computer/guides/team-keys/)
+shows how to make the key, find the endpoint and try it with `curl`.
+
+## Talk to Agents hosted on Fungi
+
+Fungi runs durable Agents for your Team. You talk to them in Grove and give them
+Computers, Apps and models. Fungi-hosted Agents load Fungi's own extensions; an
+extension you write runs on a host you run, such as the
+[Cloudflare host](../cloudflare/).
+
+- [Quickstart](https://docs.fungi.computer/quickstart/): sign in, make a Team
+  and give your first Agent a job.
+- [Agents](https://docs.fungi.computer/concepts/agent/): what a Fungi Agent is.
+- [Use Shiitake from the terminal](../../use-the-cli/): the `fungi` CLI, a local
+  Agent that can use Fungi's models.

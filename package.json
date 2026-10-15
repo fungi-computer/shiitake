@@ -1,0 +1,133 @@
+{
+  "name": "@fungi.computer/shiitake",
+  "version": "0.0.1",
+  "author": "Levi <levi@technomancy.dev>",
+  "description": "Effect-native durable Session acceptance and bounded run orchestration",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./effect": {
+      "types": "./dist/effect.d.ts",
+      "import": "./dist/effect.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./agent-control": {
+      "types": "./dist/agent-control.d.ts",
+      "import": "./dist/agent-control.js"
+    },
+    "./model-preference": {
+      "types": "./dist/model-preference.d.ts",
+      "import": "./dist/model-preference.js"
+    },
+    "./http": {
+      "types": "./dist/http.d.ts",
+      "import": "./dist/http.js"
+    },
+    "./cloudflare": {
+      "types": "./dist/cloudflare.d.ts",
+      "import": "./dist/cloudflare.js"
+    },
+    "./extensions": {
+      "types": "./dist/extensions.d.ts",
+      "import": "./dist/extensions.js"
+    },
+    "./hosted": {
+      "types": "./dist/hosted.d.ts",
+      "import": "./dist/hosted.js"
+    },
+    "./client-entry": {
+      "types": "./dist/client-entry.d.ts",
+      "import": "./dist/client-entry.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./agar-extension": {
+      "types": "./dist/agar-extension.d.ts",
+      "import": "./dist/agar-extension.js"
+    },
+    "./fleet": {
+      "types": "./dist/fleet.d.ts",
+      "import": "./dist/fleet.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs/api",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "lint": "eslint src test examples --max-warnings=0 && ../../node_modules/.bin/oxlint --config ../../oxlint.config.ts --deny-warnings src test examples",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
+    "test": "pnpm run test:unit && pnpm run test:merge",
+    "test:unit": "vitest run",
+    "test:merge": "node test/cloudflare-durable-wake.native.mjs && pnpm run test:docs",
+    "test:docs": "node --import tsx --test examples/bookmarks/checks.ts",
+    "docs": "tsx ../../tooling/repository/src/docs/cli.ts check --root ../..",
+    "docs:write": "tsx ../../tooling/repository/src/docs/cli.ts write --root ../..",
+    "pack": "mkdir -p ../../.botanical/shiitake-pack && pnpm pack --pack-destination ../../.botanical/shiitake-pack",
+    "smoke": "node --input-type=module -e \"import('./dist/index.js').then(({Shiitake}) => { if (!Shiitake) process.exit(1); })\"",
+    "stranger": "tsx ../../tooling/repository/src/artifacts/cli.ts --repo-root ../.. .",
+    "format:check": "node ../../tooling/repository/scripts/format-package-check.mjs",
+    "lint:anti-slop": "node ../../tooling/repository/scripts/lint-package-anti-slop.mjs"
+  },
+  "dependencies": {
+    "@fungi.computer/bird-dog": "workspace:*",
+    "@fungi.computer/cairn": "workspace:*",
+    "@fungi.computer/knapsack": "workspace:*",
+    "@fungi.computer/mule": "workspace:*",
+    "@fungi.computer/mycelium": "workspace:*",
+    "@fungi.computer/watchdog": "workspace:*",
+    "effect": "4.0.2",
+    "hono": "4.13.5",
+    "zod": "4.4.3",
+    "@earendil-works/pi-ai": "0.99.2",
+    "@fungi.computer/gills": "workspace:*",
+    "@fungi.computer/agar": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20260828.1",
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "@fungi.computer/carrier": "workspace:*",
+    "@astrojs/starlight": "0.42.4"
+  },
+  "botanical": {
+    "role": "package",
+    "operations": {
+      "lint": "required",
+      "typecheck": "required",
+      "build": "required",
+      "test": "required",
+      "docs": "required",
+      "pack": "required",
+      "smoke": "required",
+      "stranger": "required"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fungi-computer/shiitake.git"
+  }
+}

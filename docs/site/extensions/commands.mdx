@@ -1,0 +1,47 @@
+---
+title: Let people act
+description: Add a command for clients and expose it to the model.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/ladder/05-commands/extension.ts?raw";
+import run from "@examples/ladder/05-commands/run.ts?raw";
+import main from "@examples/ladder/05-commands/main.ts?raw";
+
+A command is the typed door a person or client uses to change an extension's
+state. Now two callers save links, the model and a person, so the save moves
+into one command and the model's tool runs that same command.
+
+## Declare the command
+
+<Code code={extension} lang="ts" title="extension.ts" />
+
+A command spec names its scope, input and output schemas. `scope: "session"`
+means each call targets one Session, and Shiitake supplies its ID; the caller
+cannot choose a different one. The handler is an Effect that runs inside the
+command's transaction: `yield*` each step, and keep it synchronous.
+
+`commands.tool("add", ...)` in the `tools` function exposes the same command to
+the model. The model's call runs the same handler in the same kind of
+transaction, scoped to the Session of the run that called it. A command is a
+write, so its tool is never replayed (`replay: "unsafe"`). The plain
+`bookmarks.add` operation from earlier pages is gone; there is one way to save a
+link.
+
+## Call it
+
+<Code code={run} lang="ts" title="run.ts" />
+
+`session.extension(id).call("add", input)` is the person's door. It decodes the
+input with the command's schema and returns the encoded output.
+
+<Code code={main} lang="ts" title="main.ts" />
+
+```sh title="TERMINAL"
+node --import tsx main.ts
+```
+
+The command returns the new bookmark, and the projection lists both links: the
+one the model saved and the one the person saved.
+
+Next: [Draw it in a client](../client-entry/).

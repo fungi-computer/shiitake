@@ -1,0 +1,70 @@
+---
+title: Run it on Cloudflare
+description:
+  Host durable Sessions in a Durable Object with the cloudflare entry.
+---
+
+Shiitake's `@fungi.computer/shiitake/cloudflare` entry runs an Agent inside one
+Durable Object. The object's SQLite storage holds the Sessions, its alarm wakes
+queued work, and `waitUntil` keeps a run alive while it finishes.
+
+## The shortest path
+
+Extend `ShiitakeDO` and implement `shiitakeOptions()`. It opens the Agent on
+first use, forwards the object's alarm with bounded retry, and serves the HTTP
+Session routes from `fetch`. Use `ShiitakeOwner` to get the same behaviour
+inside a Durable Object class you already have.
+
+## What the Durable Object supplies
+
+To compose it yourself, `makeCloudflareShiitake(state, options)` resolves to the
+Agent. `state` comes from the Durable Object:
+
+| Input       | From the Durable Object                                      |
+| ----------- | ------------------------------------------------------------ |
+| `storage`   | `this.ctx.storage`, a SQLite-backed Durable Object's storage |
+| `waitUntil` | `(task) => this.ctx.waitUntil(task)`                         |
+
+`options` are the same host decisions as anywhere else:
+
+| Option         | What you decide                                                                  |
+| -------------- | -------------------------------------------------------------------------------- |
+| `model`        | The model source: acquire a Pi model and stream for each run.                    |
+| `instructions` | The system instructions, loaded with a revision for each run.                    |
+| `extensions`   | The roster and grants from [Grant only what it needs](../../extensions/grants/). |
+| `tools`        | Mycelium modules and the sandbox that runs model-written code, or `[]` for none. |
+
+If you compose it yourself, forward the object's `alarm()` handler to the
+Agent's `alarm()`. Create the Agent once per object instance and reuse it; every
+request and alarm goes through the same Agent.
+
+## Configure the Worker
+
+The Durable Object class needs SQLite storage. In `wrangler.jsonc`, declare the
+binding and a migration that creates the class with SQLite:
+
+```jsonc title="wrangler.jsonc"
+{
+  "durable_objects": {
+    "bindings": [{ "name": "AGENT", "class_name": "Agent" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Agent"] }],
+}
+```
+
+Route requests to one object per Agent, for example with
+`env.AGENT.getByName(agentId)`. Authenticate and authorize each request before
+it reaches the Agent: Shiitake records who sent a prompt when you supply
+`commandAuthor`, but it does not decide who may send one.
+
+## Serve clients
+
+Use `createShiitakeHttpRoutes` from the `/http` entry to expose Session routes
+behind your own authorization, and the browser client from
+[Connect a browser](../../recipes/browser-client/) on the other side.
+
+The [API reference](../../api/) lists every option, including `hostWork` and
+`hostJobs` for host work that shares the object's single alarm.
+
+The model source can be any Pi model, including Fungi's hosted models; see
+[Run your Agent on Fungi](../fungi/).

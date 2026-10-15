@@ -1,0 +1,73 @@
+---
+title: Grant only what it needs
+description: Separate what an extension asks for from what a host allows.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import roster from "@examples/bookmarks/roster.ts?raw";
+import grants from "@examples/bookmarks/grants.ts?raw";
+import readOnly from "@examples/bookmarks/run-read-only.ts?raw";
+import readGrant from "@examples/bookmarks/read-grant.ts?raw";
+import readGrantRun from "@examples/bookmarks/run-read-grant.ts?raw";
+
+An extension **requests** capabilities by what it defines: `prompt` for prompt
+sections, `state` for collections, `commands`, `run_tools` for tools,
+`projection`, and so on. A host **grants** some or all of them. Until now the
+test host granted everything each extension asked for. A real host decides.
+
+## Write the roster
+
+<Code code={roster} lang="ts" title="bookmarks/roster.ts" />
+
+A roster lists the extensions a host loads and the capabilities it grants to
+each. Pass it as the `extensions` option of `Shiitake.make`, or of `memoryHost`
+when you want a test to use the real grants. Shiitake refuses a grant the
+extension never requested, and a grant for an extension that is not on the
+roster.
+
+## Withhold a capability
+
+<Code code={grants} lang="ts" title="bookmarks/grants.ts" />
+
+<Code code={readOnly} lang="ts" title="bookmarks/run-read-only.ts" />
+
+```sh title="TERMINAL"
+node --import tsx bookmarks/run-read-only.ts
+```
+
+```text
+Refused: ShiitakeError: Extension is unavailable
+```
+
+`readOnlySave` asks the read-only host to save a link through the command.
+Without `commands`, that call is refused. Without `run_tools`, the model is
+never offered `bookmarks.add`; a model that calls it anyway gets an error and
+nothing is saved. The extension's code did not change. Removing a grant removes
+the authority; do not re-check grants inside the extension.
+
+## Narrow a granted tool
+
+A capability grant decides whether an extension's tools exist at all. Inside
+them, each operation's author labels what it does, `access: "read"` or the
+default `"write"`, and may add `confirm: true` to ask a person first. The host
+decides how much of that a Session may use and hands its decision down as data:
+`tools.access.grants` is the Agent-wide default, and
+`agent.grants.deliver(sessionId, { version, grants })` delivers one Session's
+grants. An extension's tools are granted by its id; `"read"` runs only `read`
+operations and `"none"` runs nothing. Keys in `access.required` are refused
+unless a grant names them, so a Session nobody delivered to fails closed.
+
+<Code code={readGrant} lang="ts" title="bookmarks/read-grant.ts" />
+
+<Code code={readGrantRun} lang="ts" title="bookmarks/run-read-grant.ts" />
+
+```sh title="TERMINAL"
+node --import tsx bookmarks/run-read-grant.ts
+```
+
+`bookmarks.add` is unlabelled, so it is a write; under a read grant it never
+runs, and the model gets a refusal that says why. Mycelium makes this decision
+at every call, so a grant the host delivers mid-run applies to the very next
+call. The extension still does not check grants itself.
+
+Next: [Test it](../test-it/).

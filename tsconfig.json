@@ -1,0 +1,38 @@
+{
+  "compilerOptions": {
+    "allowJs": false,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "exactOptionalPropertyTypes": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "moduleResolution": "NodeNext",
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "verbatimModuleSyntax": true,
+    "target": "ES2022",
+    "module": "NodeNext",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node", "vitest/globals", "@cloudflare/workers-types"],
+    "baseUrl": ".",
+    "paths": {
+      "@fungi.computer/shiitake": ["./src/index.ts"],
+      "@fungi.computer/shiitake/effect": ["./src/effect.ts"],
+      "@fungi.computer/shiitake/client": ["./src/client.ts"],
+      "@fungi.computer/shiitake/extensions": ["./src/extensions.ts"],
+      "@fungi.computer/shiitake/testing": ["./src/testing.ts"],
+      "@examples/*?raw": ["./examples/*"]
+    }
+  },
+  "include": ["src", "test", "examples", "vitest.config.ts"]
+}

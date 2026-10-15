@@ -1,0 +1,126 @@
+[
+  {
+    "label": "Overview",
+    "link": "/"
+  },
+  {
+    "label": "Get started",
+    "items": [
+      {
+        "label": "Install",
+        "link": "/install/"
+      },
+      {
+        "label": "Your first Session",
+        "link": "/quickstart/"
+      },
+      {
+        "label": "Use it from the terminal",
+        "link": "/use-the-cli/"
+      }
+    ]
+  },
+  {
+    "label": "Concepts",
+    "link": "/concepts/"
+  },
+  {
+    "label": "Write an extension",
+    "sigil": "list",
+    "items": [
+      {
+        "label": "1. Your first extension",
+        "link": "/extensions/first-extension/"
+      },
+      {
+        "label": "2. Give the model a tool",
+        "link": "/extensions/model-tool/"
+      },
+      {
+        "label": "3. Remember things",
+        "link": "/extensions/stored-state/"
+      },
+      {
+        "label": "4. Show it to a client",
+        "link": "/extensions/projection/"
+      },
+      {
+        "label": "5. Let people act",
+        "link": "/extensions/commands/"
+      },
+      {
+        "label": "6. Draw it in a client",
+        "link": "/extensions/client-entry/"
+      },
+      {
+        "label": "7. Grant only what it needs",
+        "link": "/extensions/grants/"
+      },
+      {
+        "label": "8. Test it",
+        "link": "/extensions/test-it/"
+      },
+      {
+        "label": "9. Ship it",
+        "link": "/extensions/ship-it/"
+      },
+      {
+        "label": "Extension reference",
+        "link": "/extensions/reference/"
+      }
+    ]
+  },
+  {
+    "label": "Run it",
+    "items": [
+      {
+        "label": "Run it on Node",
+        "link": "/run/node/"
+      },
+      {
+        "label": "Run it on Cloudflare",
+        "link": "/run/cloudflare/"
+      },
+      {
+        "label": "Connect a browser",
+        "link": "/recipes/browser-client/"
+      },
+      {
+        "label": "Run your Agent on Fungi",
+        "link": "/run/fungi/"
+      }
+    ]
+  },
+  {
+    "label": "Recipes",
+    "items": [
+      {
+        "label": "Test a model without credentials",
+        "link": "/recipes/test-a-model/"
+      }
+    ]
+  },
+  {
+    "label": "Examples",
+    "link": "/examples/"
+  },
+  {
+    "label": "Troubleshooting",
+    "link": "/troubleshooting/"
+  },
+  {
+    "label": "Status",
+    "link": "/status/"
+  },
+  {
+    "label": "API reference",
+    "sigil": "list",
+    "items": [
+      {
+        "autogenerate": {
+          "directory": "api"
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,55 @@
+---
+title: Run it on Node
+description:
+  Keep a durable Agent in a SQLite file, serve its routes and survive restarts.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import example from "@examples/node-agent.ts?raw";
+import run from "@examples/run-node-agent.ts?raw";
+
+`@fungi.computer/shiitake/node` runs one durable Agent in a SQLite file on disk,
+on the Node event loop. It needs Node with `node:sqlite`. Accepted work is
+durable: close the process mid-run and reopening the same file resumes it.
+
+## Open, serve and prompt
+
+<Code code={example} lang="ts" title="node-agent.ts" />
+
+`openNodeShiitake({ path, ... })` takes the same model, instructions, extensions
+and tools as `Shiitake.make`; it owns the store and the runtime host. It returns
+the in-process `agent`, the Session `routes` as a Hono app, and `close`.
+
+Serve `routes` with any server, such as `@hono/node-server` or `Bun.serve`.
+Mount it behind your own middleware: authenticate the caller there and set the
+`shiitakeMeta` variable to the metadata their prompts carry. Request bodies
+cannot carry metadata; every command body is closed. Pass `meta.schema` to make
+Shiitake check each value against your own schema.
+
+## One owner per file
+
+The process holds an exclusive lease on the store until `close`. A second
+`openNodeShiitake` of the same file fails at once instead of sharing it, under
+any name: a store reached through a symbolic link, or with a second hard link,
+is refused. The store and its lease file are created private to your user
+(`0600`), whatever the umask, and a missing directory is created `0700`. `close`
+stops waking, closes the Agent, then releases the database and lease.
+
+## Run the example
+
+<Code code={run} lang="ts" title="run-node-agent.ts" />
+
+```sh title="TERMINAL" docs-install
+npm init -y
+npm pkg set type=module
+npm install @fungi.computer/shiitake @fungi.computer/mycelium hono @earendil-works/pi-ai@0.99.2
+npm install --save-dev tsx@4.23.12
+node --import tsx run-node-agent.ts
+```
+
+The package's runtime test calls the same `nodeAgent()` function against a
+temporary file and checks the completed run, the reply and the attributed
+prompt.
+
+Swap `fauxModelSource` for your provider's model source, and give the Agent
+tools and grants as [Grant only what it needs](../../extensions/grants/) shows.

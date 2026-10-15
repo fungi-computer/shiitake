@@ -1,0 +1,42 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "extends": "../../tooling/docs/typedoc.base.json",
+  "name": "@fungi.computer/shiitake",
+  "entryPoints": [
+    "src/index.ts",
+    "src/effect.ts",
+    "src/client.ts",
+    "src/http.ts",
+    "src/client-entry.ts",
+    "src/agent-control.ts",
+    "src/model-preference.ts",
+    "src/cloudflare.ts",
+    "src/extensions.ts",
+    "src/hosted.ts",
+    "src/testing.ts",
+    "src/node.ts",
+    "src/agar-extension.ts",
+    "src/fleet.ts"
+  ],
+  "tsconfig": "tsconfig.json",
+  "out": "docs/api",
+  "intentionallyNotExported": [
+    "SessionCommandSchema",
+    "PromptCommandSchema",
+    "AbortCommandSchema",
+    "CancelCommandSchema",
+    "ShiitakeErrorBoundarySchema",
+    "ShiitakeErrorCauseSchema"
+  ],
+  "requiredToBeDocumented": [
+    "Enum",
+    "EnumMember",
+    "Variable",
+    "Function",
+    "Class",
+    "Interface",
+    "Method",
+    "Accessor",
+    "TypeAlias"
+  ]
+}

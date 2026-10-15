@@ -1,0 +1,40 @@
+---
+title: Test it
+description: Test an extension with node:test and the in-memory host.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import tests from "@examples/bookmarks/checks.ts?raw";
+
+An extension's tests are ordinary tests. `memoryHost` runs the real Agent over
+an in-memory database, and `script` stands in for the model, so they need no
+provider account and no network. This file uses Node's built-in test runner.
+
+<Code code={tests} lang="ts" title="bookmarks/checks.ts" />
+
+Each test checks one promise the extension makes:
+
+- The model and a person can both save links, and the client draws them.
+- A host that withholds `commands` refuses saves.
+- Each Session keeps its own bookmarks.
+- A broken projection renders no rows rather than invented ones.
+
+```sh title="TERMINAL"
+node --import tsx --test bookmarks/checks.ts
+```
+
+The summary at the end of its output reads:
+
+```text
+ℹ tests 4
+ℹ pass 4
+ℹ fail 0
+```
+
+The Shiitake package runs this same file in its own test suite.
+
+The test host is not a sandbox: scripted tool calls run the admitted operation
+directly in your process, and no model-written code is evaluated. That makes it
+right for tests and wrong for production.
+
+Next: [Ship it](../ship-it/).

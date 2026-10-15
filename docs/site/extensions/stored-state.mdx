@@ -1,0 +1,50 @@
+---
+title: Remember things
+description: Store rows that survive restarts and read them back.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/ladder/03-stored-state/extension.ts?raw";
+import run from "@examples/ladder/03-stored-state/run.ts?raw";
+import main from "@examples/ladder/03-stored-state/main.ts?raw";
+
+State is a set of typed, keyed collections the extension owns. Shiitake stores
+them durably next to the Session, so they survive a restart. This page turns
+`bookmarks.check` into `bookmarks.add`, which saves the link, and lists the
+saved links in the prompt.
+
+## Declare a collection
+
+<Code code={extension} lang="ts" title="extension.ts" />
+
+`.state({ bookmarks: defineCollection(...) })` declares one collection. Its
+schema is the only decoder for stored rows. `key` names a row; saving the same
+key again replaces it. `index` groups rows so the prompt can read one Session's
+links without scanning everyone's.
+
+## Write and read
+
+The tool writes through `ctx.state.update`, one short synchronous transaction.
+The prompt reads through `ctx.state.read`. Both are plain functions: no promises
+inside, and no network calls while the transaction is open.
+
+## Run it
+
+<Code code={run} lang="ts" title="run.ts" />
+
+<Code code={main} lang="ts" title="main.ts" />
+
+```sh title="TERMINAL"
+node --import tsx main.ts
+```
+
+The model saves the link, and its next request already lists it:
+
+```text
+Complete this test run.
+
+[extension:bookmarks.saved]
+Saved links: Shiitake docs
+```
+
+Next: [Show it to a client](../projection/).

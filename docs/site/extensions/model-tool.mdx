@@ -1,0 +1,54 @@
+---
+title: Give the model a tool
+description: Add a typed operation the model can call.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/ladder/02-model-tool/extension.ts?raw";
+import run from "@examples/ladder/02-model-tool/run.ts?raw";
+import main from "@examples/ladder/02-model-tool/main.ts?raw";
+
+A tool is a typed function the model can call. This page adds one to a new
+`bookmarks` extension: `bookmarks.check` takes a link and says whether it is an
+http or https URL. It stores nothing yet; [the next page](../stored-state/)
+does.
+
+## Define the tool
+
+<Code code={extension} lang="ts" title="extension.ts" />
+
+Tools are [Mycelium](https://mycelium.shiit.app/) operations grouped in a
+module. The module's `name` is how the model reaches it: `bookmarks.check`. Each
+operation declares its input and output with an Effect schema. Mycelium decodes
+the model's input before `execute` runs and describes both shapes to the model,
+so the model learns the tool from the schema itself.
+
+`replay: "safe"` says calling it twice with the same input is harmless. Mark a
+tool `"unsafe"` (the default) when a repeated call would change something twice.
+
+## Script a model that calls it
+
+<Code code={run} lang="ts" title="run.ts" />
+
+`callTool("bookmarks.check", input)` scripts one model turn that calls the tool;
+the string after it is the model's next reply. The test host runs the scripted
+call through the same admitted operation a real model would reach. It evaluates
+no model-written code, so it is for tests and examples only.
+
+<Code code={main} lang="ts" title="main.ts" />
+
+Install Mycelium and Effect alongside Shiitake, then run it:
+
+```sh title="TERMINAL" docs-install
+npm install @fungi.computer/mycelium effect@4.0.2
+node --import tsx main.ts
+```
+
+It prints the tool result the model received, then the model's reply:
+
+```text
+{"ok":true,"host":"shiitake.shiit.app"}
+That link is fine.
+```
+
+Next: [Remember things](../stored-state/).

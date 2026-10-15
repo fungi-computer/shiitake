@@ -1,0 +1,32 @@
+---
+title: Test a model without credentials
+description: Exercise the model loop with the public fauxModel helper.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import example from "@examples/recipes/deterministic-model.ts?raw";
+
+A deterministic model helps test the orchestration around a provider. The public
+`mule/testing` helper supplies a Pi model and stream with queued replies, so the
+test makes no network request and needs no credential.
+
+Install Mule in the ESM project from [Quickstart](../../quickstart/):
+
+```sh docs-install
+npm install @fungi.computer/mule
+```
+
+<Code code={example} lang="ts" title="recipes/deterministic-model.ts" />
+
+The result is one completed call containing `pong`. The package's
+`test/docs-model-example.test.ts` runs this exact file and checks the reply and
+call count.
+
+This exercises Mule's model loop. It does not prove durable Session acceptance,
+restart recovery, billing or a real provider's behavior. Those belong to the
+Shiitake host and provider tests. For the durable Session boundary, use the
+[local Session quickstart](../../quickstart/) with the public `memoryHost`
+helper.
+
+For extension-owned behavior, start with
+[Your first extension](../../extensions/first-extension/).

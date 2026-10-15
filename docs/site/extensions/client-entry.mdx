@@ -1,0 +1,57 @@
+---
+title: Draw it in a client
+description: Share a contract and render the projection as panel rows.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import contract from "@examples/bookmarks/contract.ts?raw";
+import extension from "@examples/bookmarks/extension.ts?raw";
+import client from "@examples/bookmarks/client.ts?raw";
+import run from "@examples/bookmarks/run.ts?raw";
+import main from "@examples/run-bookmarks.ts?raw";
+
+A client must know the extension's commands and projection, but it must never
+import host code or read private state. This page moves that public part into a
+**contract** and adds a **client entry** that turns the projection into panel
+rows. From here on, the Bookmarks files live together in one `bookmarks/`
+folder.
+
+## Share a contract
+
+<Code code={contract} lang="ts" title="bookmarks/contract.ts" />
+
+The contract holds the extension's ID, its command specs and its projection
+schema, and nothing else. The host and every client import the same file, so
+they cannot disagree about the wire shape.
+
+<Code code={extension} lang="ts" title="bookmarks/extension.ts" />
+
+The extension is page 5's, now built from the contract: the same ID, command
+specs and projection schema.
+
+## Render it
+
+<Code code={client} lang="ts" title="bookmarks/client.ts" />
+
+`defineClientEntry(contract, ...)` decodes the projection with the contract's
+schema before `contribute` sees it. If a slot fails to decode, the entry gets no
+value and contributes no rows; one broken extension never stops another from
+rendering. A panel shows at most 16 rows, and each row's text is bounded, so the
+entry trims long URLs.
+
+<Code code={run} lang="ts" title="bookmarks/run.ts" />
+
+<Code code={main} lang="ts" title="run-bookmarks.ts" />
+
+```sh title="TERMINAL"
+node --import tsx run-bookmarks.ts
+```
+
+It prints one line per panel row:
+
+```text
+Fungi: https://fungi.computer/
+Shiitake docs: https://shiitake.shiit.app/
+```
+
+Next: [Grant only what it needs](../grants/).

@@ -1,0 +1,64 @@
+---
+title: Your first extension
+description: Add one prompt section to every model request.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/ladder/01-prompt-section/extension.ts?raw";
+import run from "@examples/ladder/01-prompt-section/run.ts?raw";
+import main from "@examples/ladder/01-prompt-section/main.ts?raw";
+
+An extension adds behaviour to an Agent. The smallest useful one adds a named
+section to the system prompt the model receives on every request. This page
+builds that, runs it, and shows the prompt the model saw.
+
+The guide is a ladder. Each page adds one idea to the previous page's code, and
+by page six you have a complete Bookmarks extension with stored state, a model
+tool, a command and a client panel.
+
+## Define it
+
+<Code code={extension} lang="ts" title="extension.ts" />
+
+`defineExtension("house-style")` names the extension. `.define` lists what it
+contributes; here, one `prompt` function that returns named sections. Shiitake
+calls it before each model request, so the text can change between requests.
+
+## Run it
+
+<Code code={run} lang="ts" title="run.ts" />
+
+`memoryHost` is a real Shiitake Agent over an in-memory database, made for tests
+and examples. Listing the extension adds it to the host and grants it what it
+asks for, here only `prompt`. [Grants](../grants/) explains why a real host
+decides that separately.
+
+The `script` replaces the model. `echoSystemPrompt()` is a stand-in model that
+replies with the system prompt it received, so you can see exactly what your
+extension added. No provider account or API key is involved.
+
+<Code code={main} lang="ts" title="main.ts" />
+
+Save the three files in an empty folder and run:
+
+```sh title="TERMINAL" docs-install
+npm init -y
+npm pkg set type=module
+npm install @fungi.computer/shiitake
+npm install --save-dev tsx@4.23.12
+node --import tsx main.ts
+```
+
+It prints the system prompt the model received: the test host's own
+instructions, then your section, labelled with the extension and section names:
+
+```text
+Complete this test run.
+
+[extension:house-style.voice]
+Answer in one short sentence.
+```
+
+The package's own tests run this exact code and check that output.
+
+Next: [Give the model a tool](../model-tool/).

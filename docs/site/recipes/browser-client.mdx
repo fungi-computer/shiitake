@@ -1,0 +1,33 @@
+---
+title: Connect a browser to a Session
+description:
+  Use the public HTTP client without taking ownership of the Agent runtime.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import example from "@examples/recipes/browser-client.ts?raw";
+
+An existing host admits the browser and exposes Shiitake's HTTP routes. The
+browser creates a Session, sends a prompt and keeps the returned Session client
+for observations and later commands. It does not run reconciliation itself.
+
+<Code code={example} lang="ts" title="recipes/browser-client.ts" />
+
+Supply your host's base URL and retain one request ID for retries of this
+action. The return value `accepted` means durable acceptance, not a completed
+model reply. Read or subscribe through the returned Session client for progress.
+
+## Where it lives in Fungi
+
+Grove uses this client through its admitted App host to open a Session and
+observe its messages in the inbox. The browser keeps the returned Session
+client; the host retains responsibility for admission and reconciliation.
+
+## Guarantee and limits
+
+The maintained client parses HTTP responses and preserves typed refusals.
+Authentication, Team membership and Session authority belong to the server; this
+helper supplies none of them. The excerpt compiles against public exports.
+Running it requires an existing admitted HTTP host; it is not a standalone
+credential-free host demonstration. For that, use
+[Quickstart](../../quickstart/).

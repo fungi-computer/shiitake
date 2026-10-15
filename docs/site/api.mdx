@@ -1,0 +1,25 @@
+---
+title: API reference
+description:
+  Choose the public entry point for a host, Session client or extension.
+---
+
+Use the root entry for an Agent host, `/client` for an authorized transport,
+`/extensions` for durable contributions and `/testing` for local fixtures.
+Generated module pages below retain the complete signatures and types.
+`AcceptedSchema` from `/client` validates a command acceptance received as an
+RPC value; `parseAccepted` decodes its serialized JSON form.
+
+| Entry                             | When to use it                                          | Start with                                                                                     |
+| --------------------------------- | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [Root](./entry/)                  | Own durable Sessions and host resources                 | `Shiitake`, `ShiitakeOptions`, `ShiitakeError`, `SqliteOwner`, `RuntimeHost`                   |
+| [Client](./client/)               | Submit commands and observe an admitted Session         | `createShiitakeClient`, `AcceptedSchema` and the returned Session client                       |
+| [Extensions](./extensions/)       | Define extension state, commands, tools and projections | `defineExtension`, `defineCollection`, `ExtensionId`, `ExtensionCommandError`, `ExtensionStop` |
+| [Testing](./testing/)             | Run a credential-free canonical host                    | `memoryHost`, `callTool`, `echoSystemPrompt`, `fauxModelSource`, `MemoryHostOptions`           |
+| [HTTP](./http/)                   | Bind authorized Session routes to an existing host      | `createShiitakeHttpRoutes`, `ShiitakeSessionResolver`, `ShiitakeHttpEnv`                       |
+| [Client entries](./client-entry/) | Turn a shared projection into bounded UI contributions  | `defineClientEntry`, `clientContributionSchemaV1`                                              |
+| [Agent control](./agent-control/) | Give admitted tools a directory of existing Agents      | `createAgentControlSource`, `waitForAgentTerminal`, `AgentControlDirectory`                    |
+
+The testing host is explicitly driven and uses trusted callbacks. It is not a
+production isolation boundary. Start with [Your first Session](../quickstart/),
+then [Your first extension](../extensions/first-extension/).

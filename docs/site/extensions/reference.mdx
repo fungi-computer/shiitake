@@ -1,0 +1,118 @@
+---
+title: Extension reference
+description: Choose an extension contribution and its required capability.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/bookmarks/extension.ts?raw";
+import settledCounter from "@examples/recipes/settled-counter.ts?raw";
+
+An extension declares the behavior it supplies. Its host then grants the
+capabilities that behavior needs. The public
+[extensions module](../../api/extensions/) owns the complete types; the table
+below helps choose a contribution.
+
+## Identity
+
+`defineExtension("id")` names an extension; `defineExtension({ id, version })`
+also sets a SemVer version (default `0.0.0`). The id, version, declared schemas,
+config and requested capabilities together form the extension's revision. See
+[Ship it](../ship-it/) for what the version is for.
+
+## State
+
+`.state({ name: defineCollection(schema, { key, index }) })` declares state
+version 1. Use `.state({ version, collections, migrations })` when a row schema
+changes. The names `read`, `update` and `observe` are reserved, and a collection
+named `collections`, `version` or `migrations` needs the full form.
+
+| Where                  | Read                                         | Write                        |
+| ---------------------- | -------------------------------------------- | ---------------------------- |
+| Prompt section, tool   | `ctx.state.read((s) => s.name.page(...))`    | `ctx.state.update((s) => …)` |
+| Command, hook (Effect) | `ctx.state.name.get(...)`, `.page(...)`      | `ctx.state.name.put(...)`    |
+| Projection             | `ctx.state.name.peek(...)`, `.peekPage(...)` | none                         |
+
+State migrations are pure row transformations, not a place to call a network
+service.
+
+## Commands, tools and projection
+
+<Code code={extension} lang="ts" title="bookmarks/extension.ts" />
+
+Command specs pair a scope with input and output schemas. The handler receives
+the admitted Session and decoded input. Return a typed `ExtensionCommandError`
+for a command refusal, rather than stopping the extension for an expected user
+mistake.
+
+The `tools` function's third argument exposes a command to the model:
+`commands.tool("add", { description })` runs the same handler, scoped to the
+calling run's Session. It needs both the `run_tools` and the `commands` grant.
+
+Mycelium operations take an Effect schema or any Standard Schema that also
+describes itself as JSON Schema, such as Zod 4, so an extension needs only one
+schema library.
+
+Custom schema checks need a stable representation so core can fingerprint the
+contract. Give a `Schema.makeFilter` check a `representation` annotation with an
+`id` and its parameters, for example
+`{ id: "example/web-url", payload: { protocols: ["http:", "https:"] } }`.
+
+A projection reads committed state for one Session and returns the value (or an
+`Option`). Its schema is the client contract. Use `observe(sessionId)` after
+changes so a client receives the committed view.
+
+## Hooks
+
+`start` acquires activation-scoped resources. `onSettled` consumes a bounded
+page of settled runs, and `onTimer` consumes a fired timer. Core commits the
+cursor or timer consumption with the hook's state changes. Keep transaction
+hooks synchronous; acquire asynchronous resources in `start` instead.
+
+<Code code={settledCounter} lang="ts" title="recipes/settled-counter.ts" />
+
+This exact example counts two completed runs, reconciles again and checks that
+the count stays at two. Core commits the delivery cursor with the hook's writes;
+the hook does not maintain a second cursor. It publishes only its own Session
+projection. The `settled` grant is separate from `state` and `projection`.
+
+Fungi's Goals feature uses `onSettled` to respond to completed runs. The public
+`ExtensionDefinitionV0` type describes the same hook contract for your own
+extensions.
+
+## Timers and attention
+
+A timer schedules extension work through the Agent host; it does not create an
+independent process loop. Attention is extension-owned data on an existing
+Session. Clearing one extension's attention cannot clear another owner's items.
+See `TimersV0` and `AttentionV0` in the public extensions module for the
+admitted operations.
+
+## Prompt sections, run tools and files
+
+`prompt` adds extension-owned sections before each model request. `tools`
+supplies a Mycelium module for one run; `files` supplies Knapsack-minted file
+tools. Grant the matching capability and keep the operation gate. A definition
+is not authority to execute arbitrary tools.
+
+## Client entries
+
+The client entry turns a decoded projection into presentation data: panel rows,
+chips, timeline cells and waiting state. It uses the public
+[client-entry module](../../api/client-entry/), without importing host state.
+Core owns the bounded row grammar and command-action admission. See
+[Draw it in a client](../client-entry/) for the Bookmarks entry.
+
+## Testing
+
+`memoryHost({ extensions: [ext], script: [...] })` grants each listed extension
+what it requests and scripts the model: strings are replies,
+`callTool("alias.operation", input)` calls a tool through the admitted
+operation, and `echoSystemPrompt()` replies with the system prompt. Pass a
+roster instead of a list to test real grants. See [Test it](../test-it/).
+
+## Compaction
+
+An extension may supply a compaction contribution. The exclusive compaction
+handoff is separately granted; do not assume that adding a summarizer gives it
+control of the whole Session. Read `BorrowedCompactionViewV0` and
+`CompactionHandoffV0` before implementing a policy.

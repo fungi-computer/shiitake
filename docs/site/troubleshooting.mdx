@@ -1,0 +1,58 @@
+---
+title: Troubleshooting
+description: Separate accepted work, extension refusals and host failures.
+---
+
+## The prompt was accepted but there is no reply
+
+Acceptance is a durable commit, not a model result. Check that the host is still
+open, reconciliation is bound and the host requests a wake after admitting work.
+Read the Session's current work and observations before submitting a second
+prompt. Reusing the same request identity and input replays its receipt;
+changing the input under that identity is a conflict.
+
+## An extension stopped
+
+`ExtensionStop` carries the extension's reason. Fix that cause, then use
+`agent.extensions.resume(id)`. An asynchronous boundary inside a transaction
+hook or command is a defect: move asynchronous work outside the transaction and
+submit the result through the admitted command path.
+
+## A command was refused
+
+`ExtensionCommandError` identifies an expected command failure such as
+`invalid`, `conflict`, `not_found` or `rejected`. Check the command input, the
+current Session and the extension's grants. Do not retry a changed input under
+the same request identity.
+
+## Admission is closed
+
+A request with `requireExistingSession` must name an existing Session. The
+`AdmissionError` reason `closed` is a refusal, not successful work waiting to
+run. Decide whether the caller should address an existing Session or use the
+normal creation path.
+
+## A tool call returns a refusal
+
+A refused call returns `{ refused: true, module, operation, reason, message }`
+instead of running. `not-granted` and `read-only` come from the Session's
+delivered grants (`agent.grants.deliver`) over the Agent default in
+`tools.access.grants`; a key in `access.required` that neither names is refused.
+An extension's tools are granted by its roster `grantKey` (its id by default)
+and Files by `files`. `confirmation-unavailable` means the operation is labelled
+`confirm` and the host supplied no `confirm` handler; `declined` means the
+person said no. Change the grant or the handler, not the tool's label.
+
+## One client entry is missing
+
+A client-entry decode failure retires that entry rather than the entire client.
+Compare its contract and projection schemas with the host's current definition.
+Check the entry's own error evidence before changing unrelated extensions.
+
+## A provider call failed
+
+Keep the typed failure and its cause at the host boundary. A deterministic
+[faux-model test](../recipes/test-a-model/) checks orchestration without a
+provider account; it cannot prove live provider availability or billing.
+
+See the public [API reference](../api/) for the exact error and operation types.

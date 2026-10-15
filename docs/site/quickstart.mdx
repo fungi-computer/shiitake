@@ -1,0 +1,56 @@
+---
+title: Your first Session
+description:
+  Accept a prompt, settle the real Session and read its reply locally.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import example from "@examples/first-session.ts?raw";
+import run from "@examples/run-first-session.ts?raw";
+
+This example runs a real Shiitake Session with a deterministic model. It needs
+Node with `node:sqlite` support, not a provider account or an API key. The
+public `memoryHost` helper supplies an in-memory database and explicitly driven
+host. It does not run a background loop.
+
+## Accept, settle and read
+
+<Code code={example} lang="ts" title="first-session.ts" />
+
+`session.send()` commits the prompt and returns an acceptance receipt. It does
+not wait for the model reply. `host.settle()` reconciles pending work and
+returns the committed Session snapshot after the queue drains. The final message
+is the deterministic assistant reply, `Ready.`.
+
+Use a stable request ID when retrying the same input. A repeated request replays
+the receipt; different input under the same ID is a conflict. Read the existing
+Session before deciding to submit new work.
+
+## Run the example
+
+Save the two files together in an empty example directory. The second file
+prints the accepted receipt and the committed assistant message. Initialize the
+directory as an ES module project, then install the example dependencies.
+
+<Code code={run} lang="ts" title="run-first-session.ts" />
+
+```sh title="TERMINAL" docs-install
+npm init -y
+npm pkg set type=module
+npm install @fungi.computer/shiitake @earendil-works/pi-ai@0.99.2
+npm install --save-dev tsx@4.23.12
+node --import tsx run-first-session.ts
+```
+
+The package's runtime test calls the same `firstSession()` function and checks
+acceptance, the idle queue, the completed run and the exact reply. Closing the
+host also closes the database it owns.
+
+This is a trusted local test host. Its default sandbox refuses tools; custom
+callbacks retain host privileges and are not isolation. It proves Session
+orchestration, not provider availability, billing or restart recovery.
+
+Continue with [Your first extension](../extensions/first-extension/) to add your
+own behaviour, or [Test a model](../recipes/test-a-model/) to exercise the
+lower-level model loop. To talk to a Shiitake Agent without writing a host at
+all, install the `fungi` CLI: see [Use it from the terminal](../use-the-cli/).

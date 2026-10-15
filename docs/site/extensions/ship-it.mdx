@@ -1,0 +1,50 @@
+---
+title: Ship it
+description:
+  Version stored state, pick an extension version and check the package.
+---
+
+An extension is ready to ship when its definition, the host's grants and its
+client entry agree, and its tests from [Test it](../test-it/) pass.
+
+## Change stored rows safely
+
+Rows outlive the code that wrote them. When a collection's schema changes,
+declare the state in full and raise its version:
+
+- `.state({ bookmarks: ... })` is version 1.
+- `.state({ version: 2, collections: { ... }, migrations: { 1: ... } })` moves
+  stored rows from version 1 to 2.
+
+A migration is a pure function from one stored row to the rows that replace it.
+Shiitake runs the migrations in order when the extension starts, then decodes
+every row with the new schema. A stored version newer than the definition is
+refused rather than downgraded. Test a migration with stored rows from the old
+version.
+
+## The extension version
+
+`defineExtension("bookmarks")` uses version `0.0.0`. Any SemVer is valid,
+pre-releases included; nothing requires you to change it. Shiitake hashes the
+declared schemas, config and requested capabilities into the extension's
+revision on its own. The version is part of that hash, for a behaviour change
+the others do not show, such as a fixed hook: pass
+`defineExtension({ id, version })` to mark one. A stopped extension stays
+stopped until its revision changes or the host resumes it.
+
+## Publish the client entry
+
+Publish the contract and client entry beside the host code, and keep the client
+free of host imports. A client should depend only on the contract, as in
+[Draw it in a client](../client-entry/).
+
+## Check the packed package
+
+Repository-relative imports can hide a missing export. Pack the package, install
+the tarball in an empty project and run the examples and tests there. The
+examples on this site are checked the same way: compiled against the public
+exports, run, and tested.
+
+Look up the full contribution list in the [Extension reference](../reference/),
+or put the extension on a host: [Run it on Cloudflare](../../run/cloudflare/) or
+[Run your Agent on Fungi](../../run/fungi/).

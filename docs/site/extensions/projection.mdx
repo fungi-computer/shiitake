@@ -1,0 +1,40 @@
+---
+title: Show it to a client
+description: Publish a typed view of one Session for clients.
+---
+
+import { Code } from "@astrojs/starlight/components";
+import extension from "@examples/ladder/04-projection/extension.ts?raw";
+import run from "@examples/ladder/04-projection/run.ts?raw";
+import main from "@examples/ladder/04-projection/main.ts?raw";
+
+A projection is the extension's public view of one Session. Clients read it;
+they never open the extension's tables. This page projects the saved links.
+
+## Add a projection
+
+<Code code={extension} lang="ts" title="extension.ts" />
+
+Two lines are new since the last page. `projection` declares the schema clients
+decode and a `read` function that returns the value for one Session. It runs
+while Shiitake builds a Session snapshot, so it reads with the synchronous
+`peekPage`. An empty list is a real value: no bookmarks is useful to a client.
+
+In the tool, `s.observe(run.sessionId)` tells Shiitake the Session changed.
+Subscribed clients receive the new projection once the write commits.
+
+## Read it
+
+<Code code={run} lang="ts" title="run.ts" />
+
+<Code code={main} lang="ts" title="main.ts" />
+
+```sh title="TERMINAL"
+node --import tsx main.ts
+```
+
+`snapshot.extensions.bookmarks` holds the slot a client sees: its status, the
+extension's revision and the projected value, with the saved link and its
+Session.
+
+Next: [Let people act](../commands/).
