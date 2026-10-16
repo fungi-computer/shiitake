@@ -31,6 +31,7 @@ import {
   noExtensions,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
+import { readSessionCommandAdmissionByRequest } from "../src/internal/woodstock/session-store.js";
 
 function manualRuntime() {
   let reconcile: Effect.Effect<void, Error> | undefined;
@@ -919,7 +920,7 @@ it("refuses a verified reply that does not name its mail's sender", async () => 
   }
 });
 
-it("queues a verified reply that arrives mid-turn behind the parent's active run, never interrupting it", async () => {
+it("steers a verified reply into the same active parent run at its safe boundary", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
   const requests: Context[] = [];
@@ -931,9 +932,11 @@ it("queues a verified reply that arrives mid-turn behind the parent's active run
   const held = new Promise<void>((resolve) => {
     release = resolve;
   });
+  let parentSignal: AbortSignal | undefined;
   faux.setResponses([
-    async (context) => {
+    async (context, options) => {
       requests.push(structuredClone(context));
+      parentSignal = options?.signal;
       started();
       await held;
       return fauxAssistantMessage("Still working");
@@ -957,6 +960,11 @@ it("queues a verified reply that arrives mid-turn behind the parent's active run
         requestId: "parent-turn",
       }),
     );
+    const parentWorkId = requireAcceptedWorkId(
+      fixture.owner,
+      parent.sessionId,
+      "parent-turn",
+    );
     const turn = runtime.reconcile();
     await running;
     const { mail, reply } = verifiedReply("send-3:reply:0", "Child answer", {
@@ -966,36 +974,60 @@ it("queues a verified reply that arrives mid-turn behind the parent's active run
     const admitted = await Effect.runPromise(
       core.acceptMail(mail, undefined, reply),
     );
-    // While the parent runs, the reply waits as subsequent work.
+    const replyAdmission = readSessionCommandAdmissionByRequest(
+      fixture.owner,
+      parent.sessionId,
+      mail.key,
+    );
+    expect(replyAdmission?.entry).toMatchObject({
+      kind: "command",
+      delivery: "steer",
+      targetWorkId: parentWorkId,
+      reply: {
+        agentId: child.agentId,
+        sessionId: child.sessionId,
+        commandId: "cmd-3",
+      },
+    });
+    // The active model call is neither cancelled nor restarted to admit mail.
     expect(faux.state.callCount).toBe(1);
-    expect(
-      (await Effect.runPromise(core.agent.session(parent.sessionId).read()))
-        .pending.total,
-    ).toBe(1);
+    expect(parentSignal?.aborted).toBe(false);
+    const replay = await Effect.runPromise(
+      core.acceptMail(mail, undefined, reply),
+    );
+    expect(replay.commandId).toBe(admitted.commandId);
+    expect(parentSignal?.aborted).toBe(false);
     release();
     await turn;
-    await runtime.reconcile();
     expect(faux.state.callCount).toBe(2);
     const continued = requestMessages(requests[1]);
     expect(continued.at(-2)).toMatchObject({ role: "assistant" });
     expect(userText(continued.at(-1))).toBe(
       '<fungi_agent_reply agent_id="child-agent" session_id="child-session" command_id="cmd-3" outcome="completed">\nChild answer\n</fungi_agent_reply>',
     );
+    expect(
+      continued.filter(
+        (message) =>
+          message.role === "user" &&
+          userText(message).includes("<fungi_agent_reply "),
+      ),
+    ).toHaveLength(1);
+    // Replaying after the safe-boundary delivery does not submit a duplicate.
+    const settledReplay = await Effect.runPromise(
+      core.acceptMail(mail, undefined, reply),
+    );
+    expect(settledReplay.commandId).toBe(admitted.commandId);
+    await runtime.reconcile();
+    expect(faux.state.callCount).toBe(2);
     const snapshot = await Effect.runPromise(
       core.agent.session(parent.sessionId).read(),
     );
-    // The parent's run settled first; the reply then ran as its own next run.
+    // The reply is a control settled by the active parent run, not a second run.
     expect(
       snapshot.terminals.map(({ commandId, outcome }) => [commandId, outcome]),
     ).toEqual([
       [parentWork.commandId, "completed"],
       [admitted.commandId, "completed"],
-    ]);
-    expect(snapshot.messages.map(({ value }) => value.role)).toEqual([
-      "user",
-      "assistant",
-      "user",
-      "assistant",
     ]);
   } finally {
     release();

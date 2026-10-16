@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Effect-native durable Session acceptance and bounded run orchestration",
   "type": "module",

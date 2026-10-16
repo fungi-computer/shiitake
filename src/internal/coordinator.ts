@@ -970,7 +970,7 @@ export function acceptAddressedMail(
     mail.to.sessionId,
     {
       requestId: mail.key,
-      delivery: "followUp",
+      delivery: reply === undefined ? "followUp" : "steer",
       type: "prompt",
       text: mail.content,
     },

@@ -127,7 +127,7 @@ function decodeReply(request: AdmitRequest): VerifiedAgentReply | undefined {
     mail.from.agentId !== reply.agentId ||
     mail.from.sessionId !== reply.sessionId ||
     request.command.type !== "prompt" ||
-    request.command.delivery !== "followUp"
+    request.command.delivery !== "steer"
   )
     throw new ShiitakeError(
       "contract",

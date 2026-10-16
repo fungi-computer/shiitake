@@ -176,10 +176,14 @@ export type AgentControlDirectory = Readonly<{
     signal: AbortSignal,
     invocation?: AgentDelegationInvocation,
   ) => Promise<Accepted>;
-  /** Present only when this host authorizes ordinary Agent creation. */
+  /**
+   * Present only when this host authorizes ordinary Agent creation. `invoker`
+   * names the Session whose run asked, so a host can record provenance.
+   */
   create?: (
     input: Readonly<{ requestId: string; model?: ModelPreference }>,
     signal: AbortSignal,
+    invoker?: Readonly<{ sessionId: string }>,
   ) => Promise<AgentControlAgent>;
   /** Present only when the host authorizes changing an Agent's future default. */
   setModel?: (
@@ -372,7 +376,7 @@ export function createAgentControlSource(
   directory: AgentControlDirectory,
 ): CapabilitySource {
   const create = directory.create;
-  const createOperation =
+  const createOperation = (session: CapabilitySession | undefined) =>
     create === undefined
       ? undefined
       : Mycelium.operation({
@@ -388,11 +392,12 @@ export function createAgentControlSource(
                   ? { requestId }
                   : { requestId, model: parseModelAddress(model) },
                 context.signal,
+                session === undefined
+                  ? undefined
+                  : { sessionId: session.sessionId },
               ).catch((cause: unknown) => admitModelRefusal("create", cause)),
             ),
         });
-  const createOperations =
-    createOperation === undefined ? {} : { create: createOperation };
   const setModel = directory.setModel;
   const modelOperations =
     setModel === undefined
@@ -439,6 +444,8 @@ export function createAgentControlSource(
     acquire: ({ signal, session }) => {
       signal.throwIfAborted();
       const sends = new WeakMap<InvocationContext, number>();
+      const created = createOperation(session);
+      const createOperations = created === undefined ? {} : { create: created };
       return Promise.resolve({
         snapshot: {
           version: "shiitake-agent-control-v6",

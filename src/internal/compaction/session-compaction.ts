@@ -6,7 +6,7 @@ import {
   type MuleRunOutcome,
   type MuleStreamFunction,
 } from "@fungi.computer/mule/effect";
-import { isRecoverableLength } from "@earendil-works/pi-ai";
+import { isRecoverableLength } from "@earendil-works/pi-ai/utils/overflow";
 import * as Effect from "effect/Effect";
 
 import type { CompactionHandoffV0 } from "../../extensions.js";

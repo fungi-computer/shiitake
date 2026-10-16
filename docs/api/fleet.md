@@ -303,6 +303,33 @@ The host metadata on one authenticated reply line, as JSON.
 
 ---
 
+### FleetRecipient
+
+```ts
+type FleetRecipient = Readonly<{
+  agentId: string;
+  sessionId: string;
+  sentAt: number;
+}>;
+```
+
+One Agent a Session sent work to: its latest addressed conversation.
+
+---
+
+### FleetRecipients
+
+```ts
+type FleetRecipients = Readonly<{
+  recipients: readonly FleetRecipient[];
+  more: number;
+}>;
+```
+
+A bounded page of recipients and how many more exist past it.
+
+---
+
 ### FleetAgentAccess
 
 ```ts
@@ -675,6 +702,7 @@ Shiitake owns work deduplication, execution and settlement; Post owns replies.
 | Name                  | Type                                                                                                                                                                                                                                                                                                                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `authenticateReply()` | (`mail`) => \| `Readonly`\<\{ `ancestors`: readonly `string`[]; `maxDepth`: `number`; `reply`: \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; `agentId`: `string`; `sessionId`: `string`; \}; \}\> \| `undefined` | Authenticate a reply against its frozen mail and restore the caller's path. Authenticate one arriving reply against the frozen mail this owner sent. It must be BirdDog's single reply key for that mail, mirror its sender and recipient exactly, carry BirdDog's settlement facts and, once the send's receipt is recorded, name that receipt's `commandId`. The result restores the caller's own delegation path and the verified reply; it never reads the reply's text or any settlement metadata. |
+| `recipients()`        | (`parent`, `limit`) => [`FleetRecipients`](#fleetrecipients)                                                                                                                                                                                                                                                             | One grouped read of the Agents a parent Session sent work to. The distinct Agents one parent Session sent work to, newest send first, with how many more exist past `limit`. Read-only over the frozen mail.                                                                                                                                                                                                                                                                                            |
 | `start()`             | (`grant`, `raw`) => `Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>\>                                                                                                                                                                                                                      | Submit once and return the existing Shiitake admission receipt.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `delegate()`          | (`grant`, `task`) => `Promise`\< \| `Readonly`\<\{ `kind`: `"pending"`; `retryAfterMs`: `number`; \}\> \| [`AgentDelegationOutcome`](#agentdelegationoutcome)\>                                                                                                                                                          | Submit or poll the exact turn, yielding Agar Pending until settled.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 

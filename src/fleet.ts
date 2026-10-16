@@ -484,6 +484,24 @@ const delegationRowSchema = z.strictObject({
 const decodeMail = Schema.decodeUnknownSync(
   Schema.fromJsonString(BirdDogMailSchema),
 );
+const recipientRowSchema = z.strictObject({
+  agent_id: identity,
+  session_id: identity,
+  sent_at: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+});
+
+/** One Agent a Session sent work to: its latest addressed conversation. */
+export type FleetRecipient = Readonly<{
+  agentId: string;
+  sessionId: string;
+  sentAt: number;
+}>;
+/** A bounded page of recipients and how many more exist past it. */
+export type FleetRecipients = Readonly<{
+  recipients: readonly FleetRecipient[];
+  more: number;
+}>;
 
 /**
  * Hosted BirdDog submission and Pending observation. The durable row freezes
@@ -638,9 +656,31 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       reply,
     };
   }
+  /**
+   * The distinct Agents one parent Session sent work to, newest send first,
+   * with how many more exist past `limit`. Read-only over the frozen mail.
+   */
+  function recipients(
+    parent: Readonly<{ agentId: string; sessionId: string }>,
+    limit: number,
+  ): FleetRecipients {
+    const rows = store
+      .recipients(parent.agentId, parent.sessionId, limit)
+      .map((row) => recipientRowSchema.parse(row));
+    return {
+      recipients: rows.map((row) => ({
+        agentId: row.agent_id,
+        sessionId: row.session_id,
+        sentAt: row.sent_at,
+      })),
+      more: Math.max(0, (rows[0]?.total ?? 0) - rows.length),
+    };
+  }
   return {
     /** Authenticate a reply against its frozen mail and restore the caller's path. */
     authenticateReply,
+    /** One grouped read of the Agents a parent Session sent work to. */
+    recipients,
     /** Submit once and return the existing Shiitake admission receipt. */
     start,
     /** Submit or poll the exact turn, yielding Agar Pending until settled. */

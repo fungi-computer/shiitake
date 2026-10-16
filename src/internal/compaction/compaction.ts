@@ -3,19 +3,20 @@
  * The retained preparation/result vocabulary is intentionally visible here;
  * Shiitake supplies native Message values and its selected model stream.
  */
-import {
-  contentText,
-  normalizeContext,
-  retryAssistantCall,
-  uuidv7,
-  type Api,
-  type AssistantMessage,
-  type Context,
-  type Model,
-  type RetryPolicy,
-  type SimpleStreamOptions,
-  type Usage,
+import type {
+  Api,
+  AssistantMessage,
+  Context,
+  Model,
+  RetryPolicy,
+  SimpleStreamOptions,
+  Usage,
 } from "@earendil-works/pi-ai";
+// Leaf helpers, not Pi's root entry, which also evaluates its validators.
+import { retryAssistantCall } from "@earendil-works/pi-ai/utils/retry";
+import { contentText } from "@earendil-works/pi-ai/utils/text";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { uuidv7 } from "@earendil-works/pi-ai/utils/uuid";
 import type { MuleStreamFunction } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
 

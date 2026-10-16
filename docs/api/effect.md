@@ -535,26 +535,6 @@ for it. An unreadable Session is its own `unavailable` row.
 [`StoredSessionSummaryRow`](#storedsessionsummaryrow)[]; `next`: `string` \|
 `undefined`; \}\>, [`ShiitakeError`](index.md#shiitakeerror), `never`\>
 
----
-
-### inspectWoodstockStoreProtocol()
-
-```ts
-function inspectWoodstockStoreProtocol(owner): "fresh" | "v0" | "unmarked";
-```
-
-Inspect one unopened store before the file-backed host takes custody.
-
-#### Parameters
-
-| Parameter | Type                                  |
-| --------- | ------------------------------------- |
-| `owner`   | [`SqliteOwner`](index.md#sqliteowner) |
-
-#### Returns
-
-`"fresh"` \| `"v0"` \| `"unmarked"`
-
 ## References
 
 ### AbortCommand
