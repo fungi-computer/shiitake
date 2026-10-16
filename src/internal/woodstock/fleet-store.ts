@@ -130,17 +130,11 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
   }
 }
 
-const fromAgent = "json_extract(mail, '$.from.agentId')";
-const fromSession = "json_extract(mail, '$.from.sessionId')";
-
 /** Durable correspondence is frozen before delivery; retries reuse the same row. */
 export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
   storage.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_delegations (
     request_id TEXT PRIMARY KEY, input TEXT NOT NULL, mail TEXT NOT NULL, receipt TEXT
   ) STRICT`);
-  storage.sql.exec(
-    `CREATE INDEX IF NOT EXISTS idx_shiitake_fleet_delegations_parent ON shiitake_fleet_delegations(${fromAgent}, ${fromSession})`,
-  );
   return {
     read: (requestId: string) =>
       storage.sql
@@ -149,20 +143,6 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
           requestId,
         )
         .toArray()[0],
-    /** Distinct addressed Agents of one parent Session, newest send first. */
-    recipients: (
-      parentAgentId: string,
-      parentSessionId: string,
-      limit: number,
-    ) =>
-      storage.sql
-        .exec(
-          `SELECT json_extract(mail, '$.to.agentId') AS agent_id, json_extract(mail, '$.to.sessionId') AS session_id, MAX(json_extract(mail, '$.createdAt')) AS sent_at, COUNT(*) OVER () AS total FROM shiitake_fleet_delegations WHERE ${fromAgent} = ? AND ${fromSession} = ? GROUP BY agent_id ORDER BY sent_at DESC, agent_id LIMIT ?`,
-          parentAgentId,
-          parentSessionId,
-          limit,
-        )
-        .toArray(),
     reserve(requestId: string, input: string, mail: string) {
       storage.transactionSync(() => {
         storage.sql.exec(

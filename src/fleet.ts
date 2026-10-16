@@ -34,28 +34,32 @@ export const agentActionSchema = z.enum([
 /** One host-admitted fleet operation. */
 export type AgentAction = z.infer<typeof agentActionSchema>;
 /** Attribution supplied by the admitting host, without Team semantics. */
-export const agentProvenanceSchema = z.strictObject({
-  actor: identity,
-  workflowRunId: identity.optional(),
-  /** Host fingerprint of the enclosing model program, frozen with replay input. */
-  toolCallInputDigest: z
-    .string()
-    .regex(/^[a-f0-9]{64}$/)
-    .optional(),
-  session: z
-    .strictObject({ agentId: identity, sessionId: identity })
-    .optional(),
-});
+export const agentProvenanceSchema = z.lazy(() =>
+  z.strictObject({
+    actor: identity,
+    workflowRunId: identity.optional(),
+    /** Host fingerprint of the enclosing model program, frozen with replay input. */
+    toolCallInputDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    session: z
+      .strictObject({ agentId: identity, sessionId: identity })
+      .optional(),
+  }),
+);
 /** Fleet authority is supplied, never looked up in host policy. */
-export const agentGrantSchema = z.strictObject({
-  agents: z.union([z.literal("all"), z.array(identity)]),
-  actions: z.array(agentActionSchema).max(5),
-  expiresAt: z.number().int().nonnegative(),
-  provenance: agentProvenanceSchema,
-  meta: z.json().optional(),
-  /** Delegation abuse bound; inherited paths may only narrow it. */
-  maxDepth: z.number().int().min(1).max(8).optional(),
-});
+export const agentGrantSchema = z.lazy(() =>
+  z.strictObject({
+    agents: z.union([z.literal("all"), z.array(identity)]),
+    actions: z.array(agentActionSchema).max(5),
+    expiresAt: z.number().int().nonnegative(),
+    provenance: agentProvenanceSchema,
+    meta: z.json().optional(),
+    /** Delegation abuse bound; inherited paths may only narrow it. */
+    maxDepth: z.number().int().min(1).max(8).optional(),
+  }),
+);
 /** A trusted host's bounded, addressed authority for fleet operations. */
 export type AgentGrant = z.infer<typeof agentGrantSchema>;
 /** A committed directory transition, returned in the host's transaction. */
@@ -101,35 +105,43 @@ export const agentIds = defineIdFamily({
 /** An ordinary Agent directory identity. */
 export type AgentId = CairnId<"agent", "agent">;
 
-const agentRowSchema = z.strictObject({
-  agent_id: z.string(),
-  name: z.string(),
-  actor_user_id: z.string(),
-  created_at: z.number().int().nonnegative(),
-  updated_at: z.number().int().nonnegative(),
-});
+const agentRowSchema = z.lazy(() =>
+  z.strictObject({
+    agent_id: z.string(),
+    name: z.string(),
+    actor_user_id: z.string(),
+    created_at: z.number().int().nonnegative(),
+    updated_at: z.number().int().nonnegative(),
+  }),
+);
 
-const receiptRowSchema = z.strictObject({
-  request_id: z.string(),
-  actor_user_id: z.string(),
-  name: z.string(),
-  agent_id: z.string(),
-  computer_mode: z.string().min(1).max(4096),
-});
+const receiptRowSchema = z.lazy(() =>
+  z.strictObject({
+    request_id: z.string(),
+    actor_user_id: z.string(),
+    name: z.string(),
+    agent_id: z.string(),
+    computer_mode: z.string().min(1).max(4096),
+  }),
+);
 
 /** Stable replay input; configuration is an opaque host creation choice. */
-export const agentCreationSchema = z.strictObject({
-  name: z.string().min(1).max(256),
-  requestId: z.string().min(1).max(256),
-  configuration: z.string().min(1).max(4096),
-});
+export const agentCreationSchema = z.lazy(() =>
+  z.strictObject({
+    name: z.string().min(1).max(256),
+    requestId: z.string().min(1).max(256),
+    configuration: z.string().min(1).max(4096),
+  }),
+);
 /** One idempotent directory reservation. */
 export type AgentCreation = z.infer<typeof agentCreationSchema>;
 
 /** Owner-only rename input: an Agent's new display name. */
-export const agentRenameSchema = z.strictObject({
-  name: z.string().min(1).max(256),
-});
+export const agentRenameSchema = z.lazy(() =>
+  z.strictObject({
+    name: z.string().min(1).max(256),
+  }),
+);
 /** Input to {@link createAgentDirectory}'s `rename`. */
 export type AgentRename = z.infer<typeof agentRenameSchema>;
 
@@ -327,15 +339,17 @@ export function createAgentDirectory(sql: WatchdogSqliteOwner["sql"]) {
 }
 
 /** Replay identity and work, with the parent supplied exclusively by the grant. */
-export const agentDelegationTaskSchema = z.strictObject({
-  requestId: identity,
-  agentId: identity,
-  sessionId: identity.optional(),
-  text: z
-    .string()
-    .min(1)
-    .max(256 * 1024),
-});
+export const agentDelegationTaskSchema = z.lazy(() =>
+  z.strictObject({
+    requestId: identity,
+    agentId: identity,
+    sessionId: identity.optional(),
+    text: z
+      .string()
+      .min(1)
+      .max(256 * 1024),
+  }),
+);
 /** A caller reuses this task unchanged while polling Pending. */
 export type AgentDelegationTask = z.infer<typeof agentDelegationTaskSchema>;
 /** Exact host facts encoded over internal transports, without transcript content. */
@@ -476,32 +490,16 @@ const delegationMetadata = z.object({
   delegation: FungiMessageMetaSchema.shape.delegation,
 });
 
-const delegationRowSchema = z.strictObject({
-  input: z.string(),
-  mail: z.string(),
-  receipt: z.string().nullable(),
-});
+const delegationRowSchema = z.lazy(() =>
+  z.strictObject({
+    input: z.string(),
+    mail: z.string(),
+    receipt: z.string().nullable(),
+  }),
+);
 const decodeMail = Schema.decodeUnknownSync(
   Schema.fromJsonString(BirdDogMailSchema),
 );
-const recipientRowSchema = z.strictObject({
-  agent_id: identity,
-  session_id: identity,
-  sent_at: z.number().int().nonnegative(),
-  total: z.number().int().nonnegative(),
-});
-
-/** One Agent a Session sent work to: its latest addressed conversation. */
-export type FleetRecipient = Readonly<{
-  agentId: string;
-  sessionId: string;
-  sentAt: number;
-}>;
-/** A bounded page of recipients and how many more exist past it. */
-export type FleetRecipients = Readonly<{
-  recipients: readonly FleetRecipient[];
-  more: number;
-}>;
 
 /**
  * Hosted BirdDog submission and Pending observation. The durable row freezes
@@ -656,31 +654,9 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       reply,
     };
   }
-  /**
-   * The distinct Agents one parent Session sent work to, newest send first,
-   * with how many more exist past `limit`. Read-only over the frozen mail.
-   */
-  function recipients(
-    parent: Readonly<{ agentId: string; sessionId: string }>,
-    limit: number,
-  ): FleetRecipients {
-    const rows = store
-      .recipients(parent.agentId, parent.sessionId, limit)
-      .map((row) => recipientRowSchema.parse(row));
-    return {
-      recipients: rows.map((row) => ({
-        agentId: row.agent_id,
-        sessionId: row.session_id,
-        sentAt: row.sent_at,
-      })),
-      more: Math.max(0, (rows[0]?.total ?? 0) - rows.length),
-    };
-  }
   return {
     /** Authenticate a reply against its frozen mail and restore the caller's path. */
     authenticateReply,
-    /** One grouped read of the Agents a parent Session sent work to. */
-    recipients,
     /** Submit once and return the existing Shiitake admission receipt. */
     start,
     /** Submit or poll the exact turn, yielding Agar Pending until settled. */

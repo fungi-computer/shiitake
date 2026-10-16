@@ -72,7 +72,7 @@ Host-only identity and admitted command metadata for one delegated send.
 type AgentControlDirectory = Readonly<{
   list: (signal) => Promise<readonly AgentControlAgent[]>;
   send?: (input, sourceSessionId, signal, invocation?) => Promise<Accepted>;
-  create?: (input, signal, invoker?) => Promise<AgentControlAgent>;
+  create?: (input, signal) => Promise<AgentControlAgent>;
   setModel?: (input, signal) => Promise<void>;
   models?: (signal) => Promise<readonly AgentControlModel[]>;
   checkModel?: (input, signal) => Promise<void>;

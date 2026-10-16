@@ -1,4 +1,4 @@
-import { expect, it, vi } from "vitest";
+import { expect, it } from "vitest";
 import {
   createAgentDirectory,
   agentGrantSchema,
@@ -481,81 +481,5 @@ it("inherits the delegation depth cap across handoffs and refuses work at the li
     expect(mails).toHaveLength(1);
   } finally {
     store.close();
-  }
-});
-
-it("groups a parent Session's sends into one recipient per Agent, newest first, and shows no other Session", async () => {
-  const { createFleetDelegation } = await import("../src/fleet.js");
-  const fixture = createNativeSqliteOwnerFixture();
-  let clock = 1_000;
-  const fleet = createFleetDelegation({
-    storage: fixture.owner,
-    deliver: (mail) =>
-      Promise.resolve({ status: "accepted", commandId: `command-${mail.key}` }),
-    readSettlement: () => Promise.resolve(undefined),
-    open: () => Promise.reject(new Error("every task names its Session")),
-  });
-  const grant = (sessionId: string): AgentGrant => ({
-    agents: ["parent", "alpha", "beta"],
-    actions: ["delegate"],
-    expiresAt: Date.now() + 60_000,
-    provenance: {
-      actor: "parent",
-      session: { agentId: "parent", sessionId },
-    },
-  });
-  const sendAt = async (
-    from: string,
-    requestId: string,
-    agentId: string,
-    sessionId: string,
-  ) => {
-    clock += 1;
-    const now = vi.spyOn(Date, "now").mockReturnValue(clock);
-    try {
-      await fleet.start(grant(from), {
-        requestId,
-        agentId,
-        sessionId,
-        text: "work",
-      });
-    } finally {
-      now.mockRestore();
-    }
-  };
-  const parent = { agentId: "parent", sessionId: "here" };
-  try {
-    expect(fleet.recipients(parent, 16)).toEqual({ recipients: [], more: 0 });
-    await sendAt("here", "one", "alpha", "alpha-a");
-    expect(fleet.recipients(parent, 16)).toEqual({
-      recipients: [{ agentId: "alpha", sessionId: "alpha-a", sentAt: 1_001 }],
-      more: 0,
-    });
-    // A second send to the same Agent keeps one row at its latest conversation.
-    await sendAt("here", "two", "alpha", "alpha-b");
-    await sendAt("here", "three", "beta", "beta-a");
-    await sendAt("elsewhere", "four", "beta", "beta-b");
-    expect(fleet.recipients(parent, 16)).toEqual({
-      recipients: [
-        { agentId: "beta", sessionId: "beta-a", sentAt: 1_003 },
-        { agentId: "alpha", sessionId: "alpha-b", sentAt: 1_002 },
-      ],
-      more: 0,
-    });
-    expect(fleet.recipients(parent, 1)).toEqual({
-      recipients: [{ agentId: "beta", sessionId: "beta-a", sentAt: 1_003 }],
-      more: 1,
-    });
-    expect(
-      fleet.recipients({ agentId: "parent", sessionId: "elsewhere" }, 16),
-    ).toEqual({
-      recipients: [{ agentId: "beta", sessionId: "beta-b", sentAt: 1_004 }],
-      more: 0,
-    });
-    expect(
-      fleet.recipients({ agentId: "parent", sessionId: "unrelated" }, 16),
-    ).toEqual({ recipients: [], more: 0 });
-  } finally {
-    fixture.close();
   }
 });

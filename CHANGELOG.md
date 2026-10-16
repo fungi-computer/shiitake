@@ -1,5 +1,26 @@
 # @fungi.computer/shiitake
 
+## 0.2.0
+
+### Minor Changes
+
+- Changes since 0.1.0:
+
+  - perf(shiitake): build schemas on first use, not at import
+  - feat(oyster): public release 0.1.0
+  - refactor(subagents): record sub-agents in the hosts, not Shiitake core
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.2.0
+  - @fungi.computer/gills@0.1.0
+  - @fungi.computer/knapsack@0.1.0
+  - @fungi.computer/mycelium@0.1.0
+
 ## 0.1.0
 
 ### Minor Changes
