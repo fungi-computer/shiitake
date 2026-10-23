@@ -28,7 +28,7 @@ import { rowSchemaV1, type RowV1 } from "@fungi.computer/gills";
 const row: RowV1 = Schema.decodeUnknownSync(rowSchemaV1)({
   id: "public-row",
   title: "Public contribution",
-  open: { kind: "session", agentId: "stranger", sessionId: "other" },
+  open: { params: [{ key: "session", value: "other" }] },
 });
 const clientEntry = defineClientEntry(
   {

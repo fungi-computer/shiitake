@@ -1,7 +1,13 @@
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { expect, it, vi } from "vitest";
+import {
+  AttentionItemSchema,
+  defineExtension,
+  ExtensionId,
+} from "../src/extensions.js";
 import { attentionExtension } from "./fixtures/attention.fixture.js";
 import {
   readSessionInboxChanges,
@@ -18,6 +24,111 @@ const item = {
   since: 1,
   expiresAt: 2,
 };
+
+it("reports typed Session absence without constructing a Session or recreating deleted attention", async () => {
+  const extension = defineExtension({
+    id: ExtensionId.make("absence-probe"),
+    version: "1.0.0",
+  }).define({
+    attention: true,
+    commands: {
+      specs: {
+        set: {
+          scope: "session",
+          input: AttentionItemSchema,
+          output: Schema.Literals(["set", "session_absent"]),
+        },
+      },
+      handlers: (ctx) => ({
+        set: ({ sessionId, input }) =>
+          ctx.attention.set(sessionId, input).pipe(
+            Effect.map((): "set" => "set"),
+            Effect.catchTag("ExtensionStateError", (error) =>
+              error.reason === "session_absent"
+                ? Effect.succeed<"session_absent">("session_absent")
+                : Effect.fail(error),
+            ),
+          ),
+      }),
+    },
+  });
+  const fixture = createNativeSqliteOwnerFixture();
+  const { core, host } = await openCore(fixture.owner, grantAll([extension]));
+  try {
+    const session = core.agent.session("absent-attention");
+    const set = () =>
+      Effect.runPromise(
+        session.extension(extension.manifest.id).call("set", item),
+      );
+    expect(await set()).toBe("session_absent");
+    expect(readSessionInboxPage(fixture.owner, undefined).sessions).toEqual([]);
+    await Effect.runPromise(session.send("hello", { requestId: "hello" }));
+    await host.drain();
+    expect(await set()).toBe("set");
+    expect((await Effect.runPromise(session.read())).attention).toHaveLength(1);
+    expect(
+      await Effect.runPromise(core.agent.deleteSession("absent-attention")),
+    ).toBe(true);
+    expect(await set()).toBe("session_absent");
+    expect(readSessionInboxPage(fixture.owner, undefined).sessions).toEqual([]);
+    expect((await Effect.runPromise(session.read())).attention).toEqual([]);
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("keeps inbox:false attention visible across restart without changing the inbox state or hiding ordinary attention", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const roster = grantAll([attentionExtension()]);
+  let opened = await openCore(fixture.owner, roster);
+  const sessionId = "drawer-attention";
+  const drawerItem = { ...item, id: "paused-goal", inbox: false };
+  try {
+    let session = opened.core.agent.session(sessionId);
+    await Effect.runPromise(session.send("hello", { requestId: "hello" }));
+    await opened.host.drain();
+    expect(
+      readSessionInboxPage(fixture.owner, undefined).sessions[0],
+    ).toMatchObject({ state: "done" });
+
+    await Effect.runPromise(
+      session.extension("attention-probe").call("set", drawerItem),
+    );
+    expect((await Effect.runPromise(session.read())).attention).toEqual([
+      { ...drawerItem, extensionId: "attention-probe" },
+    ]);
+    expect(
+      readSessionInboxPage(fixture.owner, undefined).sessions[0],
+    ).toMatchObject({ state: "done" });
+
+    await Effect.runPromise(
+      session.extension("attention-probe").call("set", item),
+    );
+    expect(
+      readSessionInboxPage(fixture.owner, undefined).sessions[0],
+    ).toMatchObject({ state: "needs_you" });
+    await Effect.runPromise(
+      session.extension("attention-probe").call("clear", { id: item.id }),
+    );
+    expect(
+      readSessionInboxPage(fixture.owner, undefined).sessions[0],
+    ).toMatchObject({ state: "done" });
+
+    await Effect.runPromise(opened.core.agent.close);
+    opened = await openCore(fixture.owner, roster);
+    session = opened.core.agent.session(sessionId);
+    expect((await Effect.runPromise(session.read())).attention).toEqual([
+      { ...drawerItem, extensionId: "attention-probe" },
+    ]);
+    expect(
+      readSessionInboxPage(fixture.owner, undefined).sessions[0],
+    ).toMatchObject({ state: "done" });
+  } finally {
+    await Effect.runPromise(opened.core.agent.close);
+    fixture.close();
+  }
+});
 
 it.each(["omitted", "revoked"])(
   "excludes %s owners after restart and restores their retained items",

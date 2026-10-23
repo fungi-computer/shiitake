@@ -102,6 +102,8 @@ function makeSession(
   return {
     address: "test://shiitake/sessions/demo-session",
     command: overrides.command ?? commandResult,
+    withdraw:
+      overrides.withdraw ?? (() => Promise.resolve({ status: "unknown" })),
     abort: overrides.abort ?? (() => Promise.resolve()),
     send:
       overrides.send ??
@@ -110,6 +112,7 @@ function makeSession(
       overrides.cancel ??
       ((input) =>
         Promise.resolve({ status: "accepted", commandId: input.commandId })),
+    latestPending: overrides.latestPending ?? (() => Promise.resolve(null)),
     modelPreference: overrides.modelPreference ?? {
       read: () => Promise.resolve(null),
       set: () => Promise.resolve(),

@@ -78,6 +78,7 @@ it("rebuilds named prompt sections for each model request and retains the exact 
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: (model, context, options) => {
             const system = context.messages[0];
             if (system?.role !== "system")
@@ -175,6 +176,7 @@ it.each([
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: (model, context, options) => {
               const system = context.messages[0];
               if (system?.role !== "system")

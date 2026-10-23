@@ -66,6 +66,7 @@ import {
   readSessionModelPreference,
   readSessionReplayPage,
   readSessionInbox,
+  readLatestPendingPrompt,
   createSession,
   deleteSession,
   deliverSessionGrants,
@@ -73,6 +74,8 @@ import {
   setSessionModelPreference,
   setSessionTitle,
   type GrantsDelivery,
+  readAdmissionIdentity,
+  assertAdmissionIdentity,
 } from "./woodstock/index.js";
 
 /** Generic Agent-scope extension controls over the runtime's one call door. */
@@ -142,7 +145,7 @@ function readSessionWithContext(
       ),
     ),
     Effect.flatMap((snapshot) =>
-      readSessionContext(options, runtime, sessionId).pipe(
+      readSessionContext(options, sessionId).pipe(
         Effect.map((context) => withContext(snapshot, context)),
       ),
     ),
@@ -323,16 +326,21 @@ function subscriptionFrames(
                 currentSessionActivity(options, runtime, sessionId),
               ),
               Effect.flatMap((activity) => {
-                if (
-                  signal === "progress" &&
-                  state.delivery === "live" &&
-                  activity.progress !== null
-                ) {
+                if (signal === "progress" && state.delivery === "live") {
                   return Effect.succeed<SubscriptionStep>([
                     [
+                      ...(activity.progress === null
+                        ? []
+                        : [
+                            {
+                              kind: "progress" as const,
+                              progress: activity.progress,
+                              activity: activity.facts,
+                            },
+                          ]),
                       {
-                        kind: "progress",
-                        progress: activity.progress,
+                        kind: "tool_output",
+                        toolOutput: activity.toolOutput,
                         activity: activity.facts,
                       },
                     ],
@@ -360,7 +368,10 @@ function subscriptionFrames(
 
                       const latestCursor = page.frames
                         .flatMap((frame) =>
-                          frame.kind === "progress" ? [] : [frame.cursor],
+                          frame.kind === "progress" ||
+                          frame.kind === "tool_output"
+                            ? []
+                            : [frame.cursor],
                         )
                         .at(-1);
                       const next: SubscriptionState = {
@@ -371,7 +382,7 @@ function subscriptionFrames(
                       // Every update carries the context use it settles on.
                       return (
                         page.frames.some((frame) => frame.kind === "update")
-                          ? readSessionContext(options, runtime, sessionId)
+                          ? readSessionContext(options, sessionId)
                           : Effect.succeed(undefined)
                       ).pipe(
                         Effect.map((context): SubscriptionStep => [
@@ -542,6 +553,21 @@ function cancelRequestedSession(
   meta: Json | undefined,
 ): Effect.Effect<CancelResult, ShiitakeError> {
   return runtime.assertOpen.pipe(
+    Effect.andThen(
+      sessionOwnerOperation(runtime, sessionId, (decoded) => {
+        if (options.meta?.identityPath !== undefined && meta !== undefined)
+          assertAdmissionIdentity(
+            options.store,
+            decoded,
+            input.commandId,
+            readAdmissionIdentity(
+              options.store,
+              options.meta.identityPath,
+              meta,
+            ),
+          );
+      }),
+    ),
     Effect.andThen(
       cancelSession(
         options.store,
@@ -807,6 +833,10 @@ export function openCoordinator(
     }
     return Object.freeze({
       command,
+      withdraw: (requestId: string) =>
+        runtime.assertOpen.pipe(
+          Effect.andThen(runtime.door.withdraw(sessionId, requestId)),
+        ),
       abort: command({ type: "abort" }),
       send: (
         text: string,
@@ -844,6 +874,19 @@ export function openCoordinator(
         ),
       cancel: (input: { commandId: string; onlyIfPending?: boolean }) =>
         command({ type: "cancel", ...input }),
+      latestPending: sessionOwnerOperation(runtime, sessionId, (decoded) =>
+        readLatestPendingPrompt(
+          options.store,
+          decoded,
+          options.meta?.identityPath === undefined || meta === undefined
+            ? undefined
+            : readAdmissionIdentity(
+                options.store,
+                options.meta.identityPath,
+                meta,
+              ),
+        ),
+      ),
       modelPreference: Object.freeze({
         read: sessionOwnerOperation(runtime, sessionId, (decoded) =>
           readSessionModelPreference(options.store, decoded),
@@ -932,6 +975,7 @@ export function openCoordinator(
   });
   return Object.freeze({
     ...agent,
+    prepareConfiguration: runtime.prepareConfiguration,
     grants: Object.freeze({
       // A synchronous owner write: a delivery lands before any other work
       // can interleave, so the very next tool call reads it.

@@ -18,8 +18,8 @@ import { defineIdFamily, type CairnId } from "@fungi.computer/cairn/id";
 import { z } from "zod";
 import {
   authorMeta,
+  type AuthorMeta,
   FungiMessageMetaSchema,
-  type FungiAuthor,
 } from "@fungi.computer/agar/agents";
 
 const identity = z.string().min(1).max(256);
@@ -110,6 +110,7 @@ const agentRowSchema = z.lazy(() =>
     agent_id: z.string(),
     name: z.string(),
     actor_user_id: z.string(),
+    created_by: z.string().min(1).max(256).nullable(),
     created_at: z.number().int().nonnegative(),
     updated_at: z.number().int().nonnegative(),
   }),
@@ -131,6 +132,7 @@ export const agentCreationSchema = z.lazy(() =>
     name: z.string().min(1).max(256),
     requestId: z.string().min(1).max(256),
     configuration: z.string().min(1).max(4096),
+    createdBy: z.string().min(1).max(256).nullable().optional(),
   }),
 );
 /** One idempotent directory reservation. */
@@ -148,6 +150,8 @@ export type AgentRename = z.infer<typeof agentRenameSchema>;
 /** One durable Agent directory record. */
 export type DirectoryAgent = Readonly<{
   agentId: AgentId;
+  /** The ordinary Agent that created this Agent; never the credential owner. */
+  createdBy: string | null;
   name: string;
   createdAt: number;
   updatedAt: number;
@@ -176,6 +180,7 @@ function asDirectoryAgent(row: unknown): DirectoryAgent {
   if (!agent.ok) throw new DirectoryError(503, "partial_init");
   return Object.freeze({
     agentId: agent.value,
+    createdBy: parsed.data.created_by,
     name: parsed.data.name,
     createdAt: parsed.data.created_at,
     updatedAt: parsed.data.updated_at,
@@ -212,6 +217,8 @@ export function createAgentDirectory(sql: WatchdogSqliteOwner["sql"]) {
       if (!agentId.ok) throw new DirectoryError(503, "partial_init");
       const existing = readStored(agentId.value);
       if (existing === null) throw new DirectoryError(503, "partial_init");
+      if (existing.createdBy !== (command.createdBy ?? null))
+        throw new DirectoryError(409, "request_conflict");
       return existing;
     }
 
@@ -250,6 +257,7 @@ export function createAgentDirectory(sql: WatchdogSqliteOwner["sql"]) {
       now,
       command.requestId,
       command.configuration,
+      command.createdBy ?? null,
     );
     const created = readStored(agentId);
     if (created === null) throw new DirectoryError(503, "partial_init");
@@ -355,6 +363,7 @@ export type AgentDelegationTask = z.infer<typeof agentDelegationTaskSchema>;
 /** Exact host facts encoded over internal transports, without transcript content. */
 export const commandSettlementSchema: Schema.Codec<CommandSettlement> =
   Schema.Struct({
+    acceptedSender: Schema.NullOr(Schema.String),
     terminal: SessionTerminalSchema,
     content: Schema.String,
     usage: Schema.Array(
@@ -403,13 +412,13 @@ export type AuthenticatedDelegationReply = Readonly<{
 
 /** The host metadata a delegated send carries, as JSON. */
 export type DelegationSendMeta = {
-  author: FungiAuthor;
+  author: AuthorMeta["author"];
   delegation?: { ancestors: string[]; maxDepth: number };
 };
 
 /** The host metadata on one authenticated reply line, as JSON. */
 export type DelegationReplyMeta = Readonly<{
-  author: FungiAuthor;
+  author: AuthorMeta["author"];
   delegation: Readonly<{
     ancestors: readonly string[];
     maxDepth: number;
@@ -449,10 +458,10 @@ export async function delegationProvenance(
  * stay on that reply's own line and never travel onward.
  */
 export function delegationSendMeta(
-  sender: FungiAuthor,
+  sender: Readonly<{ id: string; name: string }>,
   invocationMeta?: Json,
 ): DelegationSendMeta {
-  const author = authorMeta(sender);
+  const author = authorMeta({ ...sender, kind: "agent" });
   const inherited =
     invocationMeta === undefined
       ? undefined
@@ -477,7 +486,11 @@ export function delegationReplyMeta(
   replierName: string,
 ): DelegationReplyMeta {
   return {
-    ...authorMeta({ id: delegation.reply.agentId, name: replierName }),
+    ...authorMeta({
+      id: delegation.reply.agentId,
+      name: replierName,
+      kind: "agent",
+    }),
     delegation: {
       ancestors: [...delegation.ancestors],
       maxDepth: delegation.maxDepth,
@@ -502,11 +515,24 @@ const decodeMail = Schema.decodeUnknownSync(
 );
 
 /**
- * Hosted BirdDog submission and Pending observation. The durable row freezes
+ * Delegated work an owner still waits on; `unreadable` says why its state
+ * could not be read, when it could not.
+ */
+export type OutstandingDelegation = Readonly<{
+  agentId: string;
+  sessionId: string;
+  commandId: string;
+  unreadable?: string;
+}>;
+
+/**
+ * BirdDog submission and reply authentication. The durable row freezes
  * correspondence before transport; an ambiguous delivery reuses that exact mail.
  * Shiitake owns work deduplication, execution and settlement; Post owns replies.
  */
-export function createFleetDelegation(options: FleetDelegationOptions) {
+export function createFleetCorrespondence(
+  options: Omit<FleetDelegationOptions, "readSettlement">,
+) {
   const store = createFleetDelegationStore(options.storage);
   function read(requestId: string) {
     const row = store.read(requestId);
@@ -531,7 +557,8 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       : undefined;
     const ancestors = inherited?.ancestors ?? [];
     const maxDepth = Math.min(grant.maxDepth ?? 8, inherited?.maxDepth ?? 8);
-    if (ancestors.includes(task.agentId) || parent.agentId === task.agentId)
+    // Ancestry bounds work depth; it does not remove authorized peer targets.
+    if (parent.agentId === task.agentId)
       throw new AgentGrantError("delegation_loop");
     if (ancestors.length >= maxDepth)
       throw new AgentGrantError("delegation_depth");
@@ -585,28 +612,6 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
     store.recordReceipt(task.requestId, JSON.stringify(receipt));
     return receipt;
   }
-  async function delegate(
-    grant: AgentGrant,
-    task: AgentDelegationTask,
-  ): Promise<Pending | AgentDelegationOutcome> {
-    const accepted = await start(grant, task);
-    const row = read(task.requestId);
-    if (row === undefined) throw new DirectoryError(503, "partial_init");
-    const mail = decodeMail(row.mail);
-    const settlement = await options.readSettlement(
-      mail.to.agentId,
-      mail.to.sessionId,
-      accepted.commandId,
-    );
-    return settlement === undefined
-      ? pending(1000)
-      : {
-          kind: "settled",
-          agentId: mail.to.agentId,
-          sessionId: mail.to.sessionId,
-          ...settlement,
-        };
-  }
   /**
    * Authenticate one arriving reply against the frozen mail this owner sent.
    * It must be BirdDog's single reply key for that mail, mirror its sender and
@@ -654,11 +659,87 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       reply,
     };
   }
+  /** Read only the existing acceptance receipt; do not reserve or deliver mail. */
+  function receipt(requestId: string): Accepted | undefined {
+    const encoded = read(requestId)?.receipt;
+    return encoded === undefined || encoded === null
+      ? undefined
+      : parseAccepted(encoded);
+  }
   return {
-    /** Authenticate a reply against its frozen mail and restore the caller's path. */
-    authenticateReply,
-    /** Submit once and return the existing Shiitake admission receipt. */
+    /** Submit frozen mail or reuse its recorded Session admission receipt. */
     start,
+    /** Match a reply to frozen mail and restore the caller's delegation path. */
+    authenticateReply,
+    /** Read an existing acceptance receipt without reserving or delivering mail. */
+    receipt,
+  };
+}
+
+/** Local hosts may observe exact work directly; remote correspondence never pulls it. */
+export function createFleetDelegation(options: FleetDelegationOptions) {
+  const correspondence = createFleetCorrespondence(options);
+  const store = createFleetDelegationStore(options.storage);
+  async function delegate(
+    grant: AgentGrant,
+    task: AgentDelegationTask,
+  ): Promise<Pending | AgentDelegationOutcome> {
+    const accepted = await correspondence.start(grant, task);
+    const raw = store.read(task.requestId);
+    if (raw === undefined) throw new DirectoryError(503, "partial_init");
+    const mail = decodeMail(delegationRowSchema.parse(raw).mail);
+    const settlement = await options.readSettlement(
+      mail.to.agentId,
+      mail.to.sessionId,
+      accepted.commandId,
+    );
+    return settlement === undefined
+      ? pending(1000)
+      : {
+          kind: "settled",
+          agentId: mail.to.agentId,
+          sessionId: mail.to.sessionId,
+          ...settlement,
+        };
+  }
+  /**
+   * The newest delegation this owner sent whose work has not settled at its
+   * target, so the owner is still waiting for a reply; undefined when none.
+   */
+  async function outstanding(): Promise<OutstandingDelegation | undefined> {
+    for (const raw of store.sent()) {
+      const row = delegationRowSchema.parse(raw);
+      if (row.receipt === null) continue;
+      const { to } = decodeMail(row.mail);
+      const { commandId } = parseAccepted(row.receipt);
+      const target = {
+        agentId: to.agentId,
+        sessionId: to.sessionId,
+        commandId,
+      };
+      let settlement: CommandSettlement | undefined;
+      try {
+        settlement = await options.readSettlement(
+          to.agentId,
+          to.sessionId,
+          commandId,
+        );
+      } catch (cause) {
+        // Work whose state cannot be read is still owed; say why.
+        return {
+          ...target,
+          unreadable: cause instanceof Error ? cause.message : "unreadable",
+        };
+      }
+      if (settlement === undefined) return target;
+    }
+    return undefined;
+  }
+  return {
+    /** The delegated work this owner still waits on, if any. */
+    outstanding,
+    /** Authenticate a reply against its frozen mail and restore the caller's path. */
+    ...correspondence,
     /** Submit or poll the exact turn, yielding Agar Pending until settled. */
     delegate,
   };

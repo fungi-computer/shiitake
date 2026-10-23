@@ -12,7 +12,7 @@ export async function bookmarkRoundTrip(
     extensions,
     script: [
       callTool("bookmarks.add", {
-        url: "https://shiitake.shiit.app/",
+        url: "https://docs.fungi.computer/shiitake/",
         title: "Shiitake docs",
       }),
       "Saved.",

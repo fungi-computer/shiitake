@@ -15,12 +15,15 @@ import {
 } from "../src/internal/woodstock/session-entry.js";
 import type { SqliteOwner } from "../src/internal/contracts.js";
 import type { ClientReadOptions } from "../src/internal/client-boundary.js";
+import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
+import { writeLargeSession } from "./fixtures/large-session.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
 const digest = "a".repeat(64);
 const contract = { core: digest, extensions: [] } as const;
 const idleActivity = {
   facts: idleFacts,
+  toolOutput: [],
   progress: null,
 };
 
@@ -77,17 +80,13 @@ function appendCompaction(
   return woodstock.appendSessionEntry(owner, {
     sessionId,
     id: sessionIds.fact.generate(),
-    entry: {
-      kind: "compaction",
+    entry: compactionEntryFixture({
       workId: sessionIds.work.generate(),
-      trigger: "threshold",
-      firstKeptEntryId,
+      head: firstKeptEntryId,
       summary,
-      tokensBefore: 100,
-      tokensAfter: 40,
       usage,
       contextRevision: expectedLeafId,
-    },
+    }),
   });
 }
 
@@ -140,6 +139,8 @@ it("projects full history with one compaction marker while the model keeps its b
     ]);
     expect(snapshot.hasMore).toBe(false);
     expect(snapshot.oldestCursor).toBeNull();
+    // The summary is model context only; clients never receive it.
+    expect(JSON.stringify(snapshot)).not.toContain("summary of m1 and m2");
 
     // The model's context is unaffected: it still resumes at m3, never m1/m2.
     const path = woodstock.readSelectedPath(fixture.owner, { sessionId });
@@ -347,6 +348,37 @@ it("keeps a stable generation across compaction so a pre-compaction replay curso
       idleActivity,
     );
     expect(replay.kind).toBe("page");
+  } finally {
+    fixture.close();
+  }
+});
+
+it("resolves compaction markers kept inside the page without walking the lineage again", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    const sessionId = "in-page-compaction-heads";
+    const session = writeLargeSession(fixture.owner, {
+      sessionId,
+      turns: 12,
+      compactEvery: 4,
+      keepTurns: 2,
+      textBytes: 16,
+    });
+
+    const before = fixture.ownerOperations();
+    const snapshot = readClientSnapshot(
+      fixture.owner,
+      sessionId,
+      { limit: 200 },
+      idleActivity,
+    );
+    const operations = fixture.ownerOperations() - before;
+
+    expect(snapshot.compactions).toHaveLength(session.compactions.length);
+    expect(snapshot.hasMore).toBe(false);
+    // Exactly the reads one page needs: no lineage lookup per in-page head.
+    expect(operations).toBe(24);
   } finally {
     fixture.close();
   }

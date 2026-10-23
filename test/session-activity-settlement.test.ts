@@ -23,6 +23,7 @@ it("a live watch observes idle once Watchdog settles the replied work", async ()
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -88,7 +89,7 @@ it("a live watch observes idle once Watchdog settles the replied work", async ()
   }
 });
 
-it("publishes the settled provider cause as typed Session state", async () => {
+it("publishes failure uncertainty with observed model identity as Session state", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const runtime = createCompatibilityRuntimeHost();
   const faux = fauxModel([]);
@@ -108,6 +109,7 @@ it("publishes the settled provider cause as typed Session state", async () => {
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -128,11 +130,16 @@ it("publishes the settled provider cause as typed Session state", async () => {
     });
     await runtime.runNext();
     const snapshot = await session.read();
-    const failed = snapshot.terminals.at(-1);
+    expect(snapshot.terminals).toHaveLength(1);
+    const failed = snapshot.terminals[0];
     expect(failed).toMatchObject({
       outcome: "failed",
-      diagnostic: "Model rejected this run",
     });
+    expect(failed?.diagnostic).toContain("reason_unavailable: run=mule_run_");
+    expect(failed?.diagnostic).toContain("provider=faux");
+    expect(failed?.diagnostic).toContain(`model=${faux.model.id}`);
+    expect(failed?.diagnostic).not.toContain("failed-model");
+    expect(failed?.diagnostic).not.toContain("Model rejected this run");
     // The first model choice predates the failed run.
     expect(snapshot.activity.lastModelChoiceSequence).toBeLessThan(
       failed?.sequence ?? 0,

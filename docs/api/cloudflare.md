@@ -78,6 +78,24 @@ Close owned resources before storage erasure; a cold owner has none.
 
 `Promise`\<`void`\>
 
+##### hasStoredSession()
+
+```ts
+hasStoredSession(sessionId): Promise<boolean>;
+```
+
+Indexed owner-local existence check; corrupt stored Sessions remain unavailable.
+
+###### Parameters
+
+| Parameter   | Type     |
+| ----------- | -------- |
+| `sessionId` | `string` |
+
+###### Returns
+
+`Promise`\<`boolean`\>
+
 ##### readInboxChanges()
 
 ```ts
@@ -108,6 +126,36 @@ Bounded strict-after read of this Agent's changed inbox rows.
 [`SessionSummaryRow`](client.md#sessionsummaryrow) \| `Readonly`\<\{
 `sessionId`: `string`; `deleted`: `true`; \}\>)[]; `through`: `number`;
 `latest`: `number`; \}\>\>
+
+##### readColdSessions()
+
+```ts
+readColdSessions(request): Promise<Readonly<{
+  sessions: readonly Readonly<{
+     sessionId: string;
+     bytes: number;
+     lastActivityAt: number;
+     idle: boolean;
+  }>[];
+  next?: string;
+}>>;
+```
+
+One bounded, read-only page of Sessions with stored bytes, last activity and an
+idle flag, coldest first. The store keeper's only view of cold Sessions; it
+carries no SQL, transaction or write.
+
+###### Parameters
+
+| Parameter | Type                                                        |
+| --------- | ----------------------------------------------------------- |
+| `request` | [`ColdSessionPageRequest`](index.md#coldsessionpagerequest) |
+
+###### Returns
+
+`Promise`\<`Readonly`\<\{ `sessions`: readonly `Readonly`\<\{ `sessionId`:
+`string`; `bytes`: `number`; `lastActivityAt`: `number`; `idle`: `boolean`;
+\}\>[]; `next?`: `string`; \}\>\>
 
 ##### readInboxRevision()
 
@@ -251,7 +299,7 @@ DurableObject.alarm;
 fetch(request): Promise<Response>;
 ```
 
-Route an authenticated client request through the owner.
+Route an authenticated client request through the host's routes, then the owner.
 
 ###### Parameters
 
@@ -279,6 +327,9 @@ type CloudflareShiitakeState = Readonly<{
     Pick<DurableObjectStorage, "getAlarm" | "setAlarm" | "deleteAlarm"> &
     object;
   waitUntil: (task) => void;
+  id?: Readonly<{
+    toString: () => string;
+  }>;
 }>;
 ```
 
@@ -353,14 +404,13 @@ type CloudflareShiitakeOptions = Readonly<{
   model: ModelSource;
   instructions: InstructionSource;
   tools?: readonly [] | CloudflareShiitakeTools;
-  storageBudget?: StorageBudget;
+  storagePressure?: StoragePressureCheck;
   compaction?: CompactionOptions;
   extensions: ExtensionRosterV0;
   initialize?: (agent) => Promise<void>;
   hostWork?: readonly CloudflareHostWork[];
   hostJobs?: CloudflareHostJobs;
   mailRoom?: BirdDogEffect;
-  browser?: (sessionId) => BrowserHost;
   acp?: (agent) => Promise<CloudflareShiitakeAcpServer>;
 }>;
 ```
@@ -382,27 +432,10 @@ type CloudflareShiitake = ShiitakeOwnerAgent &
     alarm: () => Promise<void>;
     activeSessions: () => Promise<readonly string[]>;
     abortActive: () => Promise<void>;
-    browser: Readonly<{
-      fetch: (request) => Promise<Response>;
-      clear: () => Promise<void>;
-    }>;
   }>;
 ```
 
 Cloudflare host lifecycle; alarm forwarding stays outside the neutral client.
-
----
-
-### BrowserHost
-
-```ts
-type BrowserHost = Readonly<{
-  modules: readonly ModuleRegistration[];
-  fetch: (request) => Promise<Response>;
-}>;
-```
-
-The maintained browser transport and its Session-bound tool descriptors.
 
 ---
 
@@ -459,16 +492,18 @@ delivers grants.
 ### makeCloudflareShiitake()
 
 ```ts
-function makeCloudflareShiitake(state, options): Promise<CloudflareShiitake>;
+function makeCloudflareShiitake(unnamed, options): Promise<CloudflareShiitake>;
 ```
 
-Construct Shiitake over one Durable Object's SQLite and lifetime.
+Open Shiitake over one Durable Object's storage. It resolves once the runtime is
+started and `initialize` has run; if `initialize` throws, the runtime is closed
+and the error is rethrown.
 
 #### Parameters
 
 | Parameter | Type                                                      |
 | --------- | --------------------------------------------------------- |
-| `state`   | [`CloudflareShiitakeState`](#cloudflareshiitakestate)     |
+| `unnamed` | [`CloudflareShiitakeState`](#cloudflareshiitakestate)     |
 | `options` | [`CloudflareShiitakeOptions`](#cloudflareshiitakeoptions) |
 
 #### Returns
@@ -476,6 +511,24 @@ Construct Shiitake over one Durable Object's SQLite and lifetime.
 `Promise`\<[`CloudflareShiitake`](#cloudflareshiitake)\>
 
 ## References
+
+### ColdSessionPage
+
+Re-exports [ColdSessionPage](index.md#coldsessionpage)
+
+---
+
+### ColdSessionPageRequest
+
+Re-exports [ColdSessionPageRequest](index.md#coldsessionpagerequest)
+
+---
+
+### ColdSessionRow
+
+Re-exports [ColdSessionRow](index.md#coldsessionrow)
+
+---
 
 ### GrantsDelivery
 

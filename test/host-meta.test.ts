@@ -7,7 +7,12 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Hono } from "hono";
 import { expect, it } from "vitest";
 
-import { createShiitakeClient } from "../src/client.js";
+import {
+  createShiitakeClient,
+  parseSessionSnapshot,
+  type PromptCommand,
+  type SendOptions,
+} from "../src/client.js";
 import {
   createShiitakeHttpRoutes,
   type ShiitakeHttpEnv,
@@ -59,6 +64,48 @@ async function openAgent(
 
 const ada = { author: { id: "user_ada", name: "Ada" }, channel: "web" };
 
+it("selects the newest own pending prompt beyond the oldest-first page, including images and steers", async () => {
+  const { agent, close } = await openAgent({
+    schema: HostMeta,
+    identityPath: "$.author.id",
+  });
+  try {
+    const session = agent.withMeta(ada).session("recall-newest");
+    for (let index = 0; index < 205; index += 1)
+      await session.send(`older ${String(index)}`, {
+        requestId: `older-${String(index)}`,
+        delivery: "followUp",
+      });
+    const images: SendOptions["images"] = [
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+    ];
+    const last = await session.send("newest", {
+      requestId: "last",
+      delivery: "steer",
+      images,
+    });
+    await agent
+      .withMeta({ author: { id: "user_eve", name: "Ada" } })
+      .session("recall-newest")
+      .send("not yours", { requestId: "eve", delivery: "followUp" });
+    expect((await session.read()).pending.hasMore).toBe(true);
+    expect(await session.latestPending()).toEqual({
+      commandId: last.commandId,
+      requestId: "last",
+      text: "newest",
+      images,
+      delivery: "steer",
+      meta: ada,
+    });
+    expect(
+      await session.cancel({ commandId: last.commandId, onlyIfPending: true }),
+    ).toEqual(last);
+    expect((await session.latestPending())?.text).toBe("older 204");
+  } finally {
+    await close();
+  }
+});
+
 it("stores the host's metadata beside a prompt and returns it on read", async () => {
   const { agent, drain, close } = await openAgent({ schema: HostMeta });
   try {
@@ -79,6 +126,63 @@ it("stores the host's metadata beside a prompt and returns it on read", async ()
     ).toBe("Ada");
   } finally {
     await close();
+  }
+});
+
+it("checks immutable authorship on the raw command door and on cancellation replay, not display labels", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "recall-author-"));
+  const databasePath = join(directory, "agent.sqlite");
+  const eve = { author: { id: "user_eve", name: "Ada" } };
+  let host = await openAgent(
+    { schema: HostMeta, identityPath: "$.author.id" },
+    databasePath,
+  );
+  try {
+    const sessionId = "raw-cancel";
+    const accepted = await host.agent
+      .withMeta(ada)
+      .session(sessionId)
+      .send("private own work", {
+        requestId: "own-work",
+        delivery: "followUp",
+      });
+    const other = host.agent.withMeta(eve).session(sessionId);
+    expect(await other.latestPending()).toBeNull();
+    await expect(
+      other.command({
+        type: "cancel",
+        commandId: accepted.commandId,
+        onlyIfPending: true,
+      }),
+    ).rejects.toMatchObject({ boundary: "runtime", cause: "rejected" });
+    await expect(
+      other.cancel({ commandId: accepted.commandId }),
+    ).rejects.toMatchObject({ boundary: "runtime", cause: "rejected" });
+    expect((await host.agent.session(sessionId).read()).pending.total).toBe(1);
+    const own = host.agent.withMeta(ada).session(sessionId);
+    expect(
+      await own.cancel({ commandId: accepted.commandId, onlyIfPending: true }),
+    ).toEqual(accepted);
+    await host.close();
+    host = await openAgent(
+      { schema: HostMeta, identityPath: "$.author.id" },
+      databasePath,
+    );
+    await expect(
+      host.agent
+        .withMeta(eve)
+        .session(sessionId)
+        .cancel({ commandId: accepted.commandId, onlyIfPending: true }),
+    ).rejects.toMatchObject({ boundary: "runtime", cause: "rejected" });
+    expect(
+      await host.agent
+        .withMeta(ada)
+        .session(sessionId)
+        .cancel({ commandId: accepted.commandId, onlyIfPending: true }),
+    ).toEqual(accepted);
+  } finally {
+    await host.close();
+    rmSync(directory, { recursive: true });
   }
 });
 
@@ -174,7 +278,10 @@ it("carries metadata on operator lines", async () => {
 });
 
 it("takes metadata over HTTP only from host middleware, never from a request body", async () => {
-  const { agent, drain, close } = await openAgent({ schema: HostMeta });
+  const { agent, drain, close } = await openAgent({
+    schema: HostMeta,
+    identityPath: "$.author.id",
+  });
   const routes = createShiitakeHttpRoutes(
     (id, meta) =>
       (meta === undefined ? agent : agent.withMeta(meta)).session(id),
@@ -196,7 +303,14 @@ it("takes metadata over HTTP only from host middleware, never from a request bod
   });
   try {
     const sessionId = await client.createSession("meta-http");
-    await client.session(sessionId).send("hello", { requestId: "http" });
+    const accepted = await client
+      .session(sessionId)
+      .send("hello", { requestId: "http" });
+    expect(await client.session(sessionId).latestPending()).toMatchObject({
+      commandId: accepted.commandId,
+      text: "hello",
+      meta: ada,
+    });
     await drain();
     expect((await client.session(sessionId).read()).messages[0]?.meta).toEqual(
       ada,
@@ -344,6 +458,7 @@ it("stores an abort's metadata on its cancellation, through a restart", async ()
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -383,14 +498,32 @@ it("returns admitted host metadata on a pending prompt before execution", async 
   const { agent, close } = await openAgent({ schema: HostMeta });
   try {
     const sessionId = await agent.createSession("pending-meta");
-    await agent
+    const command: PromptCommand = {
+      type: "prompt",
+      requestId: "pending-meta",
+      delivery: "followUp",
+      text: "hello",
+      images: [{ type: "image", data: "aGk=", mimeType: "image/png" }],
+    };
+    const accepted = await agent
       .withMeta(ada)
       .session(sessionId)
-      .send("hello", { requestId: "pending-meta" });
+      .command(command);
     const snapshot = await agent.session(sessionId).read();
-    expect(snapshot.pending.prompts).toMatchObject([
-      { text: "hello", meta: ada },
-    ]);
+    const expected = [
+      {
+        commandId: accepted.commandId,
+        requestId: command.requestId,
+        text: command.text,
+        delivery: command.delivery,
+        images: command.images,
+        meta: ada,
+      },
+    ];
+    expect(snapshot.pending.prompts).toEqual(expected);
+    expect(
+      parseSessionSnapshot(JSON.stringify(snapshot)).pending.prompts,
+    ).toEqual(expected);
     expect(snapshot.messages).toEqual([]);
   } finally {
     await close();

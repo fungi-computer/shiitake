@@ -66,6 +66,7 @@ export function openRuntimeCore(
     });
     const owner: ShiitakeEffectOwner = Object.freeze({
       ...agent,
+      prepareConfiguration: runtime.prepareConfiguration,
       grants: coordinator.grants,
       withMeta: (meta) =>
         Object.freeze({

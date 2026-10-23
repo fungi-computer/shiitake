@@ -176,6 +176,7 @@ Input to [createAgentDirectory](#createagentdirectory)'s `rename`.
 ```ts
 type DirectoryAgent = Readonly<{
   agentId: AgentId;
+  createdBy: string | null;
   name: string;
   createdAt: number;
   updatedAt: number;
@@ -263,7 +264,7 @@ The host metadata a delegated send carries, as JSON.
 ##### author
 
 ```ts
-author: FungiAuthor;
+author: AuthorMeta["author"];
 ```
 
 ##### delegation?
@@ -290,7 +291,7 @@ maxDepth: number;
 
 ```ts
 type DelegationReplyMeta = Readonly<{
-  author: FungiAuthor;
+  author: AuthorMeta["author"];
   delegation: Readonly<{
     ancestors: readonly string[];
     maxDepth: number;
@@ -300,6 +301,22 @@ type DelegationReplyMeta = Readonly<{
 ```
 
 The host metadata on one authenticated reply line, as JSON.
+
+---
+
+### OutstandingDelegation
+
+```ts
+type OutstandingDelegation = Readonly<{
+  agentId: string;
+  sessionId: string;
+  commandId: string;
+  unreadable?: string;
+}>;
+```
+
+Delegated work an owner still waits on; `unreadable` says why its state could
+not be read, when it could not.
 
 ---
 
@@ -366,22 +383,24 @@ Operations explicitly admitted by the host.
 ### agentProvenanceSchema
 
 ```ts
-const agentProvenanceSchema: ZodObject<
-  {
-    actor: ZodString;
-    workflowRunId: ZodOptional<ZodString>;
-    toolCallInputDigest: ZodOptional<ZodString>;
-    session: ZodOptional<
-      ZodObject<
-        {
-          agentId: ZodString;
-          sessionId: ZodString;
-        },
-        $strict
-      >
-    >;
-  },
-  $strict
+const agentProvenanceSchema: ZodLazy<
+  ZodObject<
+    {
+      actor: ZodString;
+      workflowRunId: ZodOptional<ZodString>;
+      toolCallInputDigest: ZodOptional<ZodString>;
+      session: ZodOptional<
+        ZodObject<
+          {
+            agentId: ZodString;
+            sessionId: ZodString;
+          },
+          $strict
+        >
+      >;
+    },
+    $strict
+  >
 >;
 ```
 
@@ -392,40 +411,44 @@ Attribution supplied by the admitting host, without Team semantics.
 ### agentGrantSchema
 
 ```ts
-const agentGrantSchema: ZodObject<
-  {
-    agents: ZodUnion<readonly [ZodLiteral<"all">, ZodArray<ZodString>]>;
-    actions: ZodArray<
-      ZodEnum<{
-        send: "send";
-        read: "read";
-        create: "create";
-        manage: "manage";
-        delegate: "delegate";
-      }>
-    >;
-    expiresAt: ZodNumber;
-    provenance: ZodObject<
-      {
-        actor: ZodString;
-        workflowRunId: ZodOptional<ZodString>;
-        toolCallInputDigest: ZodOptional<ZodString>;
-        session: ZodOptional<
-          ZodObject<
-            {
-              agentId: ZodString;
-              sessionId: ZodString;
-            },
-            $strict
-          >
-        >;
-      },
-      $strict
-    >;
-    meta: ZodOptional<ZodJSONSchema>;
-    maxDepth: ZodOptional<ZodNumber>;
-  },
-  $strict
+const agentGrantSchema: ZodLazy<
+  ZodObject<
+    {
+      agents: ZodUnion<readonly [ZodLiteral<"all">, ZodArray<ZodString>]>;
+      actions: ZodArray<
+        ZodEnum<{
+          send: "send";
+          read: "read";
+          create: "create";
+          manage: "manage";
+          delegate: "delegate";
+        }>
+      >;
+      expiresAt: ZodNumber;
+      provenance: ZodLazy<
+        ZodObject<
+          {
+            actor: ZodString;
+            workflowRunId: ZodOptional<ZodString>;
+            toolCallInputDigest: ZodOptional<ZodString>;
+            session: ZodOptional<
+              ZodObject<
+                {
+                  agentId: ZodString;
+                  sessionId: ZodString;
+                },
+                $strict
+              >
+            >;
+          },
+          $strict
+        >
+      >;
+      meta: ZodOptional<ZodJSONSchema>;
+      maxDepth: ZodOptional<ZodNumber>;
+    },
+    $strict
+  >
 >;
 ```
 
@@ -448,13 +471,16 @@ Stable Agent identities, retained across host compositions.
 ### agentCreationSchema
 
 ```ts
-const agentCreationSchema: ZodObject<
-  {
-    name: ZodString;
-    requestId: ZodString;
-    configuration: ZodString;
-  },
-  $strict
+const agentCreationSchema: ZodLazy<
+  ZodObject<
+    {
+      name: ZodString;
+      requestId: ZodString;
+      configuration: ZodString;
+      createdBy: ZodOptional<ZodNullable<ZodString>>;
+    },
+    $strict
+  >
 >;
 ```
 
@@ -465,11 +491,13 @@ Stable replay input; configuration is an opaque host creation choice.
 ### agentRenameSchema
 
 ```ts
-const agentRenameSchema: ZodObject<
-  {
-    name: ZodString;
-  },
-  $strict
+const agentRenameSchema: ZodLazy<
+  ZodObject<
+    {
+      name: ZodString;
+    },
+    $strict
+  >
 >;
 ```
 
@@ -480,14 +508,16 @@ Owner-only rename input: an Agent's new display name.
 ### agentDelegationTaskSchema
 
 ```ts
-const agentDelegationTaskSchema: ZodObject<
-  {
-    requestId: ZodString;
-    agentId: ZodString;
-    sessionId: ZodOptional<ZodString>;
-    text: ZodString;
-  },
-  $strict
+const agentDelegationTaskSchema: ZodLazy<
+  ZodObject<
+    {
+      requestId: ZodString;
+      agentId: ZodString;
+      sessionId: ZodOptional<ZodString>;
+      text: ZodString;
+    },
+    $strict
+  >
 >;
 ```
 
@@ -557,17 +587,17 @@ together. Physical table names retain the existing Hub store layout.
 
 #### Returns
 
-| Name                      | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Default value                 | Description                                                                                                                            |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `readCreation()`          | (`grant`, `raw`) => \| `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\> \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                            | -                             | Resolve a matching creation receipt before host admission of a new reservation.                                                        |
-| `create()`                | (`grant`, `raw`) => \| \{ `agent`: `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>; `fact`: `null`; \} \| \{ `agent`: `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>; `fact`: \{ `kind`: `"created"`; `agentId`: `CairnId`\<`"agent"`, `"agent"`, `1`\>; `provenance`: \{ `actor`: `string`; `workflowRunId?`: `string`; `toolCallInputDigest?`: `string`; `session?`: \{ `agentId`: `string`; `sessionId`: `string`; \}; \}; \}; \} | -                             | Reserve an Agent once and return its committed lifecycle fact.                                                                         |
-| `read()`                  | (`grant`, `agentId`) => \| `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\> \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                        | -                             | Read one admitted Agent identity.                                                                                                      |
-| `list()`                  | (`grant`) => readonly `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>[]                                                                                                                                                                                                                                                                                                                                                                                                                                     | -                             | List only identities covered by the supplied grant.                                                                                    |
-| `remove()`                | (`grant`, `agentId`) => \| `Readonly`\<\{ `kind`: `"deleted"` \| `"created"`; `agentId`: `string`; `provenance`: \{ `actor`: `string`; `workflowRunId?`: `string`; `toolCallInputDigest?`: `string`; `session?`: \{ `agentId`: `string`; `sessionId`: `string`; \}; \}; \}\> \| `null`                                                                                                                                                                                                                                                                                            | -                             | Remove an identity while retaining its erasure address.                                                                                |
-| `rename()`                | (`grant`, `agentId`, `raw`) => [`DirectoryAgent`](#directoryagent)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | -                             | Rename an existing Agent; refuses a name already held by another one. Owner-only rename; refuses a name already held by another Agent. |
-| `readCreator()`           | (`grant`, `agentId`) => `string` \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | -                             | Read the host actor recorded at creation. The user who created an Agent; that user's own credentials follow it.                        |
-| `listErasureIds()`        | () => readonly `string`[]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | `store.listErasureIds`        | Enumerate retained addresses for host erasure.                                                                                         |
-| `erasureRosterComplete()` | () => `boolean`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | `store.erasureRosterComplete` | Whether the retained erasure roster covers this store.                                                                                 |
+| Name                      | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default value                 | Description                                                                                                                            |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `readCreation()`          | (`grant`, `raw`) => \| `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `createdBy`: `string` \| `null`; `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\> \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                             | -                             | Resolve a matching creation receipt before host admission of a new reservation.                                                        |
+| `create()`                | (`grant`, `raw`) => \| \{ `agent`: `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `createdBy`: `string` \| `null`; `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>; `fact`: `null`; \} \| \{ `agent`: `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `createdBy`: `string` \| `null`; `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>; `fact`: \{ `kind`: `"created"`; `agentId`: `CairnId`\<`"agent"`, `"agent"`, `1`\>; `provenance`: \{ `actor`: `string`; `workflowRunId?`: `string`; `toolCallInputDigest?`: `string`; `session?`: \{ `agentId`: `string`; `sessionId`: `string`; \}; \}; \}; \} | -                             | Reserve an Agent once and return its committed lifecycle fact.                                                                         |
+| `read()`                  | (`grant`, `agentId`) => \| `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `createdBy`: `string` \| `null`; `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\> \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                         | -                             | Read one admitted Agent identity.                                                                                                      |
+| `list()`                  | (`grant`) => readonly `Readonly`\<\{ `agentId`: [`AgentId`](#agentid); `createdBy`: `string` \| `null`; `name`: `string`; `createdAt`: `number`; `updatedAt`: `number`; \}\>[]                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | -                             | List only identities covered by the supplied grant.                                                                                    |
+| `remove()`                | (`grant`, `agentId`) => \| `Readonly`\<\{ `kind`: `"deleted"` \| `"created"`; `agentId`: `string`; `provenance`: \{ `actor`: `string`; `workflowRunId?`: `string`; `toolCallInputDigest?`: `string`; `session?`: \{ `agentId`: `string`; `sessionId`: `string`; \}; \}; \}\> \| `null`                                                                                                                                                                                                                                                                                                                                                              | -                             | Remove an identity while retaining its erasure address.                                                                                |
+| `rename()`                | (`grant`, `agentId`, `raw`) => [`DirectoryAgent`](#directoryagent)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | -                             | Rename an existing Agent; refuses a name already held by another one. Owner-only rename; refuses a name already held by another Agent. |
+| `readCreator()`           | (`grant`, `agentId`) => `string` \| `null`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | -                             | Read the host actor recorded at creation. The user who created an Agent; that user's own credentials follow it.                        |
+| `listErasureIds()`        | () => readonly `string`[]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | `store.listErasureIds`        | Enumerate retained addresses for host erasure.                                                                                         |
+| `erasureRosterComplete()` | () => `boolean`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `store.erasureRosterComplete` | Whether the retained erasure roster covers this store.                                                                                 |
 
 ---
 
@@ -619,12 +649,10 @@ that reply's own line and never travel onward.
 
 #### Parameters
 
-| Parameter         | Type                                    |
-| ----------------- | --------------------------------------- |
-| `sender`          | \{ `id`: `string`; `name`: `string`; \} |
-| `sender.id`       | `string`                                |
-| `sender.name?`    | `string`                                |
-| `invocationMeta?` | [`Json`](extensions.md#json)            |
+| Parameter         | Type                                                  |
+| ----------------- | ----------------------------------------------------- |
+| `sender`          | `Readonly`\<\{ `id`: `string`; `name`: `string`; \}\> |
+| `invocationMeta?` | [`Json`](extensions.md#json)                          |
 
 #### Returns
 
@@ -654,15 +682,40 @@ author, and the verified reply rides beside the caller's own path.
 
 ---
 
+### createFleetCorrespondence()
+
+```ts
+function createFleetCorrespondence(options): object;
+```
+
+BirdDog submission and reply authentication. The durable row freezes
+correspondence before transport; an ambiguous delivery reuses that exact mail.
+Shiitake owns work deduplication, execution and settlement; Post owns replies.
+
+#### Parameters
+
+| Parameter | Type                                                                              |
+| --------- | --------------------------------------------------------------------------------- |
+| `options` | `Omit`\<[`FleetDelegationOptions`](#fleetdelegationoptions), `"readSettlement"`\> |
+
+#### Returns
+
+| Name                  | Type                                                                                                                                                                                                                                                                                                                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`             | (`grant`, `raw`) => `Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>\>                                                                                                                                                                                                                      | Submit frozen mail or reuse its recorded Session admission receipt.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `authenticateReply()` | (`mail`) => \| `Readonly`\<\{ `ancestors`: readonly `string`[]; `maxDepth`: `number`; `reply`: \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; `agentId`: `string`; `sessionId`: `string`; \}; \}\> \| `undefined` | Match a reply to frozen mail and restore the caller's delegation path. Authenticate one arriving reply against the frozen mail this owner sent. It must be BirdDog's single reply key for that mail, mirror its sender and recipient exactly, carry BirdDog's settlement facts and, once the send's receipt is recorded, name that receipt's `commandId`. The result restores the caller's own delegation path and the verified reply; it never reads the reply's text or any settlement metadata. |
+| `receipt()`           | (`requestId`) => \| `Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\> \| `undefined`                                                                                                                                                                                                                    | Read an existing acceptance receipt without reserving or delivering mail. Read only the existing acceptance receipt; do not reserve or deliver mail.                                                                                                                                                                                                                                                                                                                                               |
+
+---
+
 ### createFleetDelegation()
 
 ```ts
 function createFleetDelegation(options): object;
 ```
 
-Hosted BirdDog submission and Pending observation. The durable row freezes
-correspondence before transport; an ambiguous delivery reuses that exact mail.
-Shiitake owns work deduplication, execution and settlement; Post owns replies.
+Local hosts may observe exact work directly; remote correspondence never pulls
+it.
 
 #### Parameters
 
@@ -672,11 +725,13 @@ Shiitake owns work deduplication, execution and settlement; Post owns replies.
 
 #### Returns
 
-| Name                  | Type                                                                                                                                                                                                                                                                                                                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `authenticateReply()` | (`mail`) => \| `Readonly`\<\{ `ancestors`: readonly `string`[]; `maxDepth`: `number`; `reply`: \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; `agentId`: `string`; `sessionId`: `string`; \}; \}\> \| `undefined` | Authenticate a reply against its frozen mail and restore the caller's path. Authenticate one arriving reply against the frozen mail this owner sent. It must be BirdDog's single reply key for that mail, mirror its sender and recipient exactly, carry BirdDog's settlement facts and, once the send's receipt is recorded, name that receipt's `commandId`. The result restores the caller's own delegation path and the verified reply; it never reads the reply's text or any settlement metadata. |
-| `start()`             | (`grant`, `raw`) => `Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>\>                                                                                                                                                                                                                      | Submit once and return the existing Shiitake admission receipt.                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `delegate()`          | (`grant`, `task`) => `Promise`\< \| `Readonly`\<\{ `kind`: `"pending"`; `retryAfterMs`: `number`; \}\> \| [`AgentDelegationOutcome`](#agentdelegationoutcome)\>                                                                                                                                                          | Submit or poll the exact turn, yielding Agar Pending until settled.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Name                  | Type                                                                                                                                                                                                                                                                                                                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start()`             | (`grant`, `raw`) => `Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>\>                                                                                                                                                                                                                      | Submit frozen mail or reuse its recorded Session admission receipt.                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `authenticateReply()` | (`mail`) => \| `Readonly`\<\{ `ancestors`: readonly `string`[]; `maxDepth`: `number`; `reply`: \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; `agentId`: `string`; `sessionId`: `string`; \}; \}\> \| `undefined` | Match a reply to frozen mail and restore the caller's delegation path. Authenticate one arriving reply against the frozen mail this owner sent. It must be BirdDog's single reply key for that mail, mirror its sender and recipient exactly, carry BirdDog's settlement facts and, once the send's receipt is recorded, name that receipt's `commandId`. The result restores the caller's own delegation path and the verified reply; it never reads the reply's text or any settlement metadata. |
+| `receipt()`           | (`requestId`) => \| `Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\> \| `undefined`                                                                                                                                                                                                                    | Read an existing acceptance receipt without reserving or delivering mail. Read only the existing acceptance receipt; do not reserve or deliver mail.                                                                                                                                                                                                                                                                                                                                               |
+| `outstanding()`       | () => `Promise`\< \| `Readonly`\<\{ `agentId`: `string`; `sessionId`: `string`; `commandId`: `string`; `unreadable?`: `string`; \}\> \| `undefined`\>                                                                                                                                                                    | The delegated work this owner still waits on, if any. The newest delegation this owner sent whose work has not settled at its target, so the owner is still waiting for a reply; undefined when none.                                                                                                                                                                                                                                                                                              |
+| `delegate()`          | (`grant`, `task`) => `Promise`\< \| `Readonly`\<\{ `kind`: `"pending"`; `retryAfterMs`: `number`; \}\> \| [`AgentDelegationOutcome`](#agentdelegationoutcome)\>                                                                                                                                                          | Submit or poll the exact turn, yielding Agar Pending until settled.                                                                                                                                                                                                                                                                                                                                                                                                                                |
 
 ---
 
@@ -697,10 +752,10 @@ checks a fresh supplied grant and releases its transport without stopping work.
 
 #### Returns
 
-| Name       | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Description                                                              |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `list()`   | (`grant`, `agentId`, `after?`) => `Promise`\<`Readonly`\<\{ `sessions`: readonly [`SessionSummaryRow`](client.md#sessionsummaryrow)[]; `next`: `string` \| `undefined`; \}\>\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Enumerate existing Sessions through the owner's bounded cursor.          |
-| `read()`   | (`grant`, `agentId`, `sessionId`) => `Promise`\<`Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly `Readonly`\<\{ `meta?`: [`Json`](extensions.md#json); `origin?`: `Readonly`\<\{ `extensionId`: ...; `correlation`: ...; \}\>; `id`: `string`; `sequence`: `number`; `commandId`: `string` \| `null`; `value`: `Message`; \}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`; `diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `tokensBefore`: `number`; `tokensAfter`: `number` \| `null`; `trigger`: [`SessionCompactionTrigger`](client.md#sessioncompactiontrigger) \| `null`; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `trigger`: [`SessionCompactionTrigger`](client.md#sessioncompactiontrigger); `result`: `"failed"` \| `"nothing_to_compact"`; `diagnostic`: `string` \| `null`; \}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`: [`SessionPendingPrompts`](client.md#sessionpendingprompts); `activity`: [`SessionActivity`](client.md#sessionactivity); `progress`: \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `extensions`: [`SessionExtensionSlots`](client.md#sessionextensionslots); `attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`: `number` \| `null`; \}\>; \}\>\> | Open the exact saved conversation without creating work.                 |
-| `create()` | (`grant`, `agentId`, `requestId`) => `Promise`\<`string`\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Create a Session once under the caller's replay identity.                |
-| `remove()` | (`grant`, `agentId`, `sessionId`) => `Promise`\<`boolean`\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Remove a Session through its runtime owner.                              |
-| `send()`   | (`grant`, `agentId`, `sessionId`, `message`) => `Promise`\<\{ `status`: `"accepted"`; `commandId`: `string`; `sessionId`: `string`; \}\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | Send once; an omitted Session is created under the same replay identity. |
+| Name       | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Description                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `list()`   | (`grant`, `agentId`, `after?`) => `Promise`\<`Readonly`\<\{ `sessions`: readonly [`SessionSummaryRow`](client.md#sessionsummaryrow)[]; `next`: `string` \| `undefined`; \}\>\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Enumerate existing Sessions through the owner's bounded cursor.          |
+| `read()`   | (`grant`, `agentId`, `sessionId`) => `Promise`\<`Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly `Readonly`\<\{ `requestId?`: `string`; `meta?`: [`Json`](extensions.md#json); `data?`: [`Json`](extensions.md#json); `origin?`: `Readonly`\<\{ `extensionId`: ...; `correlation`: ...; \}\>; `id`: `string`; `sequence`: `number`; `commandId`: `string` \| `null`; `value`: [`ModelMessage`](client.md#modelmessage); \}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`; `diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `tokensBefore`: `number`; `tokensAfter`: `number` \| `null`; `trigger`: [`SessionCompactionTrigger`](client.md#sessioncompactiontrigger) \| `null`; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `trigger`: [`SessionCompactionTrigger`](client.md#sessioncompactiontrigger); `result`: `"failed"` \| `"nothing_to_compact"` \| `"stale"` \| `"insufficient"`; `diagnostic`: `string` \| `null`; \}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`: [`SessionPendingPrompts`](client.md#sessionpendingprompts); `activity`: [`SessionActivity`](client.md#sessionactivity); `progress`: \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`; `revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`: `number`; \}\>[]; `extensions`: [`SessionExtensionSlots`](client.md#sessionextensionslots); `attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`: `number` \| `null`; \}\>; \}\>\> | Open the exact saved conversation without creating work.                 |
+| `create()` | (`grant`, `agentId`, `requestId`) => `Promise`\<`string`\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | Create a Session once under the caller's replay identity.                |
+| `remove()` | (`grant`, `agentId`, `sessionId`) => `Promise`\<`boolean`\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | Remove a Session through its runtime owner.                              |
+| `send()`   | (`grant`, `agentId`, `sessionId`, `message`) => `Promise`\<\{ `status`: `"accepted"`; `commandId`: `string`; `sessionId`: `string`; \}\>                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Send once; an omitted Session is created under the same replay identity. |

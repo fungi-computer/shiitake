@@ -10,7 +10,7 @@ await test("the model and a person both save links the client can draw", async (
   const rows = await bookmarkRoundTrip();
   assert.deepEqual(
     rows.map((row) => row.title),
-    ["Fungi", "Shiitake docs"],
+    ["Shiitake docs", "Fungi"],
   );
 });
 

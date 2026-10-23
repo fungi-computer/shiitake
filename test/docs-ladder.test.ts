@@ -24,7 +24,7 @@ it("page 1: the prompt section reaches the model", async () => {
 it("page 2: the model's tool call returns the link's host", async () => {
   const snapshot = await modelToolRun();
   expect(textOf(snapshot.messages.at(-2)?.value)).toBe(
-    '{"ok":true,"host":"shiitake.shiit.app"}',
+    '{"ok":true,"host":"docs.fungi.computer"}',
   );
   expect(textOf(snapshot.messages.at(-1)?.value)).toBe("That link is fine.");
 });
@@ -42,7 +42,7 @@ it("page 4: the Session projection shows the saved link", async () => {
     status: "running",
     value: [
       {
-        url: "https://shiitake.shiit.app/",
+        url: "https://docs.fungi.computer/shiitake/",
         title: "Shiitake docs",
         sessionId: "reading",
       },
@@ -59,8 +59,8 @@ it("page 5: the model's tool and a person's command share one handler", async ()
   });
   expect(snapshot.extensions.bookmarks).toMatchObject({
     value: [
-      { title: "Fungi", sessionId: "reading" },
       { title: "Shiitake docs", sessionId: "reading" },
+      { title: "Fungi", sessionId: "reading" },
     ],
   });
 });

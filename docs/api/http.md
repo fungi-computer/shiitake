@@ -86,6 +86,8 @@ function createShiitakeHttpRoutes(
     object &
     object &
     object &
+    object &
+    object &
     object,
   "/",
   "/sessions/:sessionId/events"
@@ -108,4 +110,5 @@ Build Shiitake's typed HTTP routes around an existing Session owner.
 
 `Hono`\<[`ShiitakeHttpEnv`](#shiitakehttpenv), `object` & `object` & `object` &
 `object` & `object` & `object` & `object` & `object` & `object` & `object` &
-`object` & `object`, `"/"`, `"/sessions/:sessionId/events"`\>
+`object` & `object` & `object` & `object`, `"/"`,
+`"/sessions/:sessionId/events"`\>

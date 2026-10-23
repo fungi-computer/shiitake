@@ -24,10 +24,10 @@ const ShiitakeErrorCauseSchema = Schema.Literals([
   "invalid",
   "rejected",
   "unavailable",
+  /** Stored extension state needs an explicitly authorized reset, not a migration. */
+  "state_reset_required",
   /** Owner storage is near its budget; new Sessions and prompts wait. */
   "storage_pressure",
-  /** One model context read is larger than the owner can safely decode. */
-  "context_too_large",
 ]);
 const requestIdSchema = Schema.String.pipe(
   Schema.check(Schema.isMinLength(1)),

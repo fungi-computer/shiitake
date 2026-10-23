@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { rejectingSandbox } from "@fungi.computer/mycelium/testing";
@@ -51,6 +52,7 @@ function options(path: string, reply: string): NodeShiitakeOptions {
         faux.setResponses([fauxAssistantMessage(reply)]);
         return Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         });
@@ -291,5 +293,45 @@ it("keeps the earliest requested wake when a later one arrives", async () => {
     await host.close();
   } finally {
     vi.useRealTimers();
+  }
+});
+
+it("opens a store with one broken Session, refusing that Session by file", async () => {
+  const path = storePath();
+  const host = await openNodeShiitake(options(path, "kept"));
+  let broken: string;
+  let healthy: string;
+  try {
+    broken = await host.agent.createSession("broken");
+    await host.agent.session(broken).send("Hi", { requestId: "hi" });
+    await settledReply(host, broken);
+    healthy = await host.agent.createSession("healthy");
+  } finally {
+    await host.close();
+  }
+  // A writer outside Woodstock drops its guards and removes a parent row.
+  const raw = new DatabaseSync(path);
+  try {
+    for (const { name } of raw
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+      .all())
+      raw.exec(`DROP TRIGGER "${String(name)}"`);
+    raw
+      .prepare(
+        "DELETE FROM session_entries WHERE session_id = ? AND sequence = (SELECT MIN(sequence) + 1 FROM session_entries WHERE session_id = ?)",
+      )
+      .run(broken, broken);
+  } finally {
+    raw.close();
+  }
+
+  const reopened = await openNodeShiitake(options(path, "unused"));
+  try {
+    await expect(reopened.agent.session(broken).read()).rejects.toThrow(
+      `Store file ${path}: Woodstock Session ${broken} holds a broken lineage (this store has 1 damaged Session, first ${broken}); a store never repairs itself — delete this Session with deleteSession("${broken}"), or reset the owning store:`,
+    );
+    await expect(reopened.agent.session(healthy).read()).resolves.toBeDefined();
+  } finally {
+    await reopened.close();
   }
 });

@@ -24,6 +24,8 @@ export type {
   Accepted,
   ForkCommand,
   ForkedSession,
+  OperatorCommand,
+  TitleCommand,
   PromptCommand,
   PromptDelivery,
   SendOptions,
@@ -35,6 +37,7 @@ export type {
   SessionFrame,
   SessionMessage,
   SessionProgress,
+  SessionToolOutput,
   SessionContext,
   SessionSnapshot,
   SessionInboxState,
@@ -53,8 +56,14 @@ export type {
   ShiitakeSession,
   SubscribeOptions,
   TooLate,
+  UnknownRequest,
   WatchOptions,
 } from "./client.js";
+export type {
+  ColdSessionPage,
+  ColdSessionPageRequest,
+  ColdSessionRow,
+} from "./cold-sessions.js";
 export {
   parseForkedSession,
   parseSessionFrame,
@@ -72,7 +81,7 @@ export type {
   SqliteOwner,
   SqliteValue,
   SqliteRow,
-  StorageBudget,
+  StoragePressureCheck,
   CompactionBudget,
   CompactionOptions,
   GrantsDelivery,

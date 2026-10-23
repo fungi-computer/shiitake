@@ -6,12 +6,14 @@ import * as Schema from "effect/Schema";
 import type {
   Accepted,
   CancelResult,
+  WithdrawResult,
   ForkedSession,
   SessionCompactionMarker,
   SessionCompactionNotice,
   SessionFrame,
   SessionMessage,
   SessionPendingPrompts,
+  SessionPendingPrompt,
   SessionProgress,
   SessionSnapshot,
   SessionSummaryPage,
@@ -21,6 +23,7 @@ import type {
 import { ShiitakeError, ShiitakeErrorWireSchema } from "./errors.js";
 import type { ExtensionSlotV0, ExtensionStatusV0, Json } from "./extensions.js";
 import { JsonValueSchema } from "./internal/json-value.js";
+import { HostMetaSchema } from "./internal/host-meta.js";
 import {
   StoredPiMessageSchema,
   ExtensionAdmissionOriginSchema,
@@ -31,7 +34,9 @@ const ExtensionOriginSchema = ExtensionAdmissionOriginSchema.mapFields(
 );
 
 const SessionMessageSchema: Schema.Codec<SessionMessage> = Schema.Struct({
-  meta: Schema.optionalKey(JsonValueSchema),
+  requestId: Schema.optionalKey(Schema.String),
+  meta: Schema.optionalKey(HostMetaSchema),
+  data: Schema.optionalKey(JsonValueSchema),
   origin: Schema.optionalKey(ExtensionOriginSchema),
   id: Schema.String,
   sequence: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -124,7 +129,7 @@ export const SessionTerminalSchema: Schema.Codec<SessionTerminal> =
     ]),
     sequence: Schema.Int.check(Schema.isGreaterThan(0)),
     diagnostic: Schema.NullOr(Schema.String),
-    meta: Schema.optionalKey(JsonValueSchema),
+    meta: Schema.optionalKey(HostMetaSchema),
   });
 
 const SessionCompactionMarkerSchema: Schema.Codec<SessionCompactionMarker> =
@@ -143,7 +148,12 @@ const SessionCompactionNoticeSchema: Schema.Codec<SessionCompactionNotice> =
     sequence: Schema.Int.check(Schema.isGreaterThan(0)),
     at: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
     trigger: SessionCompactionTriggerSchema,
-    result: Schema.Literals(["nothing_to_compact", "failed"]),
+    result: Schema.Literals([
+      "nothing_to_compact",
+      "failed",
+      "stale",
+      "insufficient",
+    ]),
     diagnostic: Schema.NullOr(Schema.String),
   });
 
@@ -156,19 +166,37 @@ const SessionProgressSchema: Schema.Codec<SessionProgress> = Schema.Struct({
   thinkingTruncated: Schema.Boolean,
 });
 
+const SessionPendingPromptSchema: Schema.Codec<SessionPendingPrompt> =
+  Schema.Struct({
+    commandId: Schema.String,
+    requestId: Schema.String,
+    meta: Schema.optionalKey(HostMetaSchema),
+    origin: Schema.optionalKey(ExtensionOriginSchema),
+    text: Schema.String,
+    images: Schema.optionalKey(Schema.Array(PromptImageSchema)),
+    delivery: Schema.Literals(["steer", "followUp"]),
+  });
+const SessionToolOutputSchema = Schema.Struct({
+  toolCallId: Schema.String,
+  revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  tail: Schema.String.check(
+    Schema.makeFilter(
+      (tail) =>
+        new TextEncoder().encode(tail).byteLength <= 8192 &&
+        tail.split("\n").length <= 200,
+    ),
+  ),
+  droppedBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  totalBytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+const ToolOutputSchema = Schema.Array(SessionToolOutputSchema).check(
+  Schema.isMaxLength(4),
+);
+
 const SessionPendingPromptsSchema: Schema.Codec<SessionPendingPrompts> =
   Schema.Struct({
     total: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-    prompts: Schema.Array(
-      Schema.Struct({
-        commandId: Schema.String,
-        meta: Schema.optionalKey(JsonValueSchema),
-        origin: Schema.optionalKey(ExtensionOriginSchema),
-        text: Schema.String,
-        images: Schema.optionalKey(Schema.Array(PromptImageSchema)),
-        delivery: Schema.Literals(["steer", "followUp"]),
-      }),
-    ),
+    prompts: Schema.Array(SessionPendingPromptSchema),
     hasMore: Schema.Boolean,
   });
 
@@ -192,12 +220,18 @@ export const SessionSnapshotSchema = Schema.Struct({
   pending: SessionPendingPromptsSchema,
   activity: SessionActivitySchema,
   progress: Schema.NullOr(SessionProgressSchema),
+  toolOutput: ToolOutputSchema,
   extensions: ExtensionSlotsSchema,
   attention: SessionAttentionListSchema,
   context: Schema.optionalKey(SessionContextSchema),
 }) satisfies Schema.Codec<SessionSnapshot>;
 
 export const SessionFrameSchema: Schema.Codec<SessionFrame> = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("tool_output"),
+    toolOutput: ToolOutputSchema,
+    activity: SessionActivitySchema,
+  }),
   Schema.Struct({
     kind: Schema.Literal("update"),
     delivery: Schema.Literals(["replay", "live"]),
@@ -237,8 +271,24 @@ export const AcceptedSchema: Schema.Codec<Accepted> = Schema.Struct({
   status: Schema.Literal("accepted"),
   commandId: Schema.String,
 });
+const UnknownRequestSchema = Schema.Struct({
+  status: Schema.Literal("unknown"),
+});
+const WithdrawResultSchema: Schema.Codec<WithdrawResult> = Schema.Union([
+  AcceptedSchema,
+  UnknownRequestSchema,
+]);
+const decodeWithdrawResult = Schema.decodeUnknownSync(
+  Schema.fromJsonString(WithdrawResultSchema),
+);
+
+/** Decode the owner's atomic request resolution. */
+export function parseWithdrawResult(value: string): WithdrawResult {
+  return decodeWithdrawResult(value);
+}
 const CancelResultSchema: Schema.Codec<CancelResult> = Schema.Union([
   AcceptedSchema,
+  UnknownRequestSchema,
   Schema.Struct({
     status: Schema.Literal("too_late"),
     commandId: Schema.String,
@@ -303,6 +353,15 @@ export function parseAccepted(value: string): Accepted {
 /** Parse one serialized cancel outcome: accepted, or too late. */
 export function parseCancelResult(value: string): CancelResult {
   return decodeCancelResult(value);
+}
+
+/** Decode the host-authorized newest pending lookup, including an empty result. */
+export function parseLatestPendingPrompt(
+  value: string,
+): SessionPendingPrompt | null {
+  return Schema.decodeUnknownSync(
+    Schema.fromJsonString(Schema.NullOr(SessionPendingPromptSchema)),
+  )(value);
 }
 
 /** Parse one serialized fork result using Shiitake's public client grammar. */

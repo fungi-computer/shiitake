@@ -1,8 +1,13 @@
 /**
  * Adapted from the maintained Pi v0.84.4 coding-agent compaction utilities.
+ * Token estimates are pi-ai's own (`@earendil-works/pi-ai/utils/estimate`).
  * The only destination delta is carrying Pi's native Message values directly.
  */
-import type { AssistantMessage, Message, Usage } from "@earendil-works/pi-ai";
+import type {
+  AssistantMessage,
+  Message,
+  UserMessage,
+} from "@earendil-works/pi-ai";
 import * as Schema from "effect/Schema";
 
 const isString = Schema.is(Schema.String);
@@ -15,11 +20,15 @@ const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point wa
 const COMPACTION_SUMMARY_SUFFIX = `
 </summary>`;
 
-/** Pi's native compaction boundary projection, retained without a custom role. */
+/**
+ * Pi's compaction entry model message (Pi Durable `compaction.ts`): the
+ * summary as the user message the model reads, built once when the entry is
+ * appended and stored with it.
+ */
 export function compactionSummaryMessage(
   summary: string,
   timestamp: number,
-): Message {
+): UserMessage {
   return {
     role: "user",
     content: [
@@ -30,6 +39,22 @@ export function compactionSummaryMessage(
     ],
     timestamp,
   };
+}
+
+/** The summary text inside a stored compaction model message. */
+export function compactionSummaryText(message: UserMessage): string {
+  const block = Array.isArray(message.content) ? message.content[0] : undefined;
+  const text = block?.type === "text" ? block.text : undefined;
+  if (
+    text === undefined ||
+    !text.startsWith(COMPACTION_SUMMARY_PREFIX) ||
+    !text.endsWith(COMPACTION_SUMMARY_SUFFIX)
+  )
+    throw new Error("Compaction model message is not a summary");
+  return text.slice(
+    COMPACTION_SUMMARY_PREFIX.length,
+    text.length - COMPACTION_SUMMARY_SUFFIX.length,
+  );
 }
 
 export type FileOperations = {
@@ -108,12 +133,10 @@ function serializeAssistantMessage(
   message: Extract<Message, { role: "assistant" }>,
 ): string[] {
   const text: string[] = [];
-  const thinking: string[] = [];
   const calls: string[] = [];
   for (const block of message.content) {
     if (block.type === "text") text.push(block.text);
-    else if (block.type === "thinking") thinking.push(block.thinking);
-    else {
+    else if (block.type === "toolCall") {
       const args = Object.entries(block.arguments)
         .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
         .join(", ");
@@ -121,8 +144,6 @@ function serializeAssistantMessage(
     }
   }
   const parts: string[] = [];
-  if (thinking.length > 0)
-    parts.push(`[Assistant thinking]: ${thinking.join("\n")}`);
   if (text.length > 0) parts.push(`[Assistant]: ${text.join("\n")}`);
   if (calls.length > 0)
     parts.push(`[Assistant tool calls]: ${calls.join("; ")}`);
@@ -157,95 +178,6 @@ export function serializeConversation(messages: readonly Message[]): string {
   return parts.join("\n\n");
 }
 
-const ESTIMATED_IMAGE_CHARS = 4800;
-
-function estimateTextAndImageContentChars(
-  content: string | readonly { type: string; text?: string }[],
-): number {
-  if (isString(content)) return content.length;
-  return content.reduce(
-    (chars, block) =>
-      chars +
-      (block.type === "text"
-        ? (block.text?.length ?? 0)
-        : block.type === "image"
-          ? ESTIMATED_IMAGE_CHARS
-          : 0),
-    0,
-  );
-}
-
-/** Pi's chars/4 estimator, including its image and tool-call constants. */
-export function estimateTokens(message: Message): number {
-  let chars = 0;
-  switch (message.role) {
-    case "system":
-      return Math.ceil(estimateTextAndImageContentChars(message.content) / 4);
-    case "user":
-      return Math.ceil(estimateTextAndImageContentChars(message.content) / 4);
-    case "assistant":
-      for (const block of message.content) {
-        if (block.type === "text") chars += block.text.length;
-        else if (block.type === "thinking") chars += block.thinking.length;
-        else
-          chars += block.name.length + JSON.stringify(block.arguments).length;
-      }
-      return Math.ceil(chars / 4);
-    case "toolResult":
-      return Math.ceil(estimateTextAndImageContentChars(message.content) / 4);
-  }
-}
-
-function calculateContextTokens(usage: Usage): number {
-  return (
-    usage.totalTokens ||
-    usage.input + usage.output + usage.cacheRead + usage.cacheWrite
-  );
-}
-
-function validAssistantUsage(message: Message): Usage | undefined {
-  if (message.role !== "assistant") return undefined;
-  if (message.stopReason === "aborted" || message.stopReason === "error")
-    return undefined;
-  return calculateContextTokens(message.usage) > 0 ? message.usage : undefined;
-}
-
-export function estimateContextTokens(messages: readonly Message[]) {
-  let index: number | null = null;
-  let usageTokens = 0;
-  for (let cursor = messages.length - 1; cursor >= 0; cursor -= 1) {
-    const message = messages[cursor];
-    if (message === undefined) continue;
-    const usage = validAssistantUsage(message);
-    if (usage !== undefined) {
-      index = cursor;
-      usageTokens = calculateContextTokens(usage);
-      break;
-    }
-  }
-  if (index === null) {
-    const tokens = messages.reduce(
-      (sum, message) => sum + estimateTokens(message),
-      0,
-    );
-    return {
-      tokens,
-      usageTokens: 0,
-      trailingTokens: tokens,
-      lastUsageIndex: null,
-    };
-  }
-  const trailingTokens = messages
-    .slice(index + 1)
-    .reduce((sum, message) => sum + estimateTokens(message), 0);
-  return {
-    tokens: usageTokens + trailingTokens,
-    usageTokens,
-    trailingTokens,
-    lastUsageIndex: index,
-  };
-}
-
 export function shouldCompact(
   contextTokens: number,
   contextWindow: number,
@@ -255,16 +187,38 @@ export function shouldCompact(
   return contextTokens > contextWindow - settings.reserveTokens;
 }
 
+/**
+ * A background compaction starts above the blocking threshold minus
+ * `backgroundTokens` and at or below the blocking threshold; past that the
+ * blocking check owns it. Token-based only: byte limits are Zookeeper's.
+ * Unclamped like Pi Durable generation.ts:322-339 (Levi, 2026-10-17: match Pi); keepRecentTokens gates small windows.
+ */
+export function shouldCompactInBackground(
+  contextTokens: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): boolean {
+  if (!settings.enabled || settings.backgroundTokens === 0) return false;
+  const blocking = contextWindow - settings.reserveTokens;
+  return (
+    contextTokens > blocking - settings.backgroundTokens &&
+    !shouldCompact(contextTokens, contextWindow, settings)
+  );
+}
+
 export type CompactionSettings = {
   enabled: boolean;
   reserveTokens: number;
   keepRecentTokens: number;
+  /** Tokens before the blocking threshold at which a background compaction starts; 0 turns it off. */
+  backgroundTokens: number;
 };
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
   enabled: true,
   reserveTokens: 16384,
   keepRecentTokens: 20000,
+  backgroundTokens: 32768,
 };
 
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.

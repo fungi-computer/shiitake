@@ -3,7 +3,6 @@ import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import type { ModuleRegistration } from "@fungi.computer/mycelium";
-import { fromTypedSandbox } from "@fungi.computer/mycelium/effect";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { VerifiedAgentReply } from "./woodstock/index.js";
 import type { BirdDogEffect } from "@fungi.computer/bird-dog/effect";
@@ -16,7 +15,11 @@ import type {
   ShiitakeOptions,
   ShiitakeOwnerAgent,
 } from "./contracts.js";
-import { runShiitakePromise, toPromiseOwner } from "./effect-client.js";
+import {
+  liftTools,
+  runShiitakePromise,
+  toPromiseOwner,
+} from "./effect-client.js";
 import type {
   RuntimeHostEffect,
   ShiitakeEffectOwner,
@@ -248,25 +251,13 @@ function liftOptions(
     model: adaptModelSource(options.model),
   };
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
-  if (options.storageBudget !== undefined)
-    Object.assign(base, { storageBudget: options.storageBudget });
+  if (options.storagePressure !== undefined)
+    Object.assign(base, { storagePressure: options.storagePressure });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
   const toolSource = options.tools;
   if (toolSource === undefined) return base;
-  const tools = {
-    modules: toolSource.modules ?? [],
-    sources: toolSource.sources ?? [],
-    sandbox: fromTypedSandbox(toolSource.sandbox),
-    access: toolSource.access ?? {},
-  };
-  return {
-    ...base,
-    tools:
-      toolSource.execution === undefined
-        ? tools
-        : { ...tools, execution: toolSource.execution },
-  };
+  return { ...base, tools: liftTools(toolSource) };
 }
 
 /** Open the single Promise adaptation over the canonical Effect agent. */

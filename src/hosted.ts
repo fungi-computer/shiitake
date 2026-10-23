@@ -246,6 +246,7 @@ function hostedPort(
         clear: () => Effect.fail(unavailable("Attention")),
       }),
       hasPendingSteer: () => Effect.fail(unavailable("Steering")),
+      sessionPosition: () => Effect.fail(unavailable("Session timeline")),
       hasSuccessfulToolResult: () => Effect.fail(unavailable("A tool result")),
       observe: () => Effect.die(unavailable("Observation")),
       transact: () =>

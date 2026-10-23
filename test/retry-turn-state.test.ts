@@ -55,6 +55,8 @@ it("leaves backoff when the next call starts and keeps retry cycles separate acr
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          // Every scripted failure in this fixture is transient.
+          retryable: () => true,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -141,6 +143,8 @@ it.each(["backoff", "active retry"])(
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            // Every scripted failure in this fixture is transient.
+            retryable: () => true,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),

@@ -8,19 +8,21 @@
 
 ## Modules
 
-| Module                                  | Description |
-| --------------------------------------- | ----------- |
-| [agar-extension](agar-extension.md)     | -           |
-| [agent-control](agent-control.md)       | -           |
-| [client-entry](client-entry.md)         | -           |
-| [client](client.md)                     | -           |
-| [cloudflare](cloudflare.md)             | -           |
-| [effect](effect.md)                     | -           |
-| [extensions](extensions.md)             | -           |
-| [fleet](fleet.md)                       | -           |
-| [hosted](hosted.md)                     | -           |
-| [http](http.md)                         | -           |
-| [index](index.md)                       | -           |
-| [model-preference](model-preference.md) | -           |
-| [node](node.md)                         | -           |
-| [testing](testing.md)                   | -           |
+| Module                                                                              | Description                                                                  |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| [agar-extension](agar-extension.md)                                                 | -                                                                            |
+| [agent-control](agent-control.md)                                                   | -                                                                            |
+| [client-entry](client-entry.md)                                                     | -                                                                            |
+| [client](client.md)                                                                 | -                                                                            |
+| [cloudflare](cloudflare.md)                                                         | -                                                                            |
+| [delegation](delegation.md)                                                         | -                                                                            |
+| [effect](effect.md)                                                                 | -                                                                            |
+| [extensions](extensions.md)                                                         | -                                                                            |
+| [fleet](fleet.md)                                                                   | -                                                                            |
+| [hosted](hosted.md)                                                                 | -                                                                            |
+| [http](http.md)                                                                     | -                                                                            |
+| [index](index.md)                                                                   | -                                                                            |
+| [internal/woodstock/storage-conformance](internal/woodstock/storage-conformance.md) | Runner-independent conformance cases for one Woodstock Session storage host. |
+| [model-preference](model-preference.md)                                             | -                                                                            |
+| [node](node.md)                                                                     | -                                                                            |
+| [testing](testing.md)                                                               | -                                                                            |

@@ -36,6 +36,8 @@ export {
   AcceptedSchema,
   parseAccepted,
   parseCancelResult,
+  parseLatestPendingPrompt,
+  parseWithdrawResult,
   parseForkedSession,
   parseSessionFrame,
   parseSessionSnapshot,
@@ -75,8 +77,14 @@ export type TooLate = Readonly<{
   commandId: string;
 }>;
 
-/** Outcome of one cancel command. */
-export type CancelResult = Accepted | TooLate;
+/** No command has been admitted under this request key in the addressed Session. */
+export type UnknownRequest = Readonly<{ status: "unknown" }>;
+
+/** Outcome of one cancel command or request-based recall. */
+export type CancelResult = Accepted | TooLate | UnknownRequest;
+
+/** Atomic admission resolution: accepted work is kept; an unknown key is fenced forever. */
+export type WithdrawResult = Accepted | UnknownRequest;
 
 /** Result returned after a fork commits a new cold-readable Session. */
 export type ForkedSession = Readonly<{
@@ -112,13 +120,25 @@ export type SendOptions = Readonly<{
   requestId?: string;
 }>;
 
-/** One exact completed Pi message on the selected Session lineage. */
+/**
+ * Model-facing Pi content. Application tool display payloads belong to the
+ * surrounding entry's `data`, never to a message sent back to a provider.
+ */
+export type ModelMessage =
+  | Exclude<Message, { role: "toolResult" }>
+  | Omit<Extract<Message, { role: "toolResult" }>, "details">;
+
+/** One completed model message and its separate application payload. */
 export type SessionMessage = Readonly<{
+  /** Caller identity of a prompt or operator line; absent on generated messages. */
+  requestId?: string;
   /**
    * Opaque metadata the in-process host attached; Shiitake never reads it.
    * Decode it with the host's own schema.
    */
   meta?: Json;
+  /** Opaque application display payload, independent of host metadata. */
+  data?: Json;
   /** Durable extension producer of this user message; absent for human prompts. */
   origin?: Readonly<{ extensionId: string; correlation: string | null }>;
   /** Stable conversation identity; live progress completes under this value. */
@@ -127,8 +147,8 @@ export type SessionMessage = Readonly<{
   sequence: number;
   /** Owner-issued accepted work correlation for this message, otherwise null. */
   commandId: string | null;
-  /** Exact Pi message; Shiitake does not normalize provider replay metadata. */
-  value: Message;
+  /** Model content; provider replay metadata remains unchanged. */
+  value: ModelMessage;
 }>;
 
 /** Minimal constructor seam for runtimes without a global EventSource. */
@@ -219,6 +239,15 @@ export type AgentExtensionControls = Readonly<{
   call: (extensionId: string, command: string, input: Json) => Promise<Json>;
 }>;
 
+/** Process-local running tool tail; never a durable Session fact. */
+export type SessionToolOutput = Readonly<{
+  toolCallId: string;
+  revision: number;
+  tail: string;
+  droppedBytes: number;
+  totalBytes: number;
+}>;
+
 /** Process-local assistant progress; never a durable Session fact. */
 export type SessionProgress = Readonly<{
   /** Stable message identity shared with the eventual completed Pi message. */
@@ -232,6 +261,8 @@ export type SessionProgress = Readonly<{
 
 /** Accepted prompt waiting to enter the conversation, not a scheduling command. */
 export type SessionPendingPrompt = Readonly<{
+  /** Caller identity, available even before the command response reaches its client. */
+  requestId: string;
   /** Host-admitted metadata, retained opaquely before execution. */
   meta?: SessionMessage["meta"];
   /** Durable extension producer, absent for human prompts. */
@@ -278,8 +309,11 @@ export type SessionCompactionTrigger = "manual" | "threshold" | "overflow";
 
 /**
  * A compaction that changed nothing: a manual request with nothing to
- * summarize yet, or a compaction that failed. Automatic failures are never
- * silent; each one is a notice at its own place in the timeline.
+ * summarize yet, a compaction that failed, or a finished background summary
+ * dropped unplaced: stale because the context had moved past its head, or
+ * insufficient because placing it would have left the context over the
+ * limit. Automatic failures are never silent; each one is a notice at its own
+ * place in the timeline.
  */
 export type SessionCompactionNotice = Readonly<{
   /** Stable identity of the durable notice entry. */
@@ -289,8 +323,8 @@ export type SessionCompactionNotice = Readonly<{
   /** When it was recorded, in milliseconds since the epoch. */
   at: number;
   trigger: SessionCompactionTrigger;
-  result: "nothing_to_compact" | "failed";
-  /** A failure's bounded reason; null for "nothing to compact". */
+  result: "nothing_to_compact" | "failed" | "stale" | "insufficient";
+  /** A failure's bounded reason; null for the other results. */
   diagnostic: string | null;
 }>;
 
@@ -333,6 +367,8 @@ export type SessionSnapshot = Readonly<{
   activity: SessionActivity;
   /** Latest replaceable progress snapshot, if an assistant message is live. */
   progress: SessionProgress | null;
+  /** Current bounded tool tails. Empty outside this process's running work. */
+  toolOutput: readonly SessionToolOutput[];
   /** Encoded projection slot of each extension granted one. */
   extensions: SessionExtensionSlots;
   /** Open requests for human attention from extensions. */
@@ -343,6 +379,11 @@ export type SessionSnapshot = Readonly<{
 
 /** One bounded replay or live frame. */
 export type SessionFrame =
+  | Readonly<{
+      kind: "tool_output";
+      toolOutput: readonly SessionToolOutput[];
+      activity: SessionActivity;
+    }>
   | Readonly<{
       /** Bounded Session-projection update discriminator. */
       kind: "update";
@@ -425,10 +466,15 @@ export type SessionWatch = Readonly<{
 
 /** Addressable Session interface. Addressing itself performs no I/O. */
 export type ShiitakeSession = Readonly<{
-  /** Stable logical address used to share observation across client mounts. */
+  /**
+   * Address used to share observation across current client mounts.
+   * Remote addresses include the transport endpoint, not durable owner identity.
+   */
   address: string;
   /** Execute one retained type-discriminated Session command. */
   command: SessionCommandHandler;
+  /** Resolve a stalled request atomically; withdrawn keys can never be admitted later. */
+  withdraw: (requestId: string) => Promise<WithdrawResult>;
   /** Cancel the running turn and all queued prompts, retaining their text. */
   abort: () => Promise<void>;
   /** Send text with an optional private caller idempotency identity. */
@@ -437,6 +483,8 @@ export type ShiitakeSession = Readonly<{
   cancel: (
     input: Readonly<{ commandId: string; onlyIfPending?: boolean }>,
   ) => Promise<CancelResult>;
+  /** Newest pending prompt in this host-authorized identity, never an oldest-page guess. */
+  latestPending: () => Promise<SessionPendingPrompt | null>;
   /** Address one rostered extension's Session-scope commands. */
   extension: (extensionId: string) => SessionExtensionControls;
   /** Lineage-local request for later runs; null inherits the Agent default. */

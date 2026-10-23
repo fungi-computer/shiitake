@@ -1,17 +1,25 @@
 ---
 title: Use Shiitake from the terminal
-description: The fungi CLI runs a Shiitake Agent on your machine.
+description: Spore installs Shiitake on your machine.
 ---
 
-You do not have to write a host to talk to a Shiitake Agent. The `fungi`
-command-line app is a Shiitake Agent with a terminal interface. Run it in a
-project folder; it keeps each conversation as a durable Session you can resume
-later.
+You do not have to write a host to talk to a Shiitake Agent. Spore installs the
+`fungi` command, a Shiitake Agent with a terminal interface. Run it in a project
+folder; it keeps each conversation as a durable Session you can resume later.
+
+```sh
+npm i -g @fungi.computer/spore
+cd your-project
+fungi
+```
+
+Setup asks which model to use. Choose your Claude or ChatGPT subscription and
+sign in in the browser.
 
 The Fungi documentation covers it, so this page only points the way:
 
-- [Install the Fungi CLI](https://docs.fungi.computer/install/): one npm
-  install, then `fungi` in your project folder.
+- [Install Shiitake](https://docs.fungi.computer/install/): one npm install,
+  then `fungi` in your project folder.
 - [Use the terminal](https://docs.fungi.computer/guides/use-the-terminal/): give
   work, find it again, resume and stop.
 - [Use Fungi in your editor](https://docs.fungi.computer/guides/use-fungi-in-your-editor/):

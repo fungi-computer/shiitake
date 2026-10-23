@@ -94,6 +94,7 @@ it("keeps retained Pi retry inside one Watchdog execution and records it", async
             acquire: () =>
               Effect.succeed({
                 model: faux.model,
+                retryable: () => true,
                 stream: (model, context, options) => {
                   requests.push(structuredClone(context));
                   return faux.stream(model, context, options);
@@ -265,6 +266,7 @@ it("settles exhausted provider retries as a typed stopped cause", async () => {
             acquire: () =>
               Effect.succeed({
                 model: faux.model,
+                retryable: () => true,
                 stream: faux.stream,
                 release: Effect.void,
               }),
@@ -301,18 +303,28 @@ it("settles exhausted provider retries as a typed stopped cause", async () => {
       }),
     );
     expect(snapshot.activity.queue).toEqual({ state: "idle" });
-    // Pi's own `onRetryFinished` reports the last provider error verbatim,
-    // not a composed "exhausted" phrase: Mule's retry classifier is gone.
-    expect(snapshot.terminals.at(-1)).toMatchObject({
+    // Pi reports provider prose verbatim. Retry progress is not authority to
+    // copy that potentially private text into a durable failure diagnostic.
+    expect(snapshot.terminals).toHaveLength(1);
+    expect(snapshot.terminals[0]).toMatchObject({
       outcome: "failed",
-      diagnostic: "503 Service Unavailable",
     });
+    expect(snapshot.terminals[0]?.diagnostic).toContain(
+      "reason_unavailable: run=mule_run_",
+    );
+    expect(snapshot.terminals[0]?.diagnostic).toContain("provider=faux");
+    expect(snapshot.terminals[0]?.diagnostic).toContain(
+      `model=${faux.model.id}`,
+    );
+    expect(snapshot.terminals[0]?.diagnostic).not.toContain(
+      "503 Service Unavailable",
+    );
   } finally {
     fixture.close();
   }
 }, 30_000);
 
-it("cancels retained Pi retry while its live backoff is sleeping", async () => {
+it("finishes the owned typed retry before the cancelled run settles", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
   faux.setResponses([
@@ -353,6 +365,7 @@ it("cancels retained Pi retry while its live backoff is sleeping", async () => {
             acquire: () =>
               Effect.succeed({
                 model: faux.model,
+                retryable: () => true,
                 stream: faux.stream,
                 release: Effect.void,
               }),
@@ -395,11 +408,8 @@ it("cancels retained Pi retry while its live backoff is sleeping", async () => {
       "retained-live-retry-cancel-session",
       result.accepted.commandId,
     );
-    // `onRetryFinished` runs after Pi's own abort-normalized response
-    // settles produce's promise, which lands after the interrupted fiber's
-    // own finalizers have already recorded `cancellation`/`run_terminal`
-    // (observed consistently; Mule's retry loop no longer owns the run's
-    // lifecycle events, Pi's raw backoff promise does).
+    // Mule owns the interruptible backoff. Its interruption finalizer records
+    // retry completion before the enclosing run can record its terminal.
     expect(retainedEntries.map(({ entry }) => entry.kind)).toEqual([
       "command",
       "run_started",
@@ -408,8 +418,8 @@ it("cancels retained Pi retry while its live backoff is sleeping", async () => {
       "message",
       "live_retry",
       "cancellation",
-      "run_terminal",
       "live_retry",
+      "run_terminal",
     ]);
     const retryEntries = retainedEntries.filter(
       ({ entry }) => entry.kind === "live_retry",
@@ -421,9 +431,8 @@ it("cancels retained Pi retry while its live backoff is sleeping", async () => {
         type: "auto_retry_end",
         attempt: 1,
         success: false,
-        // Pi reports the error that opened the retry, not a cancellation
-        // phrase: Mule's own `Effect.sleep`-based cancellation wording is
-        // gone along with the deleted retry loop.
+        // The owned retry reports the failed attempt that opened its backoff,
+        // not a cancellation phrase or a fabricated second provider attempt.
         finalError: "503 Service Unavailable",
       },
     });
@@ -487,6 +496,7 @@ it("does not admit a retried message whose own run terminal failed", async () =>
             acquire: () =>
               Effect.succeed({
                 model: faux.model,
+                retryable: () => true,
                 stream: faux.stream,
                 release: Effect.void,
               }),
@@ -592,6 +602,7 @@ async function runWithSteeringFailure() {
             acquire: () =>
               Effect.succeed({
                 model: faux.model,
+                retryable: () => false,
                 stream: faux.stream,
                 release: Effect.void,
               }),

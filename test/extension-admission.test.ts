@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 
 import {
   defineExtension,
+  ExtensionActivationError,
   ExtensionId,
   type ExtensionCapabilityV0,
   type ExtensionRosterV0,
@@ -16,6 +17,45 @@ import {
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
 type Probe = { activated: string[]; released: string[] };
+
+it("releases a failed activation's resources without closing unchanged members", async () => {
+  const probe: Probe = { activated: [], released: [] };
+  const failed = defineExtension({
+    id: ExtensionId.make("failed-start"),
+    version: "1.0.0",
+  }).define({
+    hooks: {
+      start: () =>
+        Effect.acquireRelease(
+          Effect.sync(() => probe.activated.push("failed-start")),
+          () => Effect.sync(() => probe.released.push("failed-start")),
+        ).pipe(
+          Effect.andThen(
+            Effect.fail(
+              new ExtensionActivationError({ message: "startup refused" }),
+            ),
+          ),
+        ),
+    },
+  });
+  const { fixture, outcome } = await make({
+    roster: [probeExtension("unchanged", probe), failed],
+    grants: [],
+  });
+  try {
+    if (outcome.status !== "fulfilled") throw outcome.reason;
+    expect(probe.released).toEqual(["failed-start"]);
+    expect(await outcome.agent.extensions.list()).toMatchObject([
+      { id: "failed-start", status: "stopped" },
+      { id: "unchanged", status: "running" },
+    ]);
+    await outcome.agent.close();
+    expect(probe.released).toEqual(["failed-start", "unchanged"]);
+  } finally {
+    if (outcome.status === "fulfilled") await outcome.agent.close();
+    fixture.close();
+  }
+});
 
 /** A minimal extension that records its activation and scope release. */
 function probeExtension(

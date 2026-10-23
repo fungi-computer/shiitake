@@ -74,6 +74,7 @@ export function completingRunOptions(
           faux.setResponses([fauxAssistantMessage("done")]);
           return {
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: Effect.void,
           };

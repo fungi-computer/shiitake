@@ -301,7 +301,7 @@ export async function openNodeShiitake(
     host = runtime;
     const agent = await Shiitake.make({
       ...shiitakeOptions,
-      store: fromNodeSqlite(opened),
+      store: { ...fromNodeSqlite(opened), storeName: `Store file ${path}` },
       runtime: runtime.runtime,
     });
     const routes = createShiitakeHttpRoutes(

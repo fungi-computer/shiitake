@@ -31,7 +31,9 @@ import {
   noExtensions,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
+import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import { readSessionCommandAdmissionByRequest } from "../src/internal/woodstock/session-store.js";
+import { manualExtensionRuntime } from "./fixtures/extension-host.fixture.js";
 
 function manualRuntime() {
   let reconcile: Effect.Effect<void, Error> | undefined;
@@ -105,6 +107,52 @@ const child = {
   sessionId: "child-session",
 } as const;
 
+it("includes future and due Carrier replies in pending work until delivery", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = manualExtensionRuntime();
+  const { room, rows } = mailRoom([]);
+  let core: Effect.Success<ReturnType<typeof openRuntimeCore>> | undefined;
+  try {
+    core = await Effect.runPromise(
+      openRuntimeCore(
+        runtimeOptions(fixture.owner, runtime.runtime, fauxModel([])),
+        room,
+      ),
+    );
+    const due = Date.now() + 60_000;
+    const mail = addressedMail("retained-retry", "Reply");
+    await rows.put(
+      "outbox:retained-retry",
+      JSON.stringify({
+        mail,
+        attempts: 1,
+        nextAttemptAt: due,
+      }),
+    );
+    expect(await runtime.pendingWork()).toEqual({
+      pending: false,
+      nextWakeAt: due,
+    });
+    await rows.put(
+      "outbox:retained-retry",
+      JSON.stringify({
+        mail,
+        attempts: 1,
+        nextAttemptAt: 0,
+      }),
+    );
+    expect((await runtime.pendingWork()).pending).toBe(true);
+    await runtime.reconcile();
+    expect(await runtime.pendingWork()).toEqual({
+      pending: false,
+      nextWakeAt: null,
+    });
+  } finally {
+    await Effect.runPromise(core?.agent.close ?? Effect.void);
+    fixture.close();
+  }
+});
+
 function addressedMail(key: string, content: string): BirdDogMail {
   return {
     key,
@@ -170,6 +218,7 @@ function runtimeOptions(
       acquire: () =>
         Effect.succeed({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: Effect.void,
         }),
@@ -326,6 +375,7 @@ it("hands BirdDog a cancelled settlement with the cancellation's metadata", asyn
         settlements.push(settlement);
       }),
     drainOutbox: () => Effect.void,
+    nextWakeAt: () => Effect.succeed(undefined),
   };
   const cancelledBy = { author: { id: "user_sam", name: "Sam" } };
   let core: Effect.Success<ReturnType<typeof openRuntimeCore>> | undefined;
@@ -1032,6 +1082,65 @@ it("steers a verified reply into the same active parent run at its safe boundary
   } finally {
     release();
     await Effect.runPromise(core?.agent.close ?? Effect.void);
+    fixture.close();
+  }
+});
+
+it("gives no reply from a refused Session's damaged history", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([fauxAssistantMessage("The first answer")]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  let core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-damaged-1", "First")),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    expect(posted).toHaveLength(1);
+    const second = await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-damaged-2", "Second")),
+    );
+    const workId = requireAcceptedWorkId(
+      fixture.owner,
+      child.sessionId,
+      second.commandId,
+    );
+    await Effect.runPromise(core.agent.close);
+    // A writer outside Woodstock removes the first answer from the history.
+    damageOutsideWoodstock(
+      fixture.owner,
+      "DELETE FROM session_entries WHERE session_id = ? AND type = 'message'",
+      child.sessionId,
+    );
+    const reopenedRuntime = manualRuntime();
+    core = await Effect.runPromise(
+      openRuntimeCore(
+        runtimeOptions(fixture.owner, reopenedRuntime.runtime, faux),
+        room,
+      ),
+    );
+    await reopenedRuntime.reconcile();
+    await reopenedRuntime.reconcile();
+
+    // The second work settles failed and its sender gets no reply built
+    // from the damaged history.
+    expect(posted).toHaveLength(1);
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT outcome, state FROM watchdog_jobs WHERE job_id = ?",
+          workId,
+        )
+        .one(),
+    ).toEqual({ outcome: "failed", state: "settled" });
+  } finally {
+    await Effect.runPromise(core.agent.close);
     fixture.close();
   }
 });

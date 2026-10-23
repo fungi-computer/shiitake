@@ -98,6 +98,7 @@ it.each([false, true])(
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),

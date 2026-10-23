@@ -187,6 +187,7 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
         acquire: () =>
           Promise.resolve({
             model: faux.getModel(),
+            retryable: () => false,
             stream: faux.provider.streamSimple.bind(faux.provider),
             release: () => Promise.resolve(),
           }),

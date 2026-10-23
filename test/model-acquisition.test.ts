@@ -4,7 +4,8 @@ import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
 import { expect, it } from "vitest";
 
-import type { Model, Api } from "@fungi.computer/mule/effect";
+import { fauxModel } from "@fungi.computer/mule/testing";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ModelAcquisition } from "../src/internal/contracts.js";
 import { ShiitakeError } from "../src/errors.js";
 import {
@@ -13,10 +14,42 @@ import {
 } from "../src/internal/model-acquisition.js";
 
 function resource(release: () => Promise<void>): ModelAcquisition {
-  // SAFETY: These adapter tests exercise acquisition ownership only and never
-  // invoke the model value.
-  return { model: {} as Model<Api>, release };
+  const faux = fauxModel([]);
+  return { model: faux.model, retryable: faux.retryable, release };
 }
+
+it.each([
+  { withStream: false, withRetryAfter: false },
+  { withStream: true, withRetryAfter: false },
+  { withStream: false, withRetryAfter: true },
+  { withStream: true, withRetryAfter: true },
+])(
+  "preserves the typed retry decision with stream=$withStream, Retry-After=$withRetryAfter",
+  async ({ withStream, withRetryAfter }) => {
+    const faux = fauxModel([]);
+    const refused = fauxAssistantMessage("", { stopReason: "error" });
+    const unknown = fauxAssistantMessage("", { stopReason: "error" });
+    const retryable: ModelAcquisition["retryable"] = (message) =>
+      message === refused;
+    let acquisition: ModelAcquisition = {
+      ...resource(() => Promise.resolve()),
+      retryable,
+    };
+    if (withStream) acquisition = { ...acquisition, stream: faux.stream };
+    if (withRetryAfter)
+      acquisition = { ...acquisition, retryAfterMs: () => 1_000 };
+    const acquired = await Effect.runPromise(
+      acquireModelPromise(() => Promise.resolve(acquisition)),
+    );
+    try {
+      expect(acquired.retryable).toBe(retryable);
+      expect(acquired.retryable(refused)).toBe(true);
+      expect(acquired.retryable(unknown)).toBe(false);
+    } finally {
+      await Effect.runPromise(acquired.release);
+    }
+  },
+);
 
 it("waits for a late acquisition and releases it after interruption", async () => {
   let resolveAcquisition!: (value: ModelAcquisition) => void;

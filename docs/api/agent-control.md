@@ -8,7 +8,136 @@
 
 # agent-control
 
+## Classes
+
+### AgentArchiveRefused
+
+A host's refusal to archive or restore an Agent, or to work with one that is
+archived. It reaches the caller as a failure of the operation it refused.
+
+#### Extends
+
+- `Error`
+
+#### Constructors
+
+##### Constructor
+
+```ts
+new AgentArchiveRefused(reason, message): AgentArchiveRefused;
+```
+
+###### Parameters
+
+| Parameter | Type                                                                                           |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| `reason`  | \| `"running"` \| `"pending"` \| `"archived"` \| `"not_creator"` \| `"self"` \| `"unreadable"` |
+| `message` | `string`                                                                                       |
+
+###### Returns
+
+[`AgentArchiveRefused`](#agentarchiverefused)
+
+###### Overrides
+
+```ts
+Error.constructor;
+```
+
+#### Properties
+
+##### name
+
+```ts
+readonly name: "AgentArchiveRefused" = "AgentArchiveRefused";
+```
+
+###### Overrides
+
+```ts
+Error.name;
+```
+
+##### reason
+
+```ts
+readonly reason:
+  | "running"
+  | "pending"
+  | "archived"
+  | "not_creator"
+  | "self"
+  | "unreadable";
+```
+
+---
+
+### AgentCreateRefused
+
+A host's refusal of an Agent creating an Agent: the creator asked to give the
+created Agent more than it holds, or the host cannot tell which Agent is
+creating. It reaches the caller as an `agents.create` failure.
+
+#### Extends
+
+- `Error`
+
+#### Constructors
+
+##### Constructor
+
+```ts
+new AgentCreateRefused(reason, message): AgentCreateRefused;
+```
+
+###### Parameters
+
+| Parameter | Type                                  |
+| --------- | ------------------------------------- |
+| `reason`  | `"exceeds_creator"` \| `"no_creator"` |
+| `message` | `string`                              |
+
+###### Returns
+
+[`AgentCreateRefused`](#agentcreaterefused)
+
+###### Overrides
+
+```ts
+Error.constructor;
+```
+
+#### Properties
+
+##### name
+
+```ts
+readonly name: "AgentCreateRefused" = "AgentCreateRefused";
+```
+
+###### Overrides
+
+```ts
+Error.name;
+```
+
+##### reason
+
+```ts
+readonly reason: "exceeds_creator" | "no_creator";
+```
+
 ## Type Aliases
+
+### ArchiveRefusalReason
+
+```ts
+type ArchiveRefusalReason = (typeof archiveRefusalReasons)[number];
+```
+
+One reason in `archiveRefusalReasons`.
+
+---
 
 ### AgentControlAgent
 
@@ -16,6 +145,9 @@
 type AgentControlAgent = Readonly<{
   agentId: string;
   name: string;
+  createdBy?: string | null;
+  model?: ModelPreference;
+  workingDirectory?: string;
 }>;
 ```
 
@@ -43,10 +175,26 @@ type AgentDelegationInput = Readonly<{
   agentId: string;
   sessionId: string;
   text: string;
+  requestId: string;
+  delivery: "steer" | "followUp";
 }>;
 ```
 
 One host-authorized delegation, with the caller Session supplied by acquisition.
+
+---
+
+### AgentRecallInput
+
+```ts
+type AgentRecallInput = Readonly<{
+  agentId: string;
+  sessionId: string;
+  requestId: string;
+}>;
+```
+
+Exact authorized destination and caller's original send identity.
 
 ---
 
@@ -70,10 +218,13 @@ Host-only identity and admitted command metadata for one delegated send.
 
 ```ts
 type AgentControlDirectory = Readonly<{
-  list: (signal) => Promise<readonly AgentControlAgent[]>;
+  list: (signal, options?) => Promise<readonly AgentControlAgent[]>;
   send?: (input, sourceSessionId, signal, invocation?) => Promise<Accepted>;
+  recall?: (input, sourceSessionId, signal) => Promise<CancelResult>;
   create?: (input, signal) => Promise<AgentControlAgent>;
   setModel?: (input, signal) => Promise<void>;
+  archive?: (input, signal) => Promise<void>;
+  unarchive?: (input, signal) => Promise<void>;
   models?: (signal) => Promise<readonly AgentControlModel[]>;
   checkModel?: (input, signal) => Promise<void>;
   open: (
@@ -89,6 +240,25 @@ type AgentControlDirectory = Readonly<{
 ```
 
 Host-owned discovery and per-operation access to ordinary Agents.
+
+## Variables
+
+### archiveRefusalReasons
+
+```ts
+const archiveRefusalReasons: readonly [
+  "not_creator",
+  "self",
+  "running",
+  "pending",
+  "unreadable",
+  "archived",
+];
+```
+
+Why a host refuses an archive or restore: the caller did not create the Agent,
+is the Agent, the Agent has a running command or delegated work still waiting to
+report back, its store predates the current schema, or the Agent is archived.
 
 ## Functions
 

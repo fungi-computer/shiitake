@@ -6,6 +6,13 @@ import {
   expectOutcome,
 } from "./fixtures/restart.fixture.js";
 import { readFile } from "node:fs/promises";
+import * as Schema from "effect/Schema";
+import * as woodstock from "../src/internal/woodstock/session-store.js";
+import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+
+const decodeSessionRow = Schema.decodeUnknownSync(
+  Schema.Struct({ id: Schema.String }),
+);
 
 it(
   "passes pre-restart assistant and recovered tool result into real compaction",
@@ -14,6 +21,38 @@ it(
       await killed(path, "crash-tool", "tool-started");
       expectOutcome(await finished(path, "compact-recovered"), "completed");
       expect(await readFile(path + ".summary", "utf8")).toBe("paired\n");
+    }),
+  30_000,
+);
+
+it(
+  "rebuilds the context after a restart from the stored compaction model message",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-tool", "tool-started");
+      expectOutcome(await finished(path, "compact-recovered"), "completed");
+      const fixture = createNativeSqliteOwnerFixture(path);
+      try {
+        const { id } = decodeSessionRow(
+          fixture.owner.sql.exec("SELECT id FROM sessions").one(),
+        );
+        const rows = woodstock.readSelectedPath(fixture.owner, {
+          sessionId: id,
+        });
+        const compaction = rows.find(
+          ({ entry }) => entry.kind === "compaction",
+        );
+        if (compaction?.entry.kind !== "compaction")
+          throw new Error("expected a compaction");
+        expect(JSON.stringify(compaction.entry.model[0])).toContain(
+          "<summary>",
+        );
+        expect(woodstock.buildSessionContext(rows)[0]).toBe(
+          compaction.entry.model[0],
+        );
+      } finally {
+        fixture.close();
+      }
     }),
   30_000,
 );

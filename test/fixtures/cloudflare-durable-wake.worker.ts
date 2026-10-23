@@ -163,20 +163,28 @@ export class WakeWitness extends ShiitakeDO<CloudflareDurableWakeEnvironment> {
     }
   }
 
-  public override async fetch(request: Request): Promise<Response> {
-    if (new URL(request.url).pathname === "/__witness/duplicate-alarm") {
+  /** Witness controls are host routes in front of Shiitake's own. */
+  protected override hostFetch(
+    request: Request,
+  ): Promise<Response> | undefined {
+    const path = new URL(request.url).pathname;
+    return path.startsWith("/__witness/") ? this.witnessRoute(path) : undefined;
+  }
+
+  private async witnessRoute(path: string): Promise<Response> {
+    if (path === "/__witness/duplicate-alarm") {
       await Promise.all([super.alarm(), super.alarm()]);
       return new Response("Delivered twice");
     }
-    if (new URL(request.url).pathname === "/__witness/fail-alarm-delivery") {
+    if (path === "/__witness/fail-alarm-delivery") {
       this.failAlarmDelivery = true;
       return new Response("Configured");
     }
-    if (new URL(request.url).pathname === "/__witness/fail-next-alarm") {
+    if (path === "/__witness/fail-next-alarm") {
       this.failNextArm = true;
       return new Response("Configured");
     }
-    if (new URL(request.url).pathname === "/__witness/state") {
+    if (path === "/__witness/state") {
       await this.ctx.storage.sync();
       return Response.json({
         jobs: this.ctx.storage.sql
@@ -195,7 +203,7 @@ export class WakeWitness extends ShiitakeDO<CloudflareDurableWakeEnvironment> {
         alarm: await this.ctx.storage.getAlarm(),
       });
     }
-    return super.fetch(request);
+    return new Response("Not found", { status: 404 });
   }
 
   protected override shiitakeOptions(): CloudflareShiitakeOptions {
@@ -240,6 +248,7 @@ export class WakeWitness extends ShiitakeDO<CloudflareDurableWakeEnvironment> {
           signal.throwIfAborted();
           return Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: (model, context, options) => {
               const user = [...context.messages]
                 .reverse()

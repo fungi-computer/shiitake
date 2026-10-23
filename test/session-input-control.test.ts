@@ -22,76 +22,101 @@ function prompt(
   return { requestId, text, delivery, type: "prompt" } as const;
 }
 
-it("takes one active steer through the shared owner and settles its own work", () => {
-  const fixture = createNativeSqliteOwnerFixture();
-  try {
-    prepareSessionStore(fixture.owner);
-    const parent = admitStoredCommand(
-      fixture.owner,
-      "control-session",
-      prompt("parent-request", "parent", "followUp"),
-      {
-        enqueue: () => undefined,
-        queueHead: () => ({ state: "idle" as const }),
-      },
-    );
-    const steer = admitStoredCommand(
-      fixture.owner,
-      "control-session",
-      prompt("steer-request", "change direction", "steer"),
-      {
-        enqueue: () => {
-          throw new Error(
-            "active steer must not enqueue a second Watchdog job",
-          );
+it.each([
+  ["completed", "safe parent reason", undefined],
+  ["cancelled", "safe parent reason", undefined],
+  ["failed", "safe parent reason", "safe parent reason"],
+  ["interrupted", "safe parent reason", "safe parent reason"],
+  ["failed", undefined, undefined],
+  ["interrupted", undefined, undefined],
+] as const)(
+  "settles a delivered %s control with reason %s as %s exactly once",
+  (outcome, diagnostic, expectedDiagnostic) => {
+    const fixture = createNativeSqliteOwnerFixture();
+    try {
+      prepareSessionStore(fixture.owner);
+      const parent = admitStoredCommand(
+        fixture.owner,
+        "control-session",
+        prompt("parent-request", "parent", "followUp"),
+        {
+          enqueue: () => undefined,
+          queueHead: () => ({ state: "idle" as const }),
         },
-        queueHead: () => ({
-          state: "running" as const,
-          jobId: parent.accepted.commandId,
-          cancellationRequested: false,
+      );
+      const steer = admitStoredCommand(
+        fixture.owner,
+        "control-session",
+        prompt("steer-request", "change direction", "steer"),
+        {
+          enqueue: () => {
+            throw new Error(
+              "active steer must not enqueue a second Watchdog job",
+            );
+          },
+          queueHead: () => ({
+            state: "running" as const,
+            jobId: parent.accepted.commandId,
+            cancellationRequested: false,
+          }),
+        },
+      );
+
+      expect(
+        readSessionEntryById(fixture.owner, steer.accepted.commandId),
+      ).toBeUndefined();
+
+      const delivered = Effect.runSync(
+        takeSessionControls(fixture.owner, {
+          sessionId: "control-session",
+          workId: parent.accepted.commandId,
+          delivery: "steer",
         }),
-      },
-    );
+      );
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]?.requestId).toBe("steer-request");
 
-    expect(
-      readSessionEntryById(fixture.owner, steer.accepted.commandId),
-    ).toBeUndefined();
-
-    const delivered = Effect.runSync(
-      takeSessionControls(fixture.owner, {
+      const settle = () => {
+        Effect.runSync(
+          settleControls(fixture.owner, {
+            sessionId: "control-session",
+            parentWorkId: parent.accepted.commandId,
+            outcome,
+            diagnostic,
+            enqueue: () => {
+              throw new Error("delivered steer must not enqueue");
+            },
+          }),
+        );
+      };
+      settle();
+      settle();
+      const path = readSelectedPath(fixture.owner, {
         sessionId: "control-session",
-        workId: parent.accepted.commandId,
-        delivery: "steer",
-      }),
-    );
-    expect(delivered).toHaveLength(1);
-    expect(delivered[0]?.requestId).toBe("steer-request");
-
-    Effect.runSync(
-      settleControls(fixture.owner, {
-        sessionId: "control-session",
-        parentWorkId: parent.accepted.commandId,
-        outcome: "completed",
-        enqueue: () => {
-          throw new Error("delivered steer must not enqueue");
-        },
-      }),
-    );
-    const path = readSelectedPath(fixture.owner, {
-      sessionId: "control-session",
-    });
-    expect(
-      path.some(
-        ({ entry }) =>
-          entry.kind === "work_terminal" &&
-          entry.workId === steer.accepted.commandId &&
-          entry.outcome === "completed",
-      ),
-    ).toBe(true);
-  } finally {
-    fixture.close();
-  }
-});
+      });
+      const expectedTerminal = {
+        kind: "work_terminal",
+        workId: steer.accepted.commandId,
+        outcome,
+      };
+      expect(
+        path
+          .filter(
+            ({ entry }) =>
+              entry.kind === "work_terminal" &&
+              entry.workId === steer.accepted.commandId,
+          )
+          .map(({ entry }) => entry),
+      ).toEqual([
+        expectedDiagnostic === undefined
+          ? expectedTerminal
+          : { ...expectedTerminal, diagnostic: expectedDiagnostic },
+      ]);
+    } finally {
+      fixture.close();
+    }
+  },
+);
 
 it.each(["interrupted", "failed", "cancelled"] as const)(
   "removes a streaming placeholder when its work is %s",
@@ -192,6 +217,7 @@ it.each(["completed", "failed", "cancelled", "interrupted"] as const)(
           sessionId: "late-control-session",
           parentWorkId: parent.accepted.commandId,
           outcome,
+          diagnostic: "safe parent reason belongs to the parent",
           enqueue: (work) => {
             queued.push(work.jobId);
           },
@@ -222,6 +248,31 @@ it.each(["completed", "failed", "cancelled", "interrupted"] as const)(
             entry.kind === "command" && entry.requestId === "late-request",
         ),
       ).toBe(true);
+      Effect.runSync(
+        recordWorkSettlement(fixture.owner, {
+          sessionId: "late-control-session",
+          commandFactId: late.accepted.commandId,
+          workId: late.accepted.commandId,
+          outcome: "completed",
+        }),
+      );
+      expect(
+        readSelectedPath(fixture.owner, {
+          sessionId: "late-control-session",
+        })
+          .filter(
+            ({ entry }) =>
+              entry.kind === "work_terminal" &&
+              entry.workId === late.accepted.commandId,
+          )
+          .map(({ entry }) => entry),
+      ).toEqual([
+        {
+          kind: "work_terminal",
+          workId: late.accepted.commandId,
+          outcome: "completed",
+        },
+      ]);
     } finally {
       fixture.close();
     }

@@ -35,24 +35,24 @@ function recordingFilesPort(invoked: string[]): FilesPort {
       invoked.push("list");
       return Promise.resolve({
         path: input.path,
-        entries: [],
-        truncated: false,
+        results: [],
+        truncated: null,
       });
     },
     glob: (input) => {
       invoked.push("glob");
       return Promise.resolve({
         path: input.path,
-        matches: [],
-        truncated: false,
+        results: [],
+        truncated: null,
       });
     },
     grep: (input) => {
       invoked.push("grep");
       return Promise.resolve({
         path: input.path,
-        matches: [],
-        truncated: false,
+        results: [],
+        truncated: null,
       });
     },
     replace: (input) => Promise.resolve({ path: input.path, bytes: 0 }),
@@ -114,6 +114,7 @@ async function runFiles(
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -236,7 +237,7 @@ it("keeps every read-only Files tool under a read grant and refuses each under n
   const cases = [
     ["read", { path: "hello.txt" }],
     ["list", { path: "." }],
-    ["glob", { path: ".", pattern: "*.txt" }],
+    ["glob", { path: ".", pattern: "*.ts" }],
     ["grep", { path: ".", pattern: "hello" }],
   ] as const;
   const responses = () =>

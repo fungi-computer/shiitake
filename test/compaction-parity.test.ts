@@ -22,6 +22,7 @@ import {
 import {
   DEFAULT_COMPACTION_SETTINGS,
   SUMMARIZATION_SYSTEM_PROMPT,
+  serializeConversation,
 } from "../src/internal/compaction/utils.js";
 import { readSelectedPath } from "../src/internal/woodstock/session-store.js";
 import * as Effect from "effect/Effect";
@@ -91,6 +92,7 @@ function scenario(contextWindow = 30_000): Scenario {
         acquire: () =>
           Promise.resolve({
             model: faux.getModel(),
+            retryable: () => false,
             stream: (streamModel, context, options) => {
               requests.push(structuredClone(context));
               const stream = faux.provider.streamSimple(
@@ -223,8 +225,9 @@ describe("per-model compaction budgets (Node, node:sqlite, faux)", () => {
       fauxAssistantMessage("c".repeat(120_000)),
       fauxAssistantMessage("override summary"),
     ]);
-    // 30K tokens of context is far below 100K - 16384, so only the
-    // override's 80K reserve triggers a post-run compaction.
+    // About 46K tokens of context is far below 100K - 16384, so only the
+    // override's 80K reserve triggers a post-run compaction. The cut keeps
+    // the long reply and summarizes the long request, so the context shrinks.
     const agent = await Shiitake.make(
       run.options({
         compaction: {
@@ -238,7 +241,7 @@ describe("per-model compaction budgets (Node, node:sqlite, faux)", () => {
       }),
     );
     try {
-      await prompt(agent, run, "big", "Write a lot.");
+      await prompt(agent, run, "big", `Write a lot. ${"r".repeat(40_000)}`);
       expect(entryKinds(run)).toContain("compaction");
       const snapshot = await agent.session(sessionId).read();
       const marker = snapshot.compactions?.[0];
@@ -294,7 +297,12 @@ describe("mid-run compaction (Node, node:sqlite, faux)", () => {
     const agent = await Shiitake.make(
       run.options({
         compaction: {
-          modelOverrides: { [run.modelKey]: { keepRecentTokens: 1_000 } },
+          // Blocking only: in a 30K window the default background budget
+          // would start a background compaction before the run (see
+          // compaction-background.test.ts for that path).
+          modelOverrides: {
+            [run.modelKey]: { keepRecentTokens: 1_000, backgroundTokens: 0 },
+          },
         },
       }),
     );
@@ -363,6 +371,36 @@ describe("auto-compaction failures surface (Node, node:sqlite, faux)", () => {
       run.fixture.close();
     }
   }, 30_000);
+});
+
+describe("summary serialization (Pi parity)", () => {
+  it("leaves thinking blocks out of the summary input", () => {
+    const text = serializeConversation([
+      { role: "user", content: "question", timestamp: 1 },
+      {
+        role: "assistant",
+        api: "pi",
+        provider: "camel",
+        model: "auto",
+        content: [
+          { type: "thinking", thinking: "private chain of thought" },
+          { type: "text", text: "visible answer" },
+        ],
+        stopReason: "stop",
+        timestamp: 2,
+        usage: {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      },
+    ]);
+    expect(text).not.toContain("private chain of thought");
+    expect(text).toContain("[Assistant]: visible answer");
+  });
 });
 
 describe("split-turn summaries (Node, faux)", () => {

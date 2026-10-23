@@ -14,9 +14,11 @@
     "src/extensions.ts",
     "src/hosted.ts",
     "src/testing.ts",
+    "src/internal/woodstock/storage-conformance.ts",
     "src/node.ts",
     "src/agar-extension.ts",
-    "src/fleet.ts"
+    "src/fleet.ts",
+    "src/delegation.ts"
   ],
   "tsconfig": "tsconfig.json",
   "out": "docs/api",

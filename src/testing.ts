@@ -38,6 +38,7 @@ export function fauxModelSource(
       return Promise.resolve({
         model: faux.model,
         stream: faux.stream,
+        retryable: faux.retryable,
         release: () => Promise.resolve(),
       });
     },

@@ -1,16 +1,216 @@
 import { inspect } from "node:util";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fauxModel } from "@fungi.computer/mule/testing";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { afterEach, expect, it, vi } from "vitest";
 import { make } from "../src/effect.js";
 import { ShiitakeError } from "../src/errors.js";
+import { Shiitake } from "../src/index.js";
+import { waitForAgentTerminal } from "../src/agent-control.js";
 import { manualExtensionRuntime } from "./fixtures/extension-host.fixture.js";
 import {
   createNativeSqliteOwnerFixture,
+  createCompatibilityRuntimeHost,
   noExtensions,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
 afterEach(() => vi.restoreAllMocks());
+
+it.each([
+  undefined,
+  "synthetic-returned-private-provider-body",
+  "x".repeat(220),
+])(
+  "settles a returned failure once, without trusting provider text, through control reads and reopen (%s)",
+  async (errorMessage) => {
+    const directory = mkdtempSync(join(tmpdir(), "failed-run-diagnostic-"));
+    const databasePath = join(directory, "agent.sqlite");
+    let announceRelease: (() => void) | undefined;
+    let allowRelease: (() => void) | undefined;
+    const releaseStarted = new Promise<void>((resolve) => {
+      announceRelease = resolve;
+    });
+    const releaseAllowed = new Promise<void>((resolve) => {
+      allowRelease = resolve;
+    });
+    const faux = fauxModel([]);
+    // Pi can end with an error message that supplies no errorMessage.
+    const response = fauxAssistantMessage("", { stopReason: "error" });
+    if (errorMessage !== undefined) response.errorMessage = errorMessage;
+    faux.setResponses([response]);
+    const open = async () => {
+      const fixture = createNativeSqliteOwnerFixture(databasePath);
+      const runtime = createCompatibilityRuntimeHost();
+      const agent = await Shiitake.make({
+        store: fixture.owner,
+        extensions: noExtensions,
+        runtime: runtime.runtime,
+        instructions: {
+          load: () => Promise.resolve({ revision: "v1", text: "Reply." }),
+        },
+        model: {
+          acquire: () =>
+            Promise.resolve({
+              model: faux.model,
+              retryable: () => false,
+              stream: faux.stream,
+              release: () => {
+                announceRelease?.();
+                return releaseAllowed;
+              },
+            }),
+        },
+      });
+      return { fixture, runtime, agent };
+    };
+    let current = await open();
+    let running: Promise<void> | undefined;
+    try {
+      const session = current.agent.session("returned-failure");
+      const accepted = await session.send("fixture", {
+        requestId: "returned-failure",
+      });
+      const firstWait = waitForAgentTerminal(
+        session,
+        accepted.commandId,
+        1000,
+        new AbortController().signal,
+      );
+      running = current.runtime.runNext();
+      // Hold actual acquired-model cleanup open: Mule has finished, but
+      // Watchdog settlement cannot yet add or repair a terminal diagnostic.
+      await releaseStarted;
+      const early = await firstWait;
+      expect(early).toMatchObject({ outcome: "failed" });
+      expect(early.diagnostic).toContain("reason_unavailable");
+      expect(early.diagnostic).toContain("run=mule_run_");
+      expect(early.diagnostic).toContain("provider=faux");
+      expect(early.diagnostic).toContain(`model=${faux.model.id}`);
+      expect(early.diagnostic).not.toContain(
+        "synthetic-returned-private-provider-body",
+      );
+      allowRelease?.();
+      await running;
+      const terminals = (await session.read()).terminals.filter(
+        (terminal) => terminal.commandId === accepted.commandId,
+      );
+      const terminal = terminals[0];
+      expect(terminal).toMatchObject({
+        commandId: accepted.commandId,
+        outcome: "failed",
+      });
+      expect(terminal?.diagnostic).toContain("reason_unavailable");
+      expect(terminal?.diagnostic).toContain("run=mule_run_");
+      expect(terminal?.diagnostic).toContain("provider=faux");
+      expect(terminal?.diagnostic).toContain(`model=${faux.model.id}`);
+      expect(terminal?.diagnostic).not.toContain(
+        "synthetic-returned-private-provider-body",
+      );
+      expect(
+        current.fixture.owner.sql
+          .exec(
+            "SELECT failure_reason FROM watchdog_jobs WHERE job_id = ?",
+            accepted.commandId,
+          )
+          .one().failure_reason,
+      ).toBe(terminal?.diagnostic);
+      expect(terminals).toHaveLength(1);
+      expect(await firstWait).toMatchObject({
+        diagnostic: terminal?.diagnostic,
+      });
+      expect(
+        await waitForAgentTerminal(
+          session,
+          accepted.commandId,
+          1000,
+          new AbortController().signal,
+        ),
+      ).toMatchObject({ diagnostic: terminal?.diagnostic });
+      await current.agent.close();
+      current.fixture.close();
+      current = await open();
+      expect(
+        (
+          await current.agent.session("returned-failure").read()
+        ).terminals.filter((value) => value.commandId === accepted.commandId),
+      ).toEqual([terminal]);
+      const settled = await waitForAgentTerminal(
+        current.agent.session("returned-failure"),
+        accepted.commandId,
+        1000,
+        new AbortController().signal,
+      );
+      expect(settled).toMatchObject({ diagnostic: terminal?.diagnostic });
+    } finally {
+      allowRelease?.();
+      await running;
+      await current.agent.close();
+      current.fixture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+it("keeps Mule's safe model-phase reason after its failed run terminal", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = createCompatibilityRuntimeHost();
+  const faux = fauxModel([]);
+  const privateMarker = "synthetic-private-provider-body";
+  const agent = await Shiitake.make({
+    store: fixture.owner,
+    runtime: runtime.runtime,
+    extensions: noExtensions,
+    instructions: {
+      load: () => Promise.resolve({ revision: "v1", text: "Reply." }),
+    },
+    model: {
+      acquire: () =>
+        Promise.resolve({
+          model: faux.model,
+          retryable: () => false,
+          stream: () => {
+            throw new Error(privateMarker);
+          },
+          release: () => Promise.resolve(),
+        }),
+    },
+  });
+  try {
+    const session = agent.session("stream-failure");
+    const accepted = await session.send("fixture", {
+      requestId: "stream-failure",
+    });
+    const firstWait = waitForAgentTerminal(
+      session,
+      accepted.commandId,
+      1000,
+      new AbortController().signal,
+    );
+    await runtime.runNext();
+    const settled = await waitForAgentTerminal(
+      session,
+      accepted.commandId,
+      1000,
+      new AbortController().signal,
+    );
+    expect(settled).toMatchObject({
+      outcome: "failed",
+      diagnostic: "model:rejected: Pi model stream could not start",
+    });
+    expect(await firstWait).toMatchObject({
+      diagnostic: "model:rejected: Pi model stream could not start",
+    });
+    expect((await session.read()).terminals).toHaveLength(1);
+    expect(JSON.stringify(await session.read())).not.toContain(privateMarker);
+  } finally {
+    await agent.close();
+    fixture.close();
+  }
+});
 
 it("reports a failed accepted run with its redacted original model cause", async () => {
   const marker = "synthetic-model-secret-marker";

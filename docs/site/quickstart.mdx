@@ -37,7 +37,7 @@ directory as an ES module project, then install the example dependencies.
 ```sh title="TERMINAL" docs-install
 npm init -y
 npm pkg set type=module
-npm install @fungi.computer/shiitake @earendil-works/pi-ai@0.99.2
+npm install @fungi.computer/shiitake @earendil-works/pi-ai@1.3.0
 npm install --save-dev tsx@4.23.12
 node --import tsx run-first-session.ts
 ```
@@ -53,4 +53,5 @@ orchestration, not provider availability, billing or restart recovery.
 Continue with [Your first extension](../extensions/first-extension/) to add your
 own behaviour, or [Test a model](../recipes/test-a-model/) to exercise the
 lower-level model loop. To talk to a Shiitake Agent without writing a host at
-all, install the `fungi` CLI: see [Use it from the terminal](../use-the-cli/).
+all, install Spore and run `fungi`: see
+[Run it in your terminal](../use-the-cli/).

@@ -43,6 +43,7 @@ it("a fresh client can see then cancel the running turn and every queued prompt"
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -102,6 +103,17 @@ it("a fresh client can see then cancel the running turn and every queued prompt"
   }
 });
 
+// A Session's pending page is bounded in bytes (2 MiB) as well as in rows
+// (200). Nine prompts at the 256 KiB prompt limit overflow the byte bound, so
+// the queue is "beyond the visible queue" without 205 sequential sends,
+// cancellations and runs (about 0.85 s alone, 5x that under load). The row
+// bound is covered at the projection level in woodstock-retained-session.test.ts.
+const WITHDRAWN_PROMPTS = 9;
+const withdrawnText = (index: number) => {
+  const label = ["withdrawn instruction", String(index), ""].join(" ");
+  return label + "x".repeat(256 * 1024 - label.length);
+};
+
 it("cancels beyond the visible queue, retains text, and excludes unrun prompts from later model context", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const runtime = createCompatibilityRuntimeHost();
@@ -124,6 +136,7 @@ it("cancels beyond the visible queue, retains text, and excludes unrun prompts f
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -131,8 +144,8 @@ it("cancels beyond the visible queue, retains text, and excludes unrun prompts f
   });
   try {
     const session = agent.session("cancel-many");
-    for (let index = 0; index < 205; index++)
-      await session.send(`withdrawn instruction ${String(index)}`);
+    for (let index = 0; index < WITHDRAWN_PROMPTS; index++)
+      await session.send(withdrawnText(index));
     const other = agent.session("unrelated");
     await other.send("unrelated instruction");
     expect((await session.read()).pending.hasMore).toBe(true);
@@ -162,8 +175,8 @@ it("cancels beyond the visible queue, retains text, and excludes unrun prompts f
         before: snapshot.oldestCursor,
       });
     }
-    expect(retained.size).toBe(206);
-    expect(cancelled.size).toBe(205);
+    expect(retained.size).toBe(WITHDRAWN_PROMPTS + 1);
+    expect(cancelled.size).toBe(WITHDRAWN_PROMPTS);
     expect(faux.state.callCount).toBe(2);
     expect(requests.join("\n")).not.toContain("withdrawn instruction");
     expect(requests.join("\n")).toContain("new instruction");

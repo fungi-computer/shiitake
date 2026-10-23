@@ -8,6 +8,7 @@ export async function deterministicModelReply() {
   const outcome = await mule.run({
     model: faux.model,
     stream: faux.stream,
+    retryable: faux.retryable,
     systemPrompt: "Reply once.",
     messages: [{ role: "user", content: "ping", timestamp: 1 }],
   });

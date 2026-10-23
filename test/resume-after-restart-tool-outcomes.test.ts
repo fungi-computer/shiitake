@@ -29,6 +29,12 @@ it(
     withDatabase(async (path) => {
       await killed(path, "crash-outcome", "outcome-saved", "restart-mule");
       const snapshot = await finished(path, "finish", "restart-mule");
+      expect(
+        snapshot.messages.find(
+          ({ value }) =>
+            value.role === "toolResult" && value.toolCallId === "read-call",
+        )?.data,
+      ).toEqual({ display: "saved outcome display payload" });
       expect(toolResult(snapshot, "read-call")).toMatchObject({
         role: "toolResult",
         isError: false,

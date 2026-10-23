@@ -15,7 +15,10 @@ import {
   prepareCompaction,
   type CompactionSourceEntry,
 } from "../src/internal/compaction/compaction.js";
-import { DEFAULT_COMPACTION_SETTINGS } from "../src/internal/compaction/utils.js";
+import {
+  compactionSummaryMessage,
+  DEFAULT_COMPACTION_SETTINGS,
+} from "../src/internal/compaction/utils.js";
 
 const user = (id: string, text: string): CompactionSourceEntry => ({
   id,
@@ -28,9 +31,8 @@ it("keeps Pi's recent tail and carries the previous summary boundary", () => {
     {
       id: "0",
       kind: "compaction",
-      timestamp: 0,
-      firstKeptEntryId: "1",
-      summary: "previous summary",
+      head: "1",
+      model: compactionSummaryMessage("previous summary", 0),
       usage: fauxAssistantMessage("usage").usage,
     },
     user("1", "old request"),
@@ -71,9 +73,11 @@ it("keeps split-turn prefix and suffix as separate preparation arrays", async ()
     },
     user("4", "tail"),
   ];
+  // pi-ai's estimate: "tail" 2 + "tool output" 4 + "tool work" 3 reaches 7
+  // at the assistant, so the cut splits the turn after its request.
   const preparation = prepareCompaction(entries, {
     ...DEFAULT_COMPACTION_SETTINGS,
-    keepRecentTokens: 5,
+    keepRecentTokens: 7,
   });
 
   expect(preparation?.isSplitTurn).toBe(true);
@@ -177,7 +181,7 @@ it("uses the prefix summary when a split turn has no older history", async () =>
       },
       user("4", "tail"),
     ],
-    { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 5 },
+    { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 7 },
   );
   if (preparation === undefined) throw new Error("expected preparation");
   expect(preparation.isSplitTurn).toBe(true);
@@ -212,7 +216,8 @@ it("borrows Pi preparation arrays and result without copying", () => {
     },
     details: { readFiles: [], modifiedFiles: [] },
   } as const;
-  const view = borrowedView(preparation, result, "revision");
+  const view = borrowedView(preparation, result, "session", "revision");
+  expect(view.sessionId).toBe("session");
   expect(
     Object.is(view.messagesToSummarize, preparation.messagesToSummarize),
   ).toBe(true);

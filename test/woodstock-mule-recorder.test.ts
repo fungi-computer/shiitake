@@ -113,7 +113,9 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
               },
             },
           ];
-          yield* Effect.forEach(events, record, { discard: true });
+          yield* Effect.forEach(events, (event) => record(event), {
+            discard: true,
+          });
 
           expect(readProcessProgress(fixture.owner, sessionId)?.text).toBe(
             "partial answer",
@@ -124,7 +126,11 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
               fixture.owner,
               sessionId,
               { limit: 200 },
-              { facts: runningActivity, progress: liveProgress },
+              {
+                facts: runningActivity,
+                toolOutput: [],
+                progress: liveProgress,
+              },
             ),
           ).toMatchObject({
             messages: [{ value: { role: "user", content: "first question" } }],
@@ -153,7 +159,7 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
             fixture.owner,
             sessionId,
             { limit: 200 },
-            { facts: idleActivity, progress: null },
+            { facts: idleActivity, toolOutput: [], progress: null },
           );
           expect(snapshot.progress).toBeNull();
           expect(snapshot.activity.queue.state).toBe("idle");

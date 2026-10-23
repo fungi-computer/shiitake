@@ -13,6 +13,7 @@ import { ExtensionId } from "../extension-contract.js";
 import type { RunIdentityV0 } from "../extensions.js";
 import type { ShiitakeEffectOptions } from "./effect-contracts.js";
 import { publishOwnerObservation } from "./observation-kernel.js";
+import { returnedFailureReason } from "./run-failure-reason.js";
 import { coreProtocolDigest } from "./extension-roster.js";
 import {
   runAcceptedCommand,
@@ -22,6 +23,7 @@ import {
 import { CompactionCommitError } from "./compaction/session-compaction.js";
 import type { ExtensionRuntime } from "./extension-runtime.js";
 import {
+  BrokenSessionError,
   isCompactCommand,
   loadAcceptedRun,
   readExtensionAdmissionOrigin,
@@ -44,7 +46,9 @@ function runtimeFailure(message: string): ShiitakeError {
 function failedDecision(error: ShiitakeError): WatchdogExecutionDecision {
   const category = `${error.boundary}:${error.cause}`;
   const diagnostic =
-    error instanceof ToolSetupError || error instanceof CompactionCommitError
+    error instanceof ToolSetupError ||
+    error instanceof CompactionCommitError ||
+    error instanceof BrokenSessionError
       ? error.diagnostic
       : error.boundary === "model"
         ? error.message
@@ -184,7 +188,7 @@ export function executeAcceptedRun(
       extensions: extensions?.runParticipants() ?? [],
     };
 
-    const run = yield* runAcceptedCommand(
+    const { run, failureReason } = yield* runAcceptedCommand(
       options,
       prepared,
       executionContract,
@@ -201,7 +205,10 @@ export function executeAcceptedRun(
       case "cancelled":
         return { kind: "cancelled" as const };
       case "failed":
-        return { kind: "failed" as const };
+        return {
+          kind: "failed" as const,
+          reason: failureReason ?? returnedFailureReason(run),
+        };
     }
   }).pipe(
     Effect.catch((error) =>

@@ -69,6 +69,7 @@ for (const transport of ["promise", "cloudflare"] as const) {
       };
       const acquisition = {
         model: faux.model,
+        retryable: () => false,
         stream: faux.stream,
         release: () => Promise.resolve(),
       };

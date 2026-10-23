@@ -93,8 +93,8 @@ Durable record failure: stored or supplied values broke their schema or bounds.
 #### Extends
 
 - `YieldableError`\<`this`\> & `object` & `Readonly`\<\{ `reason`:
-  `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"`; `message`: `string`;
-  \}\>
+  `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"` \|
+  `"session_absent"`; `message`: `string`; \}\>
 
 #### Constructors
 
@@ -106,11 +106,11 @@ new ExtensionStateError(args): ExtensionStateError;
 
 ###### Parameters
 
-| Parameter      | Type                                                                                           |
-| -------------- | ---------------------------------------------------------------------------------------------- |
-| `args`         | \{ `reason`: `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"`; `message`: `string`; \} |
-| `args.reason`  | `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"`                                       |
-| `args.message` | `string`                                                                                       |
+| Parameter      | Type                                                                                                                 |
+| -------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `args`         | \{ `reason`: `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"` \| `"session_absent"`; `message`: `string`; \} |
+| `args.reason`  | `"unavailable"` \| `"decode"` \| `"encode"` \| `"bound"` \| `"session_absent"`                                       |
+| `args.message` | `string`                                                                                                             |
 
 ###### Returns
 
@@ -122,7 +122,7 @@ new ExtensionStateError(args): ExtensionStateError;
 Data.TaggedError(
   "ExtensionStateError",
 )<{
-  reason: "decode" | "encode" | "bound" | "unavailable";
+  reason: "decode" | "encode" | "bound" | "unavailable" | "session_absent";
   message: string;
 }>.constructor
 ```
@@ -132,7 +132,7 @@ Data.TaggedError(
 ##### reason
 
 ```ts
-readonly reason: "unavailable" | "decode" | "encode" | "bound";
+readonly reason: "unavailable" | "decode" | "encode" | "bound" | "session_absent";
 ```
 
 ###### Inherited from
@@ -1221,6 +1221,9 @@ type ExtensionContextV0<S, Config, D> = Readonly<{
   send: (input) => Effect.Effect<SendResultV0, AdmissionError, ExtensionTx>;
   timers: TimersV0;
   attention: AttentionV0;
+  sessionPosition: (
+    sessionId,
+  ) => Effect.Effect<number, ExtensionStateError, ExtensionRead>;
   hasPendingSteer: (
     run,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
@@ -1632,6 +1635,7 @@ One extension's encoded slot in a Session snapshot or frame.
 
 ```ts
 type BorrowedCompactionViewV0 = Readonly<{
+  sessionId: string;
   messagesToSummarize: readonly Message[];
   turnPrefixMessages: readonly Message[];
   result: Readonly<{
@@ -1899,10 +1903,12 @@ const AttentionItemSchema: Struct<{
   summary: NonEmptyString;
   since: Int;
   expiresAt: optional<Int>;
+  inbox: optional<Literal<false>>;
 }>;
 ```
 
 An extension-owned request for human attention; expiry is owned by its timer.
+Items marked `inbox: false` remain visible without changing the inbox state.
 
 ## Functions
 
@@ -1989,6 +1995,12 @@ Declare one collection with its key inferred from the row schema.
 ### SessionAttention
 
 Re-exports [SessionAttention](client.md#sessionattention)
+
+---
+
+### ClientActivityStateV0
+
+Re-exports [ClientActivityStateV0](client-entry.md#clientactivitystatev0)
 
 ---
 

@@ -5,7 +5,8 @@ const identifier = Schema.String.pipe(
   Schema.check(Schema.isMinLength(1)),
   Schema.check(Schema.isMaxLength(256)),
 );
-const reasoningLevels = [
+/** The thinking levels a model choice may name, shared by every model path. */
+export const reasoningLevels = [
   "minimal",
   "low",
   "medium",

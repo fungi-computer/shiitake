@@ -46,6 +46,7 @@ export function sessionSnapshot(
     messages: [],
     terminals: [],
     activity: idleActivity,
+    toolOutput: [],
     progress: null,
     extensions: {},
     attention: [],

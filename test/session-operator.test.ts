@@ -84,6 +84,7 @@ it("records operator and party lines without a run, idempotently, as context for
         faux.setResponses([fauxAssistantMessage("back on duty")]);
         return Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: (model, context, options) => {
             contexts.push({ ...context, messages: [...context.messages] });
             return faux.stream(model, context, options);

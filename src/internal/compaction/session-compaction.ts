@@ -8,6 +8,9 @@ import {
 } from "@fungi.computer/mule/effect";
 import { isRecoverableLength } from "@earendil-works/pi-ai/utils/overflow";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 
 import type { CompactionHandoffV0 } from "../../extensions.js";
 import { ShiitakeError } from "../../errors.js";
@@ -15,12 +18,25 @@ import {
   borrowedView,
   compact,
   prepareCompaction,
+  type CompactionPreparation,
+  type CompactionResult,
   type CompactionSourceEntry,
 } from "./compaction.js";
 import {
+  claimSlot,
+  releaseSlot,
+  slotTaken,
+  takeSummary,
+  type CompactionSlot,
+} from "./compaction-slot.js";
+import {
   estimateContextTokens,
-  estimateTokens,
+  estimateMessageTokens,
+} from "@earendil-works/pi-ai/utils/estimate";
+import {
+  compactionSummaryMessage,
   shouldCompact,
+  shouldCompactInBackground,
   type CompactionSettings,
 } from "./utils.js";
 import {
@@ -28,13 +44,18 @@ import {
   appendCompactionTransition,
   beginCompactionActivity,
   buildSessionContext,
+  CompactionReceiptSchema,
+  compactionHeadState,
   endCompactionActivity,
   withdrawnWorkIds,
   contextMessageIds,
   commandContextMessage,
   operatorContextMessage,
+  placeCompactionTransition,
   promptCommand,
   readSessionContextPath,
+  type AppendCompactionInput,
+  type CompactionNoticeInput,
   type CompactionTrigger,
   type StoredSessionRow,
 } from "../woodstock/index.js";
@@ -47,6 +68,8 @@ function runtimeFailure(message: string): ShiitakeError {
 const commitFailures = {
   handoff:
     "The compaction handoff failed; the conversation context is unchanged",
+  handoffResult:
+    "The compaction handoff failed: it returned an invalid result; the conversation context is unchanged",
   conflict:
     "The Session changed during compaction; the conversation context is unchanged",
 } as const;
@@ -56,7 +79,10 @@ const commitFailures = {
  * owner-closed, so its diagnostic is safe to record and show.
  */
 export class CompactionCommitError extends ShiitakeError {
-  constructor(readonly phase: keyof typeof commitFailures) {
+  constructor(
+    readonly phase: keyof typeof commitFailures,
+    readonly usage?: CompactionResult["usage"],
+  ) {
     super(
       phase === "conflict" ? "store" : "runtime",
       phase === "conflict" ? "conflict" : "rejected",
@@ -103,15 +129,14 @@ function sourceEntries(
       const compaction = {
         id: row.id,
         kind: "compaction",
-        timestamp: row.timestamp,
-        firstKeptEntryId: row.entry.firstKeptEntryId,
-        summary: row.entry.summary,
-        usage: row.entry.usage,
+        head: row.entry.head,
+        model: row.entry.model[0],
+        usage: row.entry.data.usage,
       } as const;
       entries.push(
-        row.entry.details === undefined
+        row.entry.data.details === undefined
           ? compaction
-          : { ...compaction, details: row.entry.details },
+          : { ...compaction, details: row.entry.data.details },
       );
     }
   }
@@ -126,10 +151,7 @@ function readPath(
 ): Effect.Effect<readonly StoredSessionRow[], ShiitakeError> {
   return Effect.try({
     try: () => readSessionContextPath(store, { sessionId, workId }),
-    catch: (error) =>
-      error instanceof ShiitakeError && error.cause === "context_too_large"
-        ? error
-        : runtimeFailure("Woodstock selected lineage is unavailable"),
+    catch: () => runtimeFailure("Woodstock selected lineage is unavailable"),
   });
 }
 
@@ -166,40 +188,6 @@ type CompactionContext = Readonly<{
   messages: readonly Message[];
 }>;
 
-/**
- * The compaction owner's context estimate: Pi's usage-plus-trailing count,
- * excluding provider usage that belongs before Woodstock's latest boundary.
- *
- * A provider's reported usage measures the context it actually read, so it
- * is authoritative only while nothing has reshaped that context since. Once
- * a compaction lands, every kept message's own usage figure is stale: it
- * priced the pre-compaction history, not the summary that replaced it. The
- * one safe fallback is a fresh chars/4 estimate of every message still in
- * view, the same method `tokensAfterCompaction` uses when it records the
- * marker's own `tokensAfter` at commit time; trailing-after-usage alone
- * would undercount (even to zero, when the kept tail's own reply is the
- * newest message and nothing followed it).
- */
-export function estimateThresholdContextTokens(
-  path: readonly StoredSessionRow[],
-  messages: readonly Message[],
-): number {
-  const boundary = path.reduce<number | undefined>(
-    (latest, row) => (row.entry.kind === "compaction" ? row.timestamp : latest),
-    undefined,
-  );
-  const estimate = estimateContextTokens(messages);
-  const usageIndex = estimate.lastUsageIndex;
-  const usageMessage = usageIndex === null ? undefined : messages[usageIndex];
-  if (
-    boundary === undefined ||
-    usageMessage?.role !== "assistant" ||
-    usageMessage.timestamp > boundary
-  )
-    return estimate.tokens;
-  return messages.reduce((sum, message) => sum + estimateTokens(message), 0);
-}
-
 /** What one commit needs: the Session, its model, budgets and handoff. */
 type CommitInput = Pick<
   SessionCompactionInput,
@@ -228,7 +216,7 @@ function tokensAfterCompaction(
     entry,
   };
   return buildSessionContext([...path, boundary], workId).reduce(
-    (sum, message) => sum + estimateTokens(message),
+    (sum, message) => sum + estimateMessageTokens(message),
     0,
   );
 }
@@ -271,55 +259,158 @@ function commitCompactionEffect(
       input.stream,
       request.instructions,
     );
-    if (input.handoff !== undefined)
-      yield* input.handoff
-        .consume(borrowedView(preparation, result, expected.id))
-        .pipe(Effect.mapError(() => new CompactionCommitError("handoff")));
-    const tokensAfter = tokensAfterCompaction(
+    const receipt = yield* handOff(input, preparation, result, expected.id);
+    return yield* appendSummary(
+      input,
       path,
-      expected,
-      {
-        kind: "compaction",
-        resumesRun: request.resumesRun,
-        trigger: request.trigger,
-        workId: input.workId,
-        firstKeptEntryId: result.firstKeptEntryId,
-        summary: result.summary,
-        tokensBefore: result.tokensBefore,
-        usage: result.usage,
-        contextRevision: expected.id,
-      },
-      input.workId,
+      result,
+      request,
+      expected.id,
+      receipt,
     );
-    const committed = yield* Effect.try({
-      try: () =>
-        appendCompactionTransition(input.store, {
-          sessionId: input.sessionId,
-          resumesRun: request.resumesRun,
-          trigger: request.trigger,
-          tokensAfter,
-          expectedLeafId: expected.id,
-          workId: input.workId,
-          firstKeptEntryId: result.firstKeptEntryId,
-          summary: result.summary,
-          tokensBefore: result.tokensBefore,
-          usage: result.usage,
-          contextRevision: expected.id,
-          details: result.details,
-        }),
-      catch: (error) =>
-        error instanceof ShiitakeError
-          ? error.cause === "conflict"
-            ? new CompactionCommitError("conflict")
-            : error
-          : runtimeFailure("Woodstock compaction append failed"),
-    });
-    const committedPath = [...path, committed];
-    return {
-      path: committedPath,
-      messages: buildSessionContext(committedPath, input.workId),
-    };
   });
+}
+
+/**
+ * What a handoff may answer. A JS extension's result arrives untyped, so it is
+ * decoded here: an `accepted` receipt must satisfy the entry's own receipt
+ * rule, so an invalid one stops the compaction before anything is written.
+ */
+const HandoffResultSchema = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("accepted"),
+    receipt: CompactionReceiptSchema,
+  }),
+  Schema.Struct({ type: Schema.Literal("discarded_by_policy") }),
+]);
+const decodeHandoffResult = Schema.decodeUnknownResult(HandoffResultSchema);
+
+/**
+ * Zookeeper's handoff with the exact arrays, before the destructive append.
+ * Returns the archive receipt to store in the entry that commits, or
+ * `undefined` when no handoff is installed or it discarded by policy.
+ */
+function handOff(
+  input: CommitInput,
+  preparation: CompactionPreparation,
+  result: CompactionResult,
+  contextRevision: string,
+): Effect.Effect<string | undefined, ShiitakeError> {
+  if (input.handoff === undefined) return Effect.succeed(undefined);
+  return input.handoff
+    .consume(
+      borrowedView(preparation, result, input.sessionId, contextRevision),
+    )
+    .pipe(
+      Effect.mapError(() => new CompactionCommitError("handoff", result.usage)),
+      Effect.flatMap((handed) => {
+        const decoded = decodeHandoffResult(handed);
+        if (decoded._tag === "Failure")
+          return Effect.fail(
+            new CompactionCommitError("handoffResult", result.usage),
+          );
+        return Effect.succeed(
+          decoded.success.type === "accepted"
+            ? decoded.success.receipt
+            : undefined,
+        );
+      }),
+    );
+}
+
+/**
+ * The row a compaction appends on the leaf `path` ends at, with its measured
+ * `tokensAfter`. `contextRevision` names the last row the summary saw: that leaf
+ * for a blocking commit, the selection tail for a background one.
+ */
+function compactionRow(
+  input: CommitInput,
+  path: readonly StoredSessionRow[],
+  result: CompactionResult,
+  request: CommitRequest,
+  contextRevision: string,
+  receipt: string | undefined,
+): AppendCompactionInput | undefined {
+  const expected = path.at(-1);
+  if (expected === undefined) return undefined;
+  const tokensAfter = tokensAfterCompaction(
+    path,
+    expected,
+    {
+      kind: "compaction",
+      workId: input.workId,
+      head: result.firstKeptEntryId,
+      model: [compactionSummaryMessage(result.summary, Date.now())],
+      data: {
+        reason: request.trigger,
+        resumesRun: request.resumesRun,
+        tokensBefore: result.tokensBefore,
+        // This probe row only measures the context; the figure it computes
+        // is what the appended row records.
+        tokensAfter: 0,
+        usage: result.usage,
+        contextRevision,
+      },
+    },
+    input.workId,
+  );
+  const row = {
+    sessionId: input.sessionId,
+    resumesRun: request.resumesRun,
+    trigger: request.trigger,
+    tokensAfter,
+    expectedLeafId: expected.id,
+    workId: input.workId,
+    head: result.firstKeptEntryId,
+    summary: result.summary,
+    tokensBefore: result.tokensBefore,
+    usage: result.usage,
+    contextRevision,
+    details: result.details,
+  };
+  return receipt === undefined ? row : { ...row, receipt };
+}
+
+/** The context the run continues from once `committed` ends `path`. */
+function rebuilt(
+  input: CommitInput,
+  path: readonly StoredSessionRow[],
+  committed: StoredSessionRow,
+): CompactionContext {
+  const committedPath = [...path, committed];
+  return {
+    path: committedPath,
+    messages: buildSessionContext(committedPath, input.workId),
+  };
+}
+
+/** CAS-append a blocking compaction on the leaf `path` ends at and rebuild. */
+function appendSummary(
+  input: CommitInput,
+  path: readonly StoredSessionRow[],
+  result: CompactionResult,
+  request: CommitRequest,
+  contextRevision: string,
+  receipt: string | undefined,
+): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
+  const row = compactionRow(
+    input,
+    path,
+    result,
+    request,
+    contextRevision,
+    receipt,
+  );
+  if (row === undefined) return Effect.succeed(undefined);
+  return Effect.try({
+    try: () => appendCompactionTransition(input.store, row),
+    catch: (error) =>
+      error instanceof ShiitakeError
+        ? error.cause === "conflict"
+          ? new CompactionCommitError("conflict")
+          : error
+        : runtimeFailure("Woodstock compaction append failed"),
+  }).pipe(Effect.map((committed) => rebuilt(input, path, committed)));
 }
 
 /** A failure's display-safe reason: owner-closed text or the model's message. */
@@ -329,28 +420,43 @@ function failureDiagnostic(error: ShiitakeError): string {
   return `Compaction failed (${error.boundary}: ${error.cause})`;
 }
 
-/** Record a compaction that committed nothing, so clients can show it. */
-function recordNotice(
+/** Append one compaction notice, so clients can show what committed nothing. */
+function writeNotice(
   input: CommitInput,
-  trigger: CompactionTrigger,
-  failure: ShiitakeError | undefined,
+  notice: CompactionNoticeInput,
 ): Effect.Effect<void, ShiitakeError> {
   return Effect.try({
     try: () => {
-      appendCompactionNotice(input.store, {
-        sessionId: input.sessionId,
-        workId: input.workId,
-        trigger,
-        result: failure === undefined ? "nothing_to_compact" : "failed",
-        diagnostic:
-          failure === undefined ? undefined : failureDiagnostic(failure),
-      });
+      appendCompactionNotice(input.store, notice);
     },
     catch: (error) =>
       error instanceof ShiitakeError
         ? error
         : runtimeFailure("Compaction notice could not be recorded"),
   });
+}
+
+/** Record a compaction that found nothing to compact, or failed. */
+function recordNotice(
+  input: CommitInput,
+  trigger: CompactionTrigger,
+  failure: ShiitakeError | undefined,
+): Effect.Effect<void, ShiitakeError> {
+  const common = { sessionId: input.sessionId, workId: input.workId, trigger };
+  return writeNotice(
+    input,
+    failure === undefined
+      ? { ...common, result: "nothing_to_compact" }
+      : {
+          ...common,
+          result: "failed",
+          diagnostic: failureDiagnostic(failure),
+          usage:
+            failure instanceof CompactionCommitError
+              ? failure.usage
+              : undefined,
+        },
+  );
 }
 
 /**
@@ -373,27 +479,318 @@ function autoCompaction(
   );
 }
 
-/** Apply the pre-run threshold check, preserving unchanged input on failure. */
-function preRunMessages(
+/** What a background compaction hands back to its run; it writes nothing. */
+type BackgroundSummary = Readonly<{
+  preparation: CompactionPreparation;
+  result: CompactionResult;
+  /** The last row the summary saw: the placed entry's `contextRevision`. */
+  selectionTail: string;
+}>;
+
+/** What placement still needs once the fork-time arrays are released. */
+type HandedOff = Readonly<{
+  result: CompactionResult;
+  selectionTail: string;
+  /** The archive receipt; stored only if placement commits. */
+  receipt: string | undefined;
+}>;
+
+type BackgroundSlot = CompactionSlot<BackgroundSummary, ShiitakeError>;
+
+/**
+ * One run's background compaction: the run's scope (the fiber's lifetime),
+ * its slot while a summary is in flight or awaiting placement, and whether
+ * this run has stopped starting them. A settled attempt that failed, found
+ * nothing to compact, or went stale stops further starts in this run (a
+ * stale summary means the conversation moved under it; retrying would spend
+ * again on the same race), leaving the blocking threshold as the backstop.
+ * Stopping is Shiitake policy, not Pi parity: Pi may start another later.
+ */
+type BackgroundCompaction = {
+  readonly scope: Scope.Scope;
+  slot: BackgroundSlot | undefined;
+  stopped: boolean;
+};
+
+const thresholdRequest: CommitRequest = {
+  trigger: "threshold",
+  resumesRun: false,
+};
+
+/**
+ * Start a background compaction when the context crossed the background
+ * threshold (tokens only), the owner's slot is free and this run has not
+ * stopped trying. `readContext` is the one context read, taken at fork time;
+ * the fiber keeps only the preparation and hands it back with its summary.
+ */
+function startBackground(
   input: SessionCompactionInput,
-): Effect.Effect<CompactionContext, ShiitakeError> {
+  background: BackgroundCompaction,
+  contextTokens: number,
+  readContext: Effect.Effect<readonly StoredSessionRow[], ShiitakeError>,
+): Effect.Effect<void, ShiitakeError> {
   if (
-    input.resuming === true ||
-    !shouldCompact(
-      estimateThresholdContextTokens(input.path, input.messages),
+    background.stopped ||
+    slotTaken(input.store) ||
+    !shouldCompactInBackground(
+      contextTokens,
       input.model.contextWindow,
       input.settings,
     )
   )
-    return Effect.succeed({ path: input.path, messages: input.messages });
-  return autoCompaction(input, input.path, {
+    return Effect.void;
+  return readContext.pipe(
+    Effect.flatMap((path) => forkBackground(input, background.scope, path)),
+    Effect.map((slot) => {
+      if (slot === undefined) background.stopped = true;
+      else background.slot = slot;
+    }),
+  );
+}
+
+/**
+ * Claim the owner's slot and fork the summary into the run's scope:
+ * interrupting the run interrupts it, aborts the provider call and frees the
+ * slot (a deliberate Shiitake difference: Pi's background compaction
+ * outlives an abort). Nothing to compact forks nothing and stays silent, as
+ * automatic compaction does.
+ */
+function forkBackground(
+  input: SessionCompactionInput,
+  scope: Scope.Scope,
+  path: readonly StoredSessionRow[],
+): Effect.Effect<BackgroundSlot | undefined> {
+  const tail = path.at(-1);
+  const preparation = prepareCompaction(
+    sourceEntries(path, input.workId),
+    input.settings,
+  );
+  if (tail === undefined || preparation === undefined)
+    return Effect.succeed(undefined);
+  return claimSlot(input.store, scope, (handBack) =>
+    summarize(input, preparation, tail.id, handBack),
+  );
+}
+
+/** The fiber's work: the summary call, handed back through the slot. */
+function summarize(
+  input: SessionCompactionInput,
+  preparation: CompactionPreparation,
+  selectionTail: string,
+  handBack: (summary: BackgroundSummary) => void,
+): Effect.Effect<void, ShiitakeError> {
+  return Effect.suspend(() => {
+    beginCompactionActivity(input.store, input.sessionId, "threshold");
+    return compact(preparation, input.model, input.stream).pipe(
+      Effect.map((result) => {
+        handBack({ preparation, result, selectionTail });
+      }),
+      Effect.ensuring(
+        Effect.sync(() => {
+          endCompactionActivity(input.store, input.sessionId);
+        }),
+      ),
+    );
+  });
+}
+
+/**
+ * Settle this run's background compaction and place it: at a between-turn
+ * point only once it has finished (`join: false`), or by waiting for it
+ * when the blocking threshold, an overflow or the end of the run arrives.
+ * Joining instead of starting a second compaction is Shiitake's
+ * single-flight policy; Pi does not join.
+ * Undefined while it still runs, or when it settled failed or stale; a
+ * summary or handoff failure becomes the ordinary `failed` notice. Background
+ * notices (`failed`, `stale`) always record trigger `threshold`, the start that
+ * made them; a placed entry takes `request`, standing in for the compaction
+ * the run would have made at that point.
+ */
+function settleBackground(
+  input: SessionCompactionInput,
+  background: BackgroundCompaction,
+  request: CommitRequest,
+  join: boolean,
+): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
+  return Effect.suspend(() => {
+    const slot = background.slot;
+    const fiber = slot?.fiber;
+    if (
+      slot === undefined ||
+      fiber === undefined ||
+      (!join && fiber.pollUnsafe() === undefined)
+    )
+      return Effect.succeed(undefined);
+    background.slot = undefined;
+    return Effect.result(
+      Fiber.join(fiber).pipe(
+        Effect.flatMap(() => handOffSummary(input, slot)),
+        Effect.flatMap((handedOff) =>
+          handedOff === undefined
+            ? Effect.succeed(undefined)
+            : appendPlaced(input, handedOff, request),
+        ),
+      ),
+    ).pipe(
+      Effect.flatMap((placed) => {
+        if (placed._tag === "Success" && placed.success !== undefined)
+          return Effect.succeed(placed.success);
+        background.stopped = true;
+        return placed._tag === "Success"
+          ? Effect.succeed(undefined)
+          : recordNotice(input, "threshold", placed.failure).pipe(
+              Effect.as(undefined),
+            );
+      }),
+      Effect.ensuring(
+        Effect.sync(() => {
+          releaseSlot(input.store, slot);
+        }),
+      ),
+    );
+  });
+}
+
+/**
+ * Record a finished summary dropped unplaced: no entry, only its spend.
+ * `stale`: its head moved. `insufficient`: placed, the context would still be
+ * over the limit.
+ */
+function recordDropped(
+  input: SessionCompactionInput,
+  result: CompactionResult,
+  reason: "stale" | "insufficient",
+): Effect.Effect<undefined, ShiitakeError> {
+  return writeNotice(input, {
+    sessionId: input.sessionId,
+    workId: input.workId,
     trigger: "threshold",
-    resumesRun: false,
+    result: reason,
+    usage: result.usage,
+  }).pipe(Effect.as(undefined));
+}
+
+/**
+ * Placement steps 1-3 (design §3): take the summary out of the slot, check
+ * its head, hand the fork-time arrays to Zookeeper, then release the slot.
+ * Only the result and the selection tail come back, so the summarized prefix
+ * is unreachable before placement reads the context again. A stale summary
+ * never reaches the handoff.
+ *
+ * A summary handed off here can still fail to commit (stale inside the
+ * append, insufficient, or a CAS conflict). Its accepted archive is then
+ * unreferenced and Z5 sweeps it, at most one per run: see the "view" steps
+ * of wiki/3-resources/shiitake-v0.0.1/zookeeper-compaction-handoff.md.
+ */
+function handOffSummary(
+  input: SessionCompactionInput,
+  slot: BackgroundSlot,
+): Effect.Effect<HandedOff | undefined, ShiitakeError> {
+  const summary = takeSummary(slot);
+  if (summary === undefined) return Effect.succeed(undefined);
+  const { result, selectionTail } = summary;
+  return Effect.try({
+    try: () =>
+      compactionHeadState(input.store, {
+        sessionId: input.sessionId,
+        head: result.firstKeptEntryId,
+      }),
+    catch: (error) =>
+      error instanceof ShiitakeError
+        ? error
+        : runtimeFailure("Woodstock compaction head is unavailable"),
   }).pipe(
-    Effect.map(
-      (compacted) =>
-        compacted ?? { path: input.path, messages: input.messages },
+    Effect.flatMap((head) =>
+      head === "stale"
+        ? recordDropped(input, result, "stale")
+        : handOff(input, summary.preparation, result, selectionTail).pipe(
+            Effect.map((receipt) => ({ result, selectionTail, receipt })),
+          ),
     ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        releaseSlot(input.store, slot);
+      }),
+    ),
+  );
+}
+
+/**
+ * Placement steps 4-5: one fresh read, then the append on the leaf as it is
+ * now, head-checked again inside the append transaction because the handoff
+ * ran in between. Rows added after the selection tail stay verbatim after
+ * the head; a head that moved meanwhile drops the summary as stale.
+ *
+ * Decided before appending (fix 3, option A): when the placed context would
+ * still be over the limit, the summary is not placed. It is recorded as
+ * `insufficient` and the caller's ordinary path (the blocking compaction, or the
+ * overflow recovery) runs on a fresh read. Placing it would leave a
+ * compaction at the tip, where Pi's preparation finds nothing to compact
+ * (compaction.ts:282), so that ordinary path could never help.
+ */
+function appendPlaced(
+  input: SessionCompactionInput,
+  handedOff: HandedOff,
+  request: CommitRequest,
+): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
+  return readPath(input.store, input.sessionId, input.workId).pipe(
+    Effect.flatMap((path) => {
+      const row = compactionRow(
+        input,
+        path,
+        handedOff.result,
+        request,
+        handedOff.selectionTail,
+        handedOff.receipt,
+      );
+      if (row === undefined) return Effect.succeed(undefined);
+      if (
+        shouldCompact(
+          row.tokensAfter,
+          input.model.contextWindow,
+          input.settings,
+        )
+      )
+        return recordDropped(input, handedOff.result, "insufficient");
+      return Effect.try({
+        try: () => placeCompactionTransition(input.store, row),
+        catch: (error) =>
+          error instanceof ShiitakeError
+            ? error.cause === "conflict"
+              ? new CompactionCommitError("conflict")
+              : error
+            : runtimeFailure("Woodstock compaction append failed"),
+      }).pipe(
+        Effect.flatMap((placed) =>
+          placed === "stale"
+            ? recordDropped(input, handedOff.result, "stale")
+            : Effect.succeed(rebuilt(input, path, placed)),
+        ),
+      );
+    }),
+  );
+}
+
+/**
+ * Apply the pre-run threshold check, preserving unchanged input on failure.
+ * Below it, the claimed context path may start a background compaction.
+ */
+function preRunMessages(
+  input: SessionCompactionInput,
+  background: BackgroundCompaction,
+): Effect.Effect<CompactionContext, ShiitakeError> {
+  const unchanged = { path: input.path, messages: input.messages };
+  if (input.resuming === true) return Effect.succeed(unchanged);
+  const tokens = estimateContextTokens(input.messages).tokens;
+  if (!shouldCompact(tokens, input.model.contextWindow, input.settings))
+    return startBackground(
+      input,
+      background,
+      tokens,
+      Effect.succeed(input.path),
+    ).pipe(Effect.as(unchanged));
+  return autoCompaction(input, input.path, thresholdRequest).pipe(
+    Effect.map((compacted) => compacted ?? unchanged),
   );
 }
 
@@ -446,10 +843,10 @@ function postRunPath(
 ): Effect.Effect<readonly StoredSessionRow[] | undefined, ShiitakeError> {
   if (!input.settings.enabled) return Effect.succeed(undefined);
   const threshold = shouldCompact(
-    estimateThresholdContextTokens(working.path, [
+    estimateContextTokens([
       ...working.messages,
       ...outcome.messages.slice(working.newMessageCount),
-    ]),
+    ]).tokens,
     input.model.contextWindow,
     input.settings,
   );
@@ -459,34 +856,48 @@ function postRunPath(
 }
 
 /**
- * Pi's between-turn threshold check: when a running work's context has grown
- * past the threshold, compact the durable lineage (which already holds this
- * turn's tool results) and continue from the rebuilt context.
+ * Pi's between-turn point, where Mule is paused and the run is the only
+ * writer. A finished background summary is placed here; past the blocking
+ * threshold a running one is joined, and only if that placed nothing does
+ * the blocking compaction run. Below it, a background compaction may start.
  */
 function betweenTurns(
   input: SessionCompactionInput,
   working: WorkingContext,
+  background: BackgroundCompaction,
 ): BetweenTurns {
   return (context, newMessageCount) =>
     Effect.gen(function* () {
-      if (
-        !shouldCompact(
-          estimateThresholdContextTokens(working.path, context),
-          input.model.contextWindow,
-          input.settings,
-        )
-      )
+      const replace = (compacted: CompactionContext) => {
+        working.path = compacted.path;
+        working.messages = compacted.messages;
+        working.newMessageCount = newMessageCount;
+        return compacted.messages;
+      };
+      const tokens = estimateContextTokens(context).tokens;
+      const blocking = shouldCompact(
+        tokens,
+        input.model.contextWindow,
+        input.settings,
+      );
+      const placed = yield* settleBackground(
+        input,
+        background,
+        thresholdRequest,
+        blocking,
+      );
+      if (placed !== undefined) return replace(placed);
+      const readContext = readPath(input.store, input.sessionId, input.workId);
+      if (!blocking) {
+        yield* startBackground(input, background, tokens, readContext);
         return undefined;
-      const path = yield* readPath(input.store, input.sessionId, input.workId);
-      const compacted = yield* autoCompaction(input, path, {
-        trigger: "threshold",
-        resumesRun: false,
-      });
-      if (compacted === undefined) return undefined;
-      working.path = compacted.path;
-      working.messages = compacted.messages;
-      working.newMessageCount = newMessageCount;
-      return compacted.messages;
+      }
+      const compacted = yield* autoCompaction(
+        input,
+        yield* readContext,
+        thresholdRequest,
+      );
+      return compacted === undefined ? undefined : replace(compacted);
     });
 }
 
@@ -494,6 +905,7 @@ function betweenTurns(
 function postRunOutcome(
   input: SessionCompactionInput,
   initial: CompactionContext,
+  background: BackgroundCompaction,
 ): Effect.Effect<MuleRunOutcome, ShiitakeError> {
   return Effect.gen(function* () {
     let current = initial;
@@ -501,7 +913,7 @@ function postRunOutcome(
       ({ entry }) =>
         entry.kind === "compaction" &&
         entry.workId === input.workId &&
-        entry.resumesRun === true,
+        entry.data.resumesRun,
     );
     for (;;) {
       const working: WorkingContext = {
@@ -511,9 +923,30 @@ function postRunOutcome(
       };
       const outcome = yield* input.run(
         working.messages,
-        betweenTurns(input, working),
+        betweenTurns(input, working, background),
       );
       const recovery = classifyRecovery(outcome, input.model);
+      const retry = recovery.retry && !recoveryAttempted;
+      // A summary still running when the run ends is waited for and placed
+      // first; it then stands in for the post-run compaction.
+      const placed = yield* settleBackground(
+        input,
+        background,
+        {
+          trigger: recovery.overflow ? "overflow" : "threshold",
+          resumesRun: retry,
+        },
+        true,
+      );
+      if (placed !== undefined) {
+        if (!retry) return outcome;
+        current = {
+          path: placed.path,
+          messages: removeFailedAssistant(placed.messages),
+        };
+        recoveryAttempted = true;
+        continue;
+      }
       const path = yield* postRunPath(input, working, outcome, recovery);
       if (path === undefined) return outcome;
 
@@ -534,14 +967,24 @@ function postRunOutcome(
   });
 }
 
-/** Compose the retained pre-run, between-turn and post-run compaction phases. */
+/**
+ * Compose the retained pre-run, between-turn and post-run compaction phases.
+ * A background compaction is a child fiber in the run's own scope.
+ */
 export function runWithCompaction(
   input: SessionCompactionInput,
-): Effect.Effect<MuleRunOutcome, ShiitakeError> {
-  if (!input.settings.enabled) return postRunOutcome(input, input);
-  return preRunMessages(input).pipe(
-    Effect.flatMap((initial) => postRunOutcome(input, initial)),
-  );
+): Effect.Effect<MuleRunOutcome, ShiitakeError, Scope.Scope> {
+  return Effect.gen(function* () {
+    const background: BackgroundCompaction = {
+      scope: yield* Effect.scope,
+      slot: undefined,
+      stopped: false,
+    };
+    const initial = input.settings.enabled
+      ? yield* preRunMessages(input, background)
+      : input;
+    return yield* postRunOutcome(input, initial, background);
+  });
 }
 
 /** What a manual compaction did; a failure is the Effect's error. */

@@ -50,6 +50,12 @@ export type SqliteOwner = Omit<WatchdogSqliteOwner, "sql"> &
       /** Execute a statement with SQLite scalar bindings. */
       exec: (statement: string, ...bindings: SqliteValue[]) => SqliteCursor;
     }>;
+    /**
+     * How the host names this store when Woodstock refuses part of it, so its
+     * operator knows which store to act on: its Durable Object or its file.
+     * Absent is "Woodstock store".
+     */
+    storeName?: string;
   }>;
 
 /** Acquired Pi model and optional explicit Pi stream function. */
@@ -58,8 +64,16 @@ export type ModelAcquisition = Readonly<{
   model: Model<Api>;
   /** Optional explicit Pi stream function for custom providers and tests. */
   stream?: MuleStreamFunction;
+  /** Typed retry decision for this door's exact message; unknown means false. */
+  retryable: (message: AssistantMessage) => boolean;
   /** Provider's bounded Retry-After for a clean HTTP refusal, if reported. */
   retryAfterMs?: (message: AssistantMessage) => number | undefined;
+  /**
+   * Describe only a failure message produced by this acquired model door.
+   * Return its owner-authored safe reason, never arbitrary SDK error prose.
+   * Unknown messages must return undefined.
+   */
+  failureReason?: (message: AssistantMessage) => string | undefined;
   /** Release the acquired model resources. */
   release: () => Promise<void>;
 }>;
@@ -167,18 +181,19 @@ export type RuntimeHost = Readonly<{
 }>;
 
 /**
- * A host's disk budget for owner storage, with the platform's own measure of
- * it. Near the budget, Shiitake refuses new Sessions and new prompts with a
- * typed `storage_pressure` error while admitted work finishes.
+ * A host's storage-pressure check. Shiitake owns the refusal door and the
+ * typed `storage_pressure` error; the host owns the numbers behind it, such
+ * as Zookeeper's budget and thresholds. While the check reports pressure,
+ * new Sessions and new prompts are refused and admitted work finishes.
  */
-export type StorageBudget = Readonly<{
+export type StoragePressureCheck = Readonly<{
   /**
-   * Bytes the owner database occupies now, read from the platform, such as
-   * Cloudflare's `ctx.storage.sql.databaseSize`.
+   * Whether the owner is under storage pressure now. Called only for a new
+   * Session or a new prompt, never for a replay or for writes that finish
+   * admitted work. A throw, such as an unreadable measurement, refuses the
+   * new work with that error.
    */
-  usedBytes: () => number;
-  /** The host's budget for those bytes. */
-  budgetBytes: number;
+  underPressure: () => boolean;
 }>;
 
 /** One model's compaction token budgets; omitted fields fall back. */
@@ -187,12 +202,14 @@ export type CompactionBudget = Readonly<{
   reserveTokens?: number;
   /** Recent tokens kept verbatim instead of summarized. */
   keepRecentTokens?: number;
+  /** Tokens before the blocking threshold at which compaction starts in the background; 0 turns it off (default 32768). */
+  backgroundTokens?: number;
 }>;
 
 /**
  * Pi's compaction settings. Each budget resolves through the exact
  * `provider/modelId` override, then the ordinary value, then Pi's default
- * (16384 reserve, 20000 kept). `enabled` is global and governs automatic
+ * (16384 reserve, 20000 kept, 32768 background). `enabled` is global and governs automatic
  * compaction only; a manual compaction always runs.
  */
 export type CompactionOptions = CompactionBudget &
@@ -206,13 +223,14 @@ export type CompactionOptions = CompactionBudget &
 export type ShiitakeOptions = Readonly<{
   /**
    * The schema of the opaque metadata this host attaches to prompts and
-   * operator lines. Shiitake checks, stores and returns it; it never reads it.
+   * operator lines. Shiitake checks, stores and returns it; the host owns its
+   * grammar and may select a principal identity path for recall authorization.
    */
   meta?: HostMetaOptions;
   /** Native owner storage and synchronous transaction capability. */
   store: SqliteOwner;
-  /** Disk budget for `store`; absent never refuses for storage pressure. */
-  storageBudget?: StorageBudget;
+  /** Host storage-pressure check; absent never refuses for storage pressure. */
+  storagePressure?: StoragePressureCheck;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** Runtime host that schedules the opaque durable reconciler. */
@@ -254,6 +272,17 @@ export type ToolAccess = Pick<
  */
 export type ShiitakeOwnerAgent = ShiitakeAgent &
   Readonly<{
+    /** Stage a configuration without disturbing an in-flight turn. */
+    prepareConfiguration: (
+      configuration: Pick<ShiitakeOptions, "extensions" | "tools">,
+    ) => Promise<
+      Readonly<{
+        /** Publish synchronously; the next turn applies the prepared roster. */
+        commit: () => void;
+        /** Drop the staged configuration without applying it. */
+        discard: () => Promise<void>;
+      }>
+    >;
     /** Each Session's delivered tool grants, read at every call. */
     grants: Readonly<{
       /**
@@ -288,6 +317,8 @@ export type {
 
 /** Exact accepted-work facts, independent of the current Session branch or page. */
 export type CommandSettlement = Readonly<{
+  /** Original Agent sender recorded at acceptance, never the terminal's canceller. */
+  acceptedSender: string | null;
   /** Durable terminal and the command that ended the work's opaque metadata. */
   terminal: SessionTerminal;
   /** Last completed assistant text; cancelled work returns no answer. */

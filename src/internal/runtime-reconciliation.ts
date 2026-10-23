@@ -22,11 +22,13 @@ import { publishOwnerObservation } from "./observation-kernel.js";
 import {
   advanceCursor,
   readCursor,
+  readExtensionAdmissionOrigin,
   readSettledRunFacts,
   readSettlementContent,
   readSettlementDiagnostic,
   readSettlementMeta,
   recordWorkSettlement,
+  sessionLineageRefused,
   settleControls,
 } from "./woodstock/index.js";
 
@@ -112,6 +114,7 @@ function settleTargetedControls(
       sessionId: payload.work.sessionId,
       parentWorkId: job.jobId,
       outcome,
+      diagnostic: job.failureReason,
       enqueue: (work) => {
         watchdog.transactional.enqueueAcceptedJob(
           agentJobFromInput({ work: { ...work, recovery: agentTurnRecovery } }),
@@ -134,18 +137,60 @@ function drainMail(
     );
 }
 
-/** Join one core-processed settled record with its exact Woodstock facts. */
+/**
+ * Whether the settled work belongs to a Session the lineage audit refused.
+ * Nothing more can be recorded in that Session: its Watchdog settlement, with
+ * the refusal as its failure reason, is the work's whole terminal.
+ */
+function settledInRefusedSession(
+  store: SqliteOwner,
+  job: WatchdogSettledJob,
+): Effect.Effect<boolean, ShiitakeError> {
+  return Effect.gen(function* () {
+    const payload = yield* Effect.try({
+      try: () => decodeAgentJob(job),
+      catch: () => runtimeFailure("Agent work payload is invalid"),
+    });
+    const refused = yield* Effect.try({
+      try: () => sessionLineageRefused(store, payload.work.sessionId),
+      catch: () => runtimeFailure("Session lineage state is unavailable"),
+    });
+    if (refused)
+      yield* Effect.logWarning("shiitake_settlement_session_refused").pipe(
+        Effect.annotateLogs({ workId: job.jobId }),
+      );
+    return refused;
+  });
+}
+
+/**
+ * Join one core-processed settled record with its exact Woodstock facts. A
+ * run of a Session the lineage audit refused reaches extensions with only
+ * Watchdog's outcome and its admission origin: no terminal and no tool
+ * calls can be read from that history.
+ */
 function settledRun(
   store: SqliteOwner,
   record: WatchdogSettledRecord,
 ): SettledRunV0 {
   const payload = decodeAgentJob(record.job);
-  const facts = readSettledRunFacts(
-    store,
-    payload.work.sessionId,
-    payload.work.commandFactId,
-    record.job.jobId,
-  );
+  const facts = sessionLineageRefused(store, payload.work.sessionId)
+    ? Object.freeze({
+        terminal: "missing" as const,
+        toolCalls: 0,
+        origin: readExtensionAdmissionOrigin(
+          store,
+          payload.work.sessionId,
+          payload.work.commandFactId,
+          record.job.jobId,
+        ),
+      })
+    : readSettledRunFacts(
+        store,
+        payload.work.sessionId,
+        payload.work.commandFactId,
+        record.job.jobId,
+      );
   return Object.freeze({
     sequence: record.sequence,
     sessionId: payload.work.sessionId,
@@ -186,9 +231,13 @@ function settleCore(
         // leave live watchers reporting the finished run as active. A replay
         // after a crash repeats the same announcement.
         publishOwnerObservation(store, record.job.queue);
-        yield* repairWorkSettlement(store, record.job);
-        yield* settleTargetedControls(store, watchdog, record.job);
-        yield* fanOutSettlement(store, mailRoom, record.job);
+        // A refused Session can neither record a repair nor give a reply
+        // its content: the failed Watchdog settlement is all there is.
+        if (!(yield* settledInRefusedSession(store, record.job))) {
+          yield* repairWorkSettlement(store, record.job);
+          yield* settleTargetedControls(store, watchdog, record.job);
+          yield* fanOutSettlement(store, mailRoom, record.job);
+        }
         yield* Effect.try({
           try: () => {
             advanceCursor(store, coreConsumer, record.sequence);

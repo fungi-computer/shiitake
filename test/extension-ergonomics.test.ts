@@ -143,7 +143,7 @@ it("declares state by collections alone, reads it synchronously and projects a p
     extensions: [bookmarks],
     script: [
       callTool("bookmarks.add", {
-        url: "https://shiitake.shiit.app/",
+        url: "https://docs.fungi.computer/shiitake/",
         title: "Shiitake docs",
       }),
       echoSystemPrompt(),

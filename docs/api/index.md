@@ -36,13 +36,13 @@ Construct a sanitized boundary failure.
 
 ###### Parameters
 
-| Parameter    | Type                                                                                                                                                 | Description                                                                                                                        |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                          | Boundary that rejected the operation.                                                                                              |
-| `category`   | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"storage_pressure"` \| `"context_too_large"` | Safe category describing why it was rejected.                                                                                      |
-| `message`    | `string`                                                                                                                                             | Human-readable message safe for callers to display.                                                                                |
-| `requestId?` | `string`                                                                                                                                             | Request identity recoverable when a send may have reached the owner.                                                               |
-| `cause?`     | `unknown`                                                                                                                                            | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
+| Parameter    | Type                                                                                                                                                    | Description                                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                             | Boundary that rejected the operation.                                                                                              |
+| `category`   | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | Safe category describing why it was rejected.                                                                                      |
+| `message`    | `string`                                                                                                                                                | Human-readable message safe for callers to display.                                                                                |
+| `requestId?` | `string`                                                                                                                                                | Request identity recoverable when a send may have reached the owner.                                                               |
+| `cause?`     | `unknown`                                                                                                                                               | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
 
 ###### Returns
 
@@ -74,8 +74,8 @@ readonly cause:
   | "invalid"
   | "rejected"
   | "unavailable"
-  | "storage_pressure"
-  | "context_too_large";
+  | "state_reset_required"
+  | "storage_pressure";
 ```
 
 Safe category describing why it was rejected.
@@ -118,6 +118,47 @@ readonly optional requestId?: string;
 Request identity recoverable when a send may have reached the owner.
 
 ## Type Aliases
+
+### ColdSessionRow
+
+```ts
+type ColdSessionRow = Readonly<{
+  sessionId: string;
+  bytes: number;
+  lastActivityAt: number;
+  idle: boolean;
+}>;
+```
+
+One Session as the store keeper sees it: what it holds and how cold it is.
+
+---
+
+### ColdSessionPage
+
+```ts
+type ColdSessionPage = Readonly<{
+  sessions: readonly ColdSessionRow[];
+  next?: string;
+}>;
+```
+
+One bounded page of Sessions, coldest first.
+
+---
+
+### ColdSessionPageRequest
+
+```ts
+type ColdSessionPageRequest = Readonly<{
+  limit?: number;
+  after?: string;
+}>;
+```
+
+A page request: `limit` is a whole number from 1 to 200 (default 50).
+
+---
 
 ### ShiitakeErrorBoundary
 
@@ -256,6 +297,21 @@ Public command that selects one complete entry as the active lineage leaf.
 
 ---
 
+### OperatorCommand
+
+```ts
+type OperatorCommand = Extract<
+  SessionCommand,
+  Readonly<{
+    type: "operator";
+  }>
+>;
+```
+
+Public command that records one operator or party line without a run.
+
+---
+
 ### CompactCommand
 
 ```ts
@@ -268,6 +324,21 @@ type CompactCommand = Extract<
 ```
 
 Public command that compacts the Session's context as queued work.
+
+---
+
+### TitleCommand
+
+```ts
+type TitleCommand = Extract<
+  SessionCommand,
+  Readonly<{
+    type: "title";
+  }>
+>;
+```
+
+Public command that sets or clears the user's Session title.
 
 ---
 
@@ -327,6 +398,7 @@ type SqliteOwner = Omit<WatchdogSqliteOwner, "sql"> &
     sql: Readonly<{
       exec: (statement, ...bindings) => SqliteCursor;
     }>;
+    storeName?: string;
   }>;
 ```
 
@@ -340,7 +412,9 @@ Synchronous SQL and transactions held by the surrounding runtime.
 type ModelAcquisition = Readonly<{
   model: Model<Api>;
   stream?: MuleStreamFunction;
+  retryable: (message) => boolean;
   retryAfterMs?: (message) => number | undefined;
+  failureReason?: (message) => string | undefined;
   release: () => Promise<void>;
 }>;
 ```
@@ -448,18 +522,18 @@ Promise host for scheduling the opaque durable reconciler.
 
 ---
 
-### StorageBudget
+### StoragePressureCheck
 
 ```ts
-type StorageBudget = Readonly<{
-  usedBytes: () => number;
-  budgetBytes: number;
+type StoragePressureCheck = Readonly<{
+  underPressure: () => boolean;
 }>;
 ```
 
-A host's disk budget for owner storage, with the platform's own measure of it.
-Near the budget, Shiitake refuses new Sessions and new prompts with a typed
-`storage_pressure` error while admitted work finishes.
+A host's storage-pressure check. Shiitake owns the refusal door and the typed
+`storage_pressure` error; the host owns the numbers behind it, such as
+Zookeeper's budget and thresholds. While the check reports pressure, new
+Sessions and new prompts are refused and admitted work finishes.
 
 ---
 
@@ -469,6 +543,7 @@ Near the budget, Shiitake refuses new Sessions and new prompts with a typed
 type CompactionBudget = Readonly<{
   reserveTokens?: number;
   keepRecentTokens?: number;
+  backgroundTokens?: number;
 }>;
 ```
 
@@ -488,8 +563,8 @@ type CompactionOptions = CompactionBudget &
 
 Pi's compaction settings. Each budget resolves through the exact
 `provider/modelId` override, then the ordinary value, then Pi's default (16384
-reserve, 20000 kept). `enabled` is global and governs automatic compaction only;
-a manual compaction always runs.
+reserve, 20000 kept, 32768 background). `enabled` is global and governs
+automatic compaction only; a manual compaction always runs.
 
 ---
 
@@ -499,7 +574,7 @@ a manual compaction always runs.
 type ShiitakeOptions = Readonly<{
   meta?: HostMetaOptions;
   store: SqliteOwner;
-  storageBudget?: StorageBudget;
+  storagePressure?: StoragePressureCheck;
   compaction?: CompactionOptions;
   runtime: RuntimeHost;
   model: ModelSource;
@@ -533,6 +608,12 @@ full access, so a first-time host writes no permission code.
 ```ts
 type ShiitakeOwnerAgent = ShiitakeAgent &
   Readonly<{
+    prepareConfiguration: (configuration) => Promise<
+      Readonly<{
+        commit: () => void;
+        discard: () => Promise<void>;
+      }>
+    >;
     grants: Readonly<{
       deliver: (sessionId, delivery) => GrantsDeliveryResult;
       read: (sessionId) => GrantsDelivery | null;
@@ -551,6 +632,7 @@ can.
 
 ```ts
 type CommandSettlement = Readonly<{
+  acceptedSender: string | null;
   terminal: SessionTerminal;
   content: string;
   usage: readonly Pick<AssistantMessage, "provider" | "model" | "usage">[];
@@ -602,6 +684,7 @@ One Standard Schema validation outcome; only acceptance matters here.
 ```ts
 type HostMetaOptions = Readonly<{
   schema: Schema.Codec<unknown, Json> | StandardHostMetaSchema;
+  identityPath?: string;
 }>;
 ```
 
@@ -840,6 +923,7 @@ Parse one serialized frame using Shiitake's public client grammar.
 function makeHost(options, mailRoom): Promise<Readonly<{
   readSettlement: (sessionId, commandId) => Promise<
      | Readonly<{
+     acceptedSender: string | null;
      terminal: SessionTerminal;
      content: string;
      usage: readonly Pick<AssistantMessage, ... | ... | ...>[];
@@ -866,7 +950,7 @@ Construct the host-only Promise facade over the canonical Effect program.
 #### Returns
 
 `Promise`\<`Readonly`\<\{ `readSettlement`: (`sessionId`, `commandId`) =>
-`Promise`\< \| `Readonly`\<\{ `terminal`:
+`Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
 [`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
 readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
 `number`; \}\> \| `undefined`\>; `agent`:
@@ -945,6 +1029,12 @@ Re-exports [SessionMessage](client.md#sessionmessage)
 ### SessionProgress
 
 Re-exports [SessionProgress](client.md#sessionprogress)
+
+---
+
+### SessionToolOutput
+
+Re-exports [SessionToolOutput](client.md#sessiontooloutput)
 
 ---
 
@@ -1054,6 +1144,12 @@ Re-exports [SubscribeOptions](client.md#subscribeoptions)
 ### TooLate
 
 Re-exports [TooLate](client.md#toolate)
+
+---
+
+### UnknownRequest
+
+Re-exports [UnknownRequest](client.md#unknownrequest)
 
 ---
 

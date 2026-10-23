@@ -456,6 +456,7 @@ it("reconstructs the exact selected Pi lineage after a cold reopen", async () =>
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -539,6 +540,7 @@ it("does not admit an assistant message whose terminal fact failed", async () =>
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -663,6 +665,7 @@ it("rehydrates an ordinary Mycelium ui.* result without BirdDog", async () => {
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -765,6 +768,7 @@ it("delivers one active steer from a second client at the Mule safe point and re
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -792,6 +796,7 @@ it("delivers one active steer from a second client at the Mule safe point and re
     expect((await firstClient.read()).pending.prompts).toContainEqual({
       delivery: "steer",
       commandId: steerCommandId,
+      requestId: "two-client-steer",
       text: "change direction",
     });
 
@@ -876,6 +881,7 @@ it("signals active Pi work and keeps cancellation on the selected lineage", asyn
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -1104,6 +1110,7 @@ it("cancels one command without draining active or later follow-up work", async 
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -1349,6 +1356,7 @@ it("reopens branched and forked histories from a native SQLite file", async () =
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -1419,6 +1427,7 @@ it("reopens branched and forked histories from a native SQLite file", async () =
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -1711,6 +1720,7 @@ it("preserves queued prompt lineage and correlation through the public Session",
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -1748,7 +1758,12 @@ it("preserves queued prompt lineage and correlation through the public Session",
     expect((await session.read()).pending).toEqual({
       total: 1,
       prompts: [
-        { commandId: b.commandId, text: "B prompt", delivery: "followUp" },
+        {
+          commandId: b.commandId,
+          requestId: "overlap-B",
+          text: "B prompt",
+          delivery: "followUp",
+        },
       ],
       hasMore: false,
     });
@@ -1785,7 +1800,12 @@ it("preserves queued prompt lineage and correlation through the public Session",
     expect((await agent.session("overlap-public").read()).pending).toEqual({
       total: 1,
       prompts: [
-        { commandId: b.commandId, text: "B prompt", delivery: "followUp" },
+        {
+          commandId: b.commandId,
+          requestId: "overlap-B",
+          text: "B prompt",
+          delivery: "followUp",
+        },
       ],
       hasMore: false,
     });

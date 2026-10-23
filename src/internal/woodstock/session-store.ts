@@ -4,7 +4,6 @@ import {
   forkDocumentEntries,
 } from "./session-documents.js";
 import type {
-  Message,
   UserMessage,
   Usage,
   MuleResume,
@@ -13,7 +12,7 @@ import * as Schema from "effect/Schema";
 
 import type { ModelPreference } from "../model-preference.js";
 
-import type { PromptCommand } from "../../client.js";
+import type { ModelMessage, PromptCommand } from "../../client.js";
 import type { AcceptedWork } from "../client-boundary.js";
 import type { Json } from "../../extensions.js";
 import { sameHostMeta } from "../host-meta.js";
@@ -103,6 +102,7 @@ const EntryRowSchema = Schema.Struct({
   data_json: Schema.String,
   timestamp,
   completed_at: Schema.NullOr(timestamp),
+  damaged: Schema.Literals([0, 1]),
 });
 const CommandAdmissionRowSchema = Schema.Struct({
   id: boundedId,
@@ -156,7 +156,6 @@ const EntryPresenceRowSchema = Schema.Struct({ present: Schema.Literal(1) });
 
 type SessionRow = Schema.Schema.Type<typeof SessionRowSchema>;
 
-const decodeSessionRow = Schema.decodeUnknownResult(SessionRowSchema, closed);
 const decodeSessionCreationReceiptRow = Schema.decodeUnknownResult(
   SessionCreationReceiptRowSchema,
   closed,
@@ -195,10 +194,6 @@ const decodeCommandAdmissionRow = Schema.decodeUnknownResult(
   CommandAdmissionRowSchema,
   closed,
 );
-const decodeModelChoiceRow = Schema.decodeUnknownResult(
-  Schema.Struct({ sequence: Schema.NullOr(sequence) }),
-  closed,
-);
 const decodeNextSequenceRow = Schema.decodeUnknownResult(
   NextSequenceRowSchema,
   closed,
@@ -207,6 +202,29 @@ const decodeEntryPresenceRow = Schema.decodeUnknownResult(
   EntryPresenceRowSchema,
   closed,
 );
+
+/** The columns of an entry row from `table`, with whether its Session is damaged. */
+function entryColumnsOf(table: string): string {
+  const columns = [
+    "id",
+    "session_id",
+    "parent_id",
+    "sequence",
+    "type",
+    "role",
+    "state",
+    "request_id",
+    "work_id",
+    "data_json",
+    "timestamp",
+    "completed_at",
+  ].map((column) => `${table}.${column}`);
+  return `${columns.join(", ")},
+    EXISTS (SELECT 1 FROM session_lineage_damage AS damage
+             WHERE damage.session_id = ${table}.session_id) AS damaged`;
+}
+
+const entryColumns = entryColumnsOf("session_entries");
 
 /** One decoded row in the retained Session entry tree. */
 export type StoredSessionRow = Readonly<{
@@ -302,6 +320,7 @@ export function readStoredSessionSummary(
   owner: SqliteOwner,
   sessionId: string,
 ): StoredSessionSummary | undefined {
+  if (readSessionRow(owner, sessionId) === undefined) return undefined;
   const raw = owner.sql
     .exec(
       `SELECT id, leaf_id, created_at, updated_at, metadata_json
@@ -539,7 +558,7 @@ export type PreparedSessionRun = Readonly<{
       entry: Extract<StoredSessionEntry, { kind: "command" }>;
     }>;
   modelPreference: ModelPreference | null;
-  messages: readonly Message[];
+  messages: readonly ModelMessage[];
   /**
    * Context rows, not the whole lineage: the latest compaction's kept window
    * through this work, after the few older facts that still decide it.
@@ -577,11 +596,13 @@ export type AppendCompactionInput = Readonly<{
   sessionId: string;
   expectedLeafId: string;
   workId: string;
-  firstKeptEntryId: string;
+  head: string;
   summary: string;
   tokensBefore: number;
   usage: Usage;
   contextRevision: string;
+  /** The archive owner's receipt, stored in the entry that commits. */
+  receipt?: string;
   details?: Readonly<{
     readFiles: readonly string[];
     modifiedFiles: readonly string[];
@@ -649,13 +670,6 @@ function incompatible(message: string): ShiitakeError {
   return new ShiitakeError("store", "incompatible", message);
 }
 
-function parseSessionRow(raw: RawRow): SessionRow {
-  const decoded = decodeSessionRow(raw);
-  if (decoded._tag === "Failure")
-    throw unavailable("Stored Session row is invalid");
-  return decoded.success;
-}
-
 function requestIdFor(entry: StoredSessionEntry): string | null {
   return entry.kind === "command" ||
     entry.kind === "cancellation" ||
@@ -692,12 +706,18 @@ function sameCausalIdentity(
   );
 }
 
-function parseEntryRow(raw: RawRow): StoredSessionRow {
+/**
+ * Decode one entry row. Every entry read selects its Session's damage with
+ * it (`entryColumns`), so a row of a Session the lineage audit refused is
+ * refused here, whichever reader asked for it.
+ */
+function parseEntryRow(owner: SqliteOwner, raw: RawRow): StoredSessionRow {
   const decodedRow = decodeEntryRow(raw);
   if (decodedRow._tag === "Failure")
     throw unavailable("Stored Session entry row is invalid");
 
   const row = decodedRow.success;
+  if (row.damaged === 1) throw brokenSession(owner, row.session_id);
   const decodedEntry = decodeStoredSessionEntry(row.data_json);
   if (decodedEntry._tag === "Failure")
     throw unavailable("Stored Session entry data is invalid");
@@ -781,14 +801,41 @@ export function hasStoredSession(
   return readSessionRow(owner, sessionId) !== undefined;
 }
 
+const decodeReadableSessionRow = Schema.decodeUnknownResult(
+  Schema.Struct({
+    ...SessionRowSchema.fields,
+    damaged: Schema.Literals([0, 1]),
+  }),
+  closed,
+);
+
+/**
+ * The Session row every reader and writer of one Session starts from. A
+ * Session the lineage audit found broken is refused here, so no read of it
+ * and no write to it gets further.
+ */
 function readSessionRow(
   owner: SqliteOwner,
   sessionId: string,
 ): SessionRow | undefined {
   const raw = owner.sql
-    .exec("SELECT id, leaf_id FROM sessions WHERE id = ?", sessionId)
+    .exec(
+      `SELECT id, leaf_id,
+              EXISTS (SELECT 1 FROM session_lineage_damage
+                       WHERE session_id = sessions.id) AS damaged
+         FROM sessions WHERE id = ?`,
+      sessionId,
+    )
     .toArray()[0];
-  return raw === undefined ? undefined : parseSessionRow(raw);
+  if (raw === undefined) return undefined;
+  const decoded = decodeReadableSessionRow(raw);
+  if (decoded._tag === "Failure")
+    throw unavailable("Stored Session row is invalid");
+  if (decoded.success.damaged === 1) throw brokenSession(owner, sessionId);
+  return Object.freeze({
+    id: decoded.success.id,
+    leaf_id: decoded.success.leaf_id,
+  });
 }
 
 function readEntryRow(
@@ -798,15 +845,14 @@ function readEntryRow(
 ): StoredSessionRow | undefined {
   const raw = owner.sql
     .exec(
-      `SELECT id, session_id, parent_id, sequence, type, role, state,
-              request_id, work_id, data_json, timestamp, completed_at
+      `SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND id = ?`,
       sessionId,
       id,
     )
     .toArray()[0];
-  return raw === undefined ? undefined : parseEntryRow(raw);
+  return raw === undefined ? undefined : parseEntryRow(owner, raw);
 }
 
 function validateCompleteSessionLeaf(
@@ -841,14 +887,13 @@ export function readSessionEntryById(
 ): StoredSessionRow | undefined {
   const raw = owner.sql
     .exec(
-      `SELECT id, session_id, parent_id, sequence, type, role, state,
-              request_id, work_id, data_json, timestamp, completed_at
+      `SELECT ${entryColumns}
          FROM session_entries
         WHERE id = ?`,
       id,
     )
     .toArray()[0];
-  return raw === undefined ? undefined : parseEntryRow(raw);
+  return raw === undefined ? undefined : parseEntryRow(owner, raw);
 }
 
 function readCommandAdmission(
@@ -886,6 +931,81 @@ const pendingAdmissions = `FROM session_command_admissions AS a
        WHERE e.session_id = a.session_id AND e.work_id = a.work_id
          AND e.type IN ('command', 'cancellation', 'run_terminal', 'work_terminal')
     )`;
+
+/** Host-owned metadata identity, interpreted by SQLite's JSON decoder only. */
+export type AdmissionIdentity = Readonly<{ path: string; value: string }>;
+
+const decodeIdentity = Schema.decodeUnknownSync(
+  Schema.Struct({ identity: Schema.NullOr(Schema.String) }),
+);
+
+/** Extract the host-selected principal without giving the engine domain grammar. */
+export function readAdmissionIdentity(
+  owner: SqliteOwner,
+  path: string,
+  meta: Json | undefined,
+): AdmissionIdentity {
+  const { identity } = decodeIdentity(
+    owner.sql
+      .exec(
+        "SELECT json_extract(?, ?) AS identity",
+        JSON.stringify(meta ?? null),
+        path,
+      )
+      .one(),
+  );
+  if (identity === null || identity.length === 0)
+    throw new ShiitakeError(
+      "runtime",
+      "rejected",
+      "Request author is required",
+    );
+  return { path, value: identity };
+}
+
+/** Immutable admission author check; used before every exact cancellation, including replay. */
+export function assertAdmissionIdentity(
+  owner: SqliteOwner,
+  sessionId: string,
+  commandId: string,
+  identity: AdmissionIdentity,
+): void {
+  const admission = readSessionCommandAdmission(owner, sessionId, commandId);
+  if (admission === undefined) return;
+  const stored = readAdmissionIdentity(
+    owner,
+    identity.path,
+    admission.entry.meta,
+  );
+  if (stored.value !== identity.value)
+    throw new ShiitakeError(
+      "runtime",
+      "rejected",
+      "Message author does not match",
+    );
+}
+
+/** Read just one newest admission; FIFO execution and oldest-first paging are unchanged. */
+export function readNewestPendingSessionCommand(
+  owner: SqliteOwner,
+  sessionId: string,
+  identity?: AdmissionIdentity,
+): StoredCommandAdmission | undefined {
+  const raw = owner.sql
+    .exec(
+      `SELECT ${admissionColumns("a.")} ${pendingAdmissions}
+       AND json_extract(a.data_json, '$.work') IS NULL
+       AND a.origin_kind = 'user'
+       AND (? IS NULL OR json_extract(json_extract(a.data_json, '$.meta'), ?) = ?)
+     ORDER BY a.sequence DESC LIMIT 1`,
+      sessionId,
+      identity?.path ?? null,
+      identity?.path ?? null,
+      identity?.value ?? null,
+    )
+    .toArray()[0];
+  return raw === undefined ? undefined : parseCommandAdmissionRow(raw);
+}
 const decodePendingCount = Schema.decodeUnknownSync(
   Schema.Struct({
     total: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -973,7 +1093,7 @@ export function takePendingSessionControls(
 ): readonly Readonly<{
   workId: string;
   requestId: string;
-  message: Message;
+  message: ModelMessage;
 }>[] {
   return owner.transactionSync(() =>
     readPendingSessionControls(owner, sessionId, delivery, targetWorkId).map(
@@ -1006,6 +1126,7 @@ export function settleSessionControls(
     sessionId: string;
     parentWorkId: string;
     outcome: "completed" | "cancelled" | "failed" | "interrupted";
+    diagnostic: string | undefined;
     enqueue: EnqueueAcceptedWork;
   }>,
 ): void {
@@ -1041,14 +1162,22 @@ export function settleSessionControls(
         });
         continue;
       }
+      // Only a delivered control shares its failed parent's safe reason.
+      // Late, unmaterialized work was requeued above and owns its own outcome.
+      const diagnostic =
+        input.outcome === "failed" || input.outcome === "interrupted"
+          ? input.diagnostic
+          : undefined;
+      let entry: Extract<StoredSessionEntry, { kind: "work_terminal" }> = {
+        kind: "work_terminal",
+        workId: row.entry.workId,
+        outcome: input.outcome,
+      };
+      if (diagnostic !== undefined) entry = { ...entry, diagnostic };
       appendSessionEntry(owner, {
         sessionId: input.sessionId,
         id: sessionIds.fact.generate(),
-        entry: {
-          kind: "work_terminal",
-          workId: row.entry.workId,
-          outcome: input.outcome,
-        },
+        entry,
       });
     }
   });
@@ -1087,11 +1216,13 @@ export function readSessionEntriesForWork(
   sessionId: string,
   workId: string,
 ): readonly StoredSessionRow[] {
+  // Refuse the Session before selecting entries: a damaged work may have no
+  // rows left, so decoding the result cannot establish that it is readable.
+  readSessionRow(owner, sessionId);
   return Object.freeze(
     owner.sql
       .exec(
-        `SELECT id, session_id, parent_id, sequence, type, role, state,
-                request_id, work_id, data_json, timestamp, completed_at
+        `SELECT ${entryColumns}
            FROM session_entries
           WHERE session_id = ? AND work_id = ?
           ORDER BY sequence ASC`,
@@ -1099,7 +1230,7 @@ export function readSessionEntriesForWork(
         workId,
       )
       .toArray()
-      .map(parseEntryRow),
+      .map((raw) => parseEntryRow(owner, raw)),
   );
 }
 
@@ -1116,8 +1247,7 @@ export function readLatestLiveRetryForWork(
   | undefined {
   const raw = owner.sql
     .exec(
-      `SELECT id, session_id, parent_id, sequence, type, role, state,
-              request_id, work_id, data_json, timestamp, completed_at
+      `SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND work_id = ? AND type = 'live_retry'
         ORDER BY sequence DESC
@@ -1127,7 +1257,7 @@ export function readLatestLiveRetryForWork(
     )
     .toArray()[0];
   if (raw === undefined) return undefined;
-  const row = parseEntryRow(raw);
+  const row = parseEntryRow(owner, raw);
   if (row.entry.kind !== "live_retry")
     throw unavailable("Stored live retry entry is invalid");
   return { event: row.entry.event, timestamp: row.timestamp };
@@ -1163,10 +1293,7 @@ export function readActiveToolForWork(
 ): string | undefined {
   const raw = owner.sql
     .exec(
-      `SELECT intent.id, intent.session_id, intent.parent_id,
-              intent.sequence, intent.type, intent.role, intent.state,
-              intent.request_id, intent.work_id, intent.data_json,
-              intent.timestamp, intent.completed_at
+      `SELECT ${entryColumnsOf("intent")}
          FROM session_entries AS intent
         WHERE intent.session_id = ? AND intent.work_id = ?
           AND intent.type = 'tool_intent'
@@ -1185,7 +1312,7 @@ export function readActiveToolForWork(
     )
     .toArray()[0];
   if (raw === undefined) return undefined;
-  const row = parseEntryRow(raw);
+  const row = parseEntryRow(owner, raw);
   if (row.entry.kind !== "tool_intent")
     throw unavailable("Stored tool intent is invalid");
   return row.entry.call.name;
@@ -1298,11 +1425,15 @@ export function deleteStoredSession(
   }>,
 ): boolean {
   return owner.transactionSync(() => {
-    if (readSessionRow(owner, input.sessionId) === undefined) return false;
+    // A Session the lineage audit refused can still be deleted.
+    const exists =
+      owner.sql
+        .exec("SELECT id FROM sessions WHERE id = ?", input.sessionId)
+        .toArray().length > 0;
+    if (!exists) return false;
     input.assertIdleSession(input.sessionId);
     input.recordInboxDeletion(input.sessionId);
     for (const statement of [
-      "DELETE FROM session_entries WHERE session_id = ?",
       "DELETE FROM session_command_admissions WHERE session_id = ?",
       // The inbox row references the Session; it goes in the same transaction.
       "DELETE FROM session_attention WHERE session_id = ?",
@@ -1310,14 +1441,21 @@ export function deleteStoredSession(
       "DELETE FROM session_inbox WHERE session_id = ?",
       "DELETE FROM session_creation_receipts WHERE session_id = ?",
       "DELETE FROM sessions WHERE id = ?",
+      // Entries go last: only a removed Session's lineage may lose parents.
+      "DELETE FROM session_entries WHERE session_id = ?",
+      "DELETE FROM session_lineage_damage WHERE session_id = ?",
     ])
       owner.sql.exec(statement, input.sessionId);
     return true;
   });
 }
 
-/** The exact Woodstock SQL shape this build reads and writes. */
-const currentWoodstockSchemaVersion = 1;
+/**
+ * Version 3 keeps application tool data outside model messages/results.
+ * Older preview stores require explicit host custody; no compatibility reader
+ * or automatic rewrite runs when the store opens.
+ */
+const currentWoodstockSchemaVersion = 3;
 const currentWoodstockProtocol = "shiitake.extension/v0";
 
 function tableExists(owner: SqliteOwner, name: string): boolean {
@@ -1351,10 +1489,10 @@ function readWoodstockStoreProtocol(
     .toArray();
   if (rows.length !== 1) return "unmarked";
   const decoded = decodeWoodstockSchemaVersionRow(rows[0]);
-  return decoded._tag === "Success" &&
-    decoded.success.version === currentWoodstockSchemaVersion
-    ? "v0"
-    : "unmarked";
+  if (decoded._tag !== "Success") return "unmarked";
+  // The decoder already requires the current protocol literal.
+  if (decoded.success.version === currentWoodstockSchemaVersion) return "v0";
+  return "unmarked";
 }
 
 /** Stamp fresh Woodstock stores; incompatible files require host-side custody. */
@@ -1363,7 +1501,7 @@ function ensureWoodstockSchemaVersion(owner: SqliteOwner): void {
   if (protocol === "v0") return;
   if (protocol === "unmarked")
     throw incompatible(
-      "Woodstock store has no v0 protocol marker; a hosted store never resets itself — reset the owning Durable Object storage, or remove the old local store file before opening a fresh one",
+      "Woodstock store has no current v0 schema marker; incompatible storage requires explicit host custody. To reset, stop the owning host before resetting a local store, then remove its database file and the file's .owner.sqlite sidecar. Reset discards that store's data. For the Hub, a Hub Agent is erased only with its Team; Team erasure is destructive and separately authorized, never a routine single-Agent repair. No migration runs.",
     );
   owner.sql.exec(
     "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
@@ -1392,6 +1530,252 @@ function createSessionEntryTable(owner: SqliteOwner): void {
       completed_at INTEGER,
       UNIQUE (session_id, sequence)
     )
+  `);
+}
+
+const lineageGuards = [
+  "session_entries_lineage_insert",
+  "session_entries_lineage_update",
+  "session_entries_lineage_delete",
+  "session_entries_damaged_session",
+  "session_entries_lineage_replace",
+  "session_entries_lineage_replace_position",
+] as const;
+
+const decodeInstalledGuards = Schema.decodeUnknownResult(
+  Schema.Struct({
+    installed: Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0))),
+  }),
+  closed,
+);
+const decodeDamagedSession = Schema.decodeUnknownResult(
+  Schema.Struct({ session_id: Schema.String }),
+  closed,
+);
+
+/** What a writer to a Session the lineage audit found broken is told. */
+const brokenSessionMessage =
+  "Woodstock Session holds a broken lineage; a store never repairs itself — delete this Session (deleteSession), or reset the owning store";
+
+const decodeDamageCount = Schema.decodeUnknownResult(
+  Schema.Struct({
+    damaged: Schema.Int.pipe(Schema.check(Schema.isGreaterThan(0))),
+    first: Schema.String,
+  }),
+  closed,
+);
+
+/**
+ * The refusal of every read of, and write to, a Session the lineage audit
+ * found broken. Work settled for it carries `diagnostic`, a bounded form of
+ * the message that still names the Session and its reset.
+ */
+export class BrokenSessionError extends ShiitakeError {
+  constructor(
+    readonly store: string,
+    readonly sessionId: string,
+    message: string,
+  ) {
+    super("store", "unavailable", message);
+  }
+
+  get diagnostic(): string {
+    return `${this.store}: Woodstock Session ${this.sessionId} holds a broken lineage; delete it with deleteSession("${this.sessionId}"), or reset the owning store`;
+  }
+}
+
+/** The refusal of one Session the lineage audit found broken, naming its store. */
+function brokenSession(
+  owner: SqliteOwner,
+  sessionId: string,
+): BrokenSessionError {
+  const store = owner.storeName ?? "Woodstock store";
+  return new BrokenSessionError(
+    store,
+    sessionId,
+    `${store}: ${brokenSessionRefusal(owner, sessionId)}`,
+  );
+}
+
+/**
+ * Whether the lineage audit refused this Session. Settlement asks before it
+ * records anything in the Session, which it can no longer write.
+ */
+export function sessionLineageRefused(
+  owner: SqliteOwner,
+  sessionId: string,
+): boolean {
+  return (
+    owner.sql
+      .exec(
+        "SELECT session_id FROM session_lineage_damage WHERE session_id = ?",
+        sessionId,
+      )
+      .toArray().length > 0
+  );
+}
+
+/**
+ * What a reader of a broken Session is told: which Session, how many of this
+ * store's Sessions the audit found broken and the first of them, and the
+ * steps that clear it.
+ */
+function brokenSessionRefusal(owner: SqliteOwner, sessionId: string): string {
+  const decoded = decodeDamageCount(
+    owner.sql
+      .exec(
+        "SELECT COUNT(*) AS damaged, MIN(session_id) AS first FROM session_lineage_damage",
+      )
+      .one(),
+  );
+  if (decoded._tag === "Failure")
+    throw unavailable("Stored Session lineage damage is invalid");
+  const { damaged, first } = decoded.success;
+  return `Woodstock Session ${sessionId} holds a broken lineage (this store has ${String(damaged)} damaged Session${damaged === 1 ? "" : "s"}, first ${first}); a store never repairs itself — delete this Session with deleteSession("${sessionId}"), or reset the owning store: for a Durable Object, erase all of its storage (DurableObjectStorage.deleteAll(); a Hub Agent is erased only with its Team, POST /operator/teams/:teamId/erasure-durable-objects); for a local store, remove its file and the file's .owner.sqlite sidecar`;
+}
+
+/**
+ * Every lineage stays whole by construction, enforced where it is written
+ * rather than re-walked where it is read. Each entry's parent is an earlier
+ * complete entry of its own Session, each Session has one complete root, the
+ * lineage columns never change, and a parent is never removed from under a
+ * child while its Session exists. So every walk from a complete leaf reaches
+ * that one root over complete rows of falling sequence, and readers walk only
+ * the rows they return.
+ *
+ * A store written while any guard was missing is audited as they are
+ * installed. Each Session that breaks them is recorded in
+ * `session_lineage_damage`, in the same pass: its inbox row turns
+ * unavailable, every read of it is refused and no entry is written to it,
+ * while every other Session opens and works as before. The guards only judge
+ * later writes, and each judges one Session, so a damaged Session never
+ * blocks installing them or writing elsewhere. Deleting the Session clears it.
+ */
+function guardSessionLineage(owner: SqliteOwner): void {
+  owner.sql.exec(
+    "CREATE TABLE IF NOT EXISTS session_lineage_damage (session_id TEXT PRIMARY KEY)",
+  );
+  const installed = decodeInstalledGuards(
+    owner.sql
+      .exec(
+        `SELECT COUNT(*) AS installed FROM sqlite_master
+          WHERE type = 'trigger'
+            AND name IN (SELECT value FROM json_each(?))`,
+        JSON.stringify(lineageGuards),
+      )
+      .one(),
+  );
+  if (installed._tag === "Failure")
+    throw unavailable("Stored Session lineage guards are invalid");
+  if (installed.success.installed !== lineageGuards.length) {
+    const damaged = owner.sql
+      .exec(
+        `SELECT child.session_id AS session_id
+           FROM session_entries AS child
+           LEFT JOIN session_entries AS parent ON parent.id = child.parent_id
+          WHERE child.parent_id IS NOT NULL
+            AND (parent.id IS NULL
+                 OR parent.session_id != child.session_id
+                 OR parent.state != 'complete'
+                 OR parent.sequence >= child.sequence)
+         UNION
+         SELECT session_id FROM session_entries
+          WHERE parent_id IS NULL AND state = 'complete'
+          GROUP BY session_id HAVING COUNT(*) > 1`,
+      )
+      .toArray()
+      .map((raw) => {
+        const decoded = decodeDamagedSession(raw);
+        if (decoded._tag === "Failure")
+          throw unavailable("Stored Session lineage audit is invalid");
+        return decoded.success.session_id;
+      });
+    for (const sessionId of damaged) {
+      owner.sql.exec(
+        "INSERT OR IGNORE INTO session_lineage_damage (session_id) VALUES (?)",
+        sessionId,
+      );
+      touchSessionInbox(owner, { sessionId, title: null });
+    }
+  }
+  // SQLite fires DELETE triggers for the row an INSERT OR REPLACE removes
+  // only under PRAGMA recursive_triggers, which is off by default and which
+  // Woodstock never turns on. So the delete guard cannot see a REPLACE; this
+  // guard refuses a replacing row that would leave the replaced row's
+  // children under a streaming, later or foreign parent.
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_lineage_replace
+    BEFORE INSERT ON session_entries
+    WHEN EXISTS (
+      SELECT 1 FROM session_entries AS child
+       WHERE child.parent_id = NEW.id
+         AND (child.session_id != NEW.session_id
+              OR child.sequence <= NEW.sequence
+              OR NEW.state != 'complete'))
+    BEGIN
+      SELECT RAISE(ABORT, 'Session entry would strand its children');
+    END
+  `);
+  // REPLACE also resolves the UNIQUE (session_id, sequence) conflict by
+  // deleting whichever row holds that position, under any id. Refuse a
+  // replacing row whose position belongs to another row with children.
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_lineage_replace_position
+    BEFORE INSERT ON session_entries
+    WHEN EXISTS (
+      SELECT 1 FROM session_entries AS held
+        JOIN session_entries AS child ON child.parent_id = held.id
+       WHERE held.session_id = NEW.session_id
+         AND held.sequence = NEW.sequence
+         AND held.id != NEW.id)
+    BEGIN
+      SELECT RAISE(ABORT, 'Session entry would strand its children');
+    END
+  `);
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_damaged_session
+    BEFORE INSERT ON session_entries
+    WHEN EXISTS (
+      SELECT 1 FROM session_lineage_damage WHERE session_id = NEW.session_id)
+    BEGIN
+      SELECT RAISE(ABORT, '${brokenSessionMessage}');
+    END
+  `);
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_lineage_insert
+    BEFORE INSERT ON session_entries
+    BEGIN
+      SELECT RAISE(ABORT, 'Session entry parent is not an earlier complete entry of its Session')
+       WHERE NEW.parent_id IS NOT NULL AND NOT EXISTS (
+         SELECT 1 FROM session_entries AS parent
+          WHERE parent.id = NEW.parent_id
+            AND parent.session_id = NEW.session_id
+            AND parent.state = 'complete'
+            AND parent.sequence < NEW.sequence);
+      SELECT RAISE(ABORT, 'Session already has a root entry')
+       WHERE NEW.parent_id IS NULL AND EXISTS (
+         SELECT 1 FROM session_entries AS other
+          WHERE other.session_id = NEW.session_id
+            AND other.state = 'complete'
+            AND other.id != NEW.id);
+    END
+  `);
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_lineage_update
+    BEFORE UPDATE OF id, session_id, parent_id, sequence, state
+    ON session_entries
+    BEGIN
+      SELECT RAISE(ABORT, 'Session entry lineage columns are immutable');
+    END
+  `);
+  owner.sql.exec(`
+    CREATE TRIGGER IF NOT EXISTS session_entries_lineage_delete
+    BEFORE DELETE ON session_entries
+    WHEN EXISTS (SELECT 1 FROM sessions WHERE id = OLD.session_id)
+     AND EXISTS (SELECT 1 FROM session_entries WHERE parent_id = OLD.id)
+    BEGIN
+      SELECT RAISE(ABORT, 'Session entry still has children');
+    END
   `);
 }
 
@@ -1438,10 +1822,30 @@ export function prepareSessionStore(owner: SqliteOwner): void {
     owner.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_entries_work ON session_entries(work_id, sequence)",
     );
+    // Context and preference reads look up these rare older facts directly
+    // rather than walking the history behind them.
+    owner.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_session_entries_model_preference
+       ON session_entries(session_id, sequence)
+       WHERE type = 'model_preference'`,
+    );
+    owner.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_session_entries_cancellation_target
+       ON session_entries(session_id, json_extract(data_json, '$.targetWorkId'))
+       WHERE type = 'cancellation'`,
+    );
     owner.sql
       .exec(`CREATE INDEX IF NOT EXISTS idx_session_entries_successful_tool
       ON session_entries(session_id, work_id, json_extract(data_json, '$.call.id'))
       WHERE type = 'tool_outcome' AND json_extract(data_json, '$.result.isError') = 0`);
+    guardSessionLineage(owner);
+    owner.sql.exec(`
+    CREATE TABLE IF NOT EXISTS session_request_withdrawals (
+      session_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      PRIMARY KEY (session_id, request_id)
+    )
+  `);
     owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS session_command_admissions (
       id TEXT PRIMARY KEY,
@@ -1471,10 +1875,10 @@ export function readSessionModelPreference(
   owner: SqliteOwner,
   sessionId: string,
 ): ModelPreference | null {
-  return lineageModelPreference(
-    owner,
-    readSessionLineage(owner, { sessionId }),
-  );
+  const leaf = readSessionRow(owner, sessionId)?.leaf_id;
+  return leaf === undefined || leaf === null
+    ? null
+    : lineageModelPreference(owner, sessionId, leaf);
 }
 
 /**
@@ -1487,31 +1891,7 @@ export function readLastModelChoiceSequence(
 ): number | null {
   const leaf = readSessionRow(owner, sessionId)?.leaf_id;
   if (leaf === undefined || leaf === null) return null;
-  const raw = owner.sql
-    .exec(
-      `WITH RECURSIVE branch (id, parent_id, sequence, type, state) AS (
-         SELECT id, parent_id, sequence, type, state
-           FROM session_entries
-          WHERE session_id = ? AND id = ?
-         UNION
-         SELECT parent.id, parent.parent_id, parent.sequence, parent.type,
-                parent.state
-           FROM session_entries AS parent
-           JOIN branch AS child ON parent.id = child.parent_id
-          WHERE parent.session_id = ?
-       )
-       SELECT MAX(sequence) AS sequence
-         FROM branch
-        WHERE type = 'model_preference' AND state != 'streaming'`,
-      sessionId,
-      leaf,
-      sessionId,
-    )
-    .one();
-  const decoded = decodeModelChoiceRow(raw);
-  if (decoded._tag === "Failure")
-    throw unavailable("Stored model choice order is invalid");
-  return decoded.success.sequence;
+  return newestLineagePreference(owner, sessionId, leaf)?.sequence ?? null;
 }
 
 /** Append a decoded preference request; no command or scheduler work is minted. */
@@ -1541,9 +1921,20 @@ export function setSessionTitle(
 ): void {
   owner.transactionSync(() => {
     ensureSession(owner, sessionId);
+    const metadata = title === null ? null : encodeSessionMetadata({ title });
+    if (
+      owner.sql
+        .exec(
+          "SELECT 1 FROM sessions WHERE id = ? AND metadata_json IS ?",
+          sessionId,
+          metadata,
+        )
+        .toArray().length > 0
+    )
+      return;
     owner.sql.exec(
       "UPDATE sessions SET metadata_json = ? WHERE id = ?",
-      title === null ? null : encodeSessionMetadata({ title }),
+      metadata,
       sessionId,
     );
     touchSessionInbox(owner, {
@@ -1696,18 +2087,8 @@ export function completeSessionLeaf(
   return completed;
 }
 
-const entryColumns = `id, session_id, parent_id, sequence, type, role, state,
-       request_id, work_id, data_json, timestamp, completed_at`;
-
 /** Rows one bounded lineage read decodes at once. */
 export const lineageRowLimit = 200;
-
-/**
- * Stored bytes one model context read may decode: the retained storage
- * plane's `LLM_CONTEXT_BYTES`, now a typed refusal rather than a silent
- * truncation, because a truncated context would change the model's input.
- */
-export const contextByteLimit = 12 * 1_048_576;
 
 /**
  * Rows one fork copy window decodes. A fork copies the whole lineage, so a
@@ -1726,17 +2107,22 @@ const lineageByteLimit = 4 * 1_048_576;
  * law); entry data is read afterwards for exactly the rows a reader needs.
  * The selected walk drops streaming placeholders after walking; the fork walk
  * stops at them, as a fork copies only complete history.
+ * Each walk descends from the tip only while it is above a floor sequence,
+ * so a reader of recent rows never visits the history behind them. The
+ * selected walk steps only to an older parent, so it ends without
+ * deduplicating; the fork walk keeps every link for its whole-lineage check.
  */
 const lineageWalks = {
   selected: `WITH RECURSIVE branch (id, parent_id, sequence, state) AS (
        SELECT id, parent_id, sequence, state
          FROM session_entries
         WHERE session_id = ? AND id = ?
-       UNION
+       UNION ALL
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state
          FROM session_entries AS parent
          JOIN branch AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ?
+        WHERE parent.session_id = ? AND child.sequence > ?
+          AND +parent.sequence < child.sequence
      )`,
   fork: `WITH RECURSIVE branch (id, parent_id, sequence, state) AS (
        SELECT id, parent_id, sequence, state
@@ -1746,7 +2132,8 @@ const lineageWalks = {
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state
          FROM session_entries AS parent
          JOIN branch AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ? AND parent.state != 'streaming'
+        WHERE parent.session_id = ? AND child.sequence > ?
+          AND parent.state != 'streaming'
      )`,
 } as const;
 
@@ -1775,20 +2162,8 @@ const decodeLineageCheck = Schema.decodeUnknownResult(
   }),
   closed,
 );
-const decodeLineageSize = Schema.decodeUnknownResult(
-  Schema.Struct({ sequence, bytes: count }),
-  closed,
-);
-const decodeContextBytes = Schema.decodeUnknownResult(
-  Schema.Struct({ bytes: count }),
-  closed,
-);
 const decodeLineageSequence = Schema.decodeUnknownResult(
   Schema.Struct({ sequence }),
-  closed,
-);
-const decodeFirstKept = Schema.decodeUnknownResult(
-  Schema.Struct({ first_kept: boundedId }),
   closed,
 );
 const decodeLineageWorkId = Schema.decodeUnknownResult(
@@ -1801,8 +2176,10 @@ const decodeLineageDiagnostic = Schema.decodeUnknownResult(
 );
 
 /**
- * One validated root-to-tip lineage, located in SQL without decoding its
- * rows. Readers take bounded windows of it by sequence.
+ * One root-to-tip lineage. Its integrity is enforced where entries are
+ * written (`guardSessionLineage`), so locating it reads only its tip and its
+ * root; readers take bounded windows of it by sequence, walking down from the
+ * tip only as far as their floor.
  */
 export type SessionLineage = Readonly<{
   sessionId: string;
@@ -1815,9 +2192,15 @@ export type SessionLineage = Readonly<{
   newestSequence: number;
 }>;
 
+/**
+ * Run one query over the lineage rows above `floor`: the walk descends from
+ * the tip while its rows are above it, so only those rows, and the first at
+ * or below it, are visited.
+ */
 function lineageQuery(
   owner: SqliteOwner,
   lineage: SessionLineage,
+  floor: number,
   query: string,
   ...bindings: SqliteValue[]
 ): readonly RawRow[] {
@@ -1827,12 +2210,16 @@ function lineageQuery(
       lineage.sessionId,
       lineage.tipId,
       lineage.sessionId,
+      floor,
       ...bindings,
     )
     .toArray();
 }
 
-/** Validate one root-to-tip chain in SQL, the same way decoded rows would be. */
+/**
+ * Walk and check one whole root-to-tip chain in SQL, the same way decoded
+ * rows would be. A fork copies every row of it, so it checks every row.
+ */
 function locateLineage(
   owner: SqliteOwner,
   sessionId: string,
@@ -1865,6 +2252,7 @@ function locateLineage(
         sessionId,
         tipId,
         sessionId,
+        0,
       )
       .one(),
   );
@@ -1891,14 +2279,62 @@ function locateLineage(
   });
 }
 
-/** Locate the selected lineage; undefined when the Session has no leaf. */
+const decodeLineageEnds = Schema.decodeUnknownResult(
+  Schema.Struct({
+    state: Schema.Literals(["complete", "streaming"]),
+    newest_sequence: sequence,
+    root_id: Schema.NullOr(boundedId),
+    root_parent_id: Schema.NullOr(Schema.String),
+  }),
+  closed,
+);
+
+/**
+ * Locate a selected lineage from its two ends; undefined when the Session
+ * has no leaf. The guards make a Session's one complete root the root of
+ * every lineage in it, so neither end needs a walk.
+ */
 export function readSessionLineage(
   owner: SqliteOwner,
   input: ReadSelectedPathInput,
 ): SessionLineage | undefined {
-  const tip = input.leafId ?? readSessionRow(owner, input.sessionId)?.leaf_id;
+  // Read the Session row even for an explicit tip: it refuses a broken one.
+  const session = readSessionRow(owner, input.sessionId);
+  const tip = input.leafId ?? session?.leaf_id;
   if (tip === undefined || tip === null) return undefined;
-  return locateLineage(owner, input.sessionId, tip, "selected");
+  const failures = lineageFailures.selected;
+  const raw = owner.sql
+    .exec(
+      `SELECT tip.state AS state, tip.sequence AS newest_sequence,
+              root.id AS root_id, root.parent_id AS root_parent_id
+         FROM session_entries AS tip
+         LEFT JOIN (
+           SELECT id, parent_id FROM session_entries
+            WHERE session_id = ? AND state = 'complete'
+            ORDER BY sequence ASC LIMIT 1
+         ) AS root
+        WHERE tip.session_id = ? AND tip.id = ?`,
+      input.sessionId,
+      input.sessionId,
+      tip,
+    )
+    .toArray()[0];
+  if (raw === undefined) throw unavailable(failures.empty);
+  const ends = decodeLineageEnds(raw);
+  if (ends._tag === "Failure")
+    throw unavailable("Stored Session lineage ends are invalid");
+  if (ends.success.state !== "complete" || ends.success.root_id === null)
+    throw unavailable(failures.empty);
+  if (ends.success.root_parent_id !== null)
+    throw unavailable(failures.missingParent);
+  return Object.freeze({
+    sessionId: input.sessionId,
+    walk: "selected",
+    tipId: tip,
+    rootId: ends.success.root_id,
+    newestId: tip,
+    newestSequence: ends.success.newest_sequence,
+  });
 }
 
 function readLineageRange(
@@ -1907,10 +2343,11 @@ function readLineageRange(
   oldest: number,
   newest: number,
 ): readonly StoredSessionRow[] {
-  return Object.freeze(
+  const rows = Object.freeze(
     lineageQuery(
       owner,
       lineage,
+      oldest - 1,
       `SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND state != 'streaming'
@@ -1920,8 +2357,24 @@ function readLineageRange(
       lineage.sessionId,
       oldest,
       newest,
-    ).map(parseEntryRow),
+    ).map((raw) => parseEntryRow(owner, raw)),
   );
+  // The walk stopped at the range or at the root, never at a missing parent.
+  const failures = lineageFailures.selected;
+  const deepest = rows[0];
+  if (
+    deepest !== undefined &&
+    deepest.parentId !== null &&
+    deepest.sequence !== oldest
+  )
+    throw unavailable(failures.missingParent);
+  let previous: StoredSessionRow | undefined;
+  for (const row of rows) {
+    if (previous !== undefined && row.parentId !== previous.id)
+      throw unavailable(failures.invalid);
+    previous = row;
+  }
+  return rows;
 }
 
 export type LineageWindowInput = Readonly<{
@@ -1941,6 +2394,113 @@ export type LineageWindow = Readonly<{
   more: boolean;
 }>;
 
+const decodeWindowSizes = Schema.decodeUnknownResult(
+  Schema.Struct({
+    sizes: Schema.fromJsonString(Schema.Array(Schema.Tuple([sequence, count]))),
+    deepest_parent: Schema.NullOr(Schema.String),
+    deepest_sequence: Schema.NullOr(sequence),
+  }),
+  closed,
+);
+
+/**
+ * Sizes of up to `rows` lineage rows inside the bounds, newest or oldest
+ * first. A newest window's walk counts its rows as it descends and stops once
+ * it holds that many; an oldest window's walk stops at `after`. Either way the
+ * walk visits the rows from the tip down to the window, never the history
+ * below it. The deepest walked row comes back with the sizes, so a walk that
+ * ended at a missing parent above where it meant to stop is refused, never
+ * read as the end of history.
+ */
+function readWindowSizes(
+  owner: SqliteOwner,
+  lineage: SessionLineage,
+  from: LineageWindowInput["from"],
+  after: number,
+  before: number,
+  rows: number,
+): readonly Readonly<{ sequence: number; bytes: number }>[] {
+  const ends = `SELECT
+         (SELECT json_group_array(json_array(sequence, bytes)) FROM (
+            SELECT sequence, LENGTH(CAST(data_json AS BLOB)) AS bytes
+              FROM session_entries
+             WHERE ${from === "newest" ? "" : "session_id = ? AND"}
+                   state != 'streaming'
+               AND sequence > ? AND sequence < ?
+               AND id IN (SELECT id FROM branch)
+             ORDER BY sequence ${from === "newest" ? "DESC" : "ASC"}
+             LIMIT ?)) AS sizes,
+         (SELECT parent_id FROM branch ORDER BY sequence ASC LIMIT 1)
+           AS deepest_parent,
+         (SELECT sequence FROM branch ORDER BY sequence ASC LIMIT 1)
+           AS deepest_sequence`;
+  const counts = (row: string) =>
+    `CASE WHEN ${row}.state != 'streaming'
+               AND ${row}.sequence < ? AND ${row}.sequence > ?
+          THEN 1 ELSE 0 END`;
+  const raw =
+    from === "newest"
+      ? owner.sql
+          .exec(
+            `WITH RECURSIVE branch (id, parent_id, sequence, state, taken) AS (
+               SELECT id, parent_id, sequence, state,
+                      ${counts("session_entries")}
+                 FROM session_entries
+                WHERE session_id = ? AND id = ?
+               UNION ALL
+               SELECT parent.id, parent.parent_id, parent.sequence, parent.state,
+                      child.taken + ${counts("parent")}
+                 FROM session_entries AS parent
+                 JOIN branch AS child ON parent.id = child.parent_id
+                WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+                  AND child.taken < ? AND child.sequence > ?
+             )
+             ${ends}`,
+            before,
+            after,
+            lineage.sessionId,
+            lineage.tipId,
+            before,
+            after,
+            lineage.sessionId,
+            rows,
+            after,
+            after,
+            before,
+            rows,
+          )
+          .toArray()
+      : lineageQuery(
+          owner,
+          lineage,
+          after,
+          ends,
+          lineage.sessionId,
+          after,
+          before,
+          rows,
+        );
+  const decoded = decodeWindowSizes(raw[0]);
+  if (decoded._tag === "Failure")
+    throw unavailable("Stored Session entry size is invalid");
+  const { sizes, deepest_parent, deepest_sequence } = decoded.success;
+  const stopped =
+    deepest_parent === null ||
+    deepest_sequence === null ||
+    deepest_sequence <= after ||
+    (from === "newest" && sizes.length === rows);
+  if (!stopped) throw unavailable(lineageFailures.selected.missingParent);
+  return Object.freeze(
+    sizes
+      .map(([rowSequence, bytes]) => ({ sequence: rowSequence, bytes }))
+      .sort((left, right) =>
+        from === "newest"
+          ? right.sequence - left.sequence
+          : left.sequence - right.sequence,
+      ),
+  );
+}
+
 /**
  * Read one contiguous window of a lineage, bounded by row count and by stored
  * bytes. Row sizes are measured in SQL before any entry is decoded.
@@ -1950,26 +2510,14 @@ export function readLineageWindow(
   lineage: SessionLineage,
   input: LineageWindowInput,
 ): LineageWindow {
-  const sizes = lineageQuery(
+  const sizes = readWindowSizes(
     owner,
     lineage,
-    `SELECT sequence, LENGTH(CAST(data_json AS BLOB)) AS bytes
-       FROM session_entries
-      WHERE session_id = ? AND state != 'streaming'
-        AND sequence > ? AND sequence < ?
-        AND id IN (SELECT id FROM branch)
-      ORDER BY sequence ${input.from === "newest" ? "DESC" : "ASC"}
-      LIMIT ?`,
-    lineage.sessionId,
+    input.from,
     input.after ?? 0,
     input.before ?? Number.MAX_SAFE_INTEGER,
     input.rows + 1,
-  ).map((raw) => {
-    const decoded = decodeLineageSize(raw);
-    if (decoded._tag === "Failure")
-      throw unavailable("Stored Session entry size is invalid");
-    return decoded.success;
-  });
+  );
   let taken = 0;
   let bytes = 0;
   for (const size of sizes) {
@@ -2003,6 +2551,7 @@ export function lineageHasSequence(
     lineageQuery(
       owner,
       lineage,
+      rowSequence - 1,
       `SELECT 1 AS present
          FROM session_entries
         WHERE session_id = ? AND state != 'streaming' AND sequence = ?
@@ -2019,52 +2568,66 @@ export function lineageEntrySequence(
   lineage: SessionLineage,
   id: string,
 ): number | undefined {
-  const raw = lineageQuery(
-    owner,
-    lineage,
-    `SELECT sequence
-       FROM session_entries
-      WHERE session_id = ? AND state != 'streaming' AND id = ?
-        AND id IN (SELECT id FROM branch)`,
-    lineage.sessionId,
-    id,
-  )[0];
+  const raw = owner.sql
+    .exec(
+      `SELECT sequence FROM session_entries
+        WHERE session_id = ? AND id = ? AND state != 'streaming'`,
+      lineage.sessionId,
+      id,
+    )
+    .toArray()[0];
   if (raw === undefined) return undefined;
   const decoded = decodeLineageSequence(raw);
   if (decoded._tag === "Failure")
     throw unavailable("Stored Session entry sequence is invalid");
-  return decoded.success.sequence;
+  return lineageHasSequence(owner, lineage, decoded.success.sequence)
+    ? decoded.success.sequence
+    : undefined;
 }
 
-/** The newest lineage row of one entry kind, decoded. */
-function readNewestLineageEntry(
+/**
+ * The newest preference on the lineage ending at `tipId`. The Session's
+ * preference rows come from their index; the walk from the tip stops at the
+ * first of them it meets, so it never passes the newest preference on this
+ * lineage, and a Session without one walks nothing. One set at the root
+ * still walks the whole lineage.
+ */
+function newestLineagePreference(
   owner: SqliteOwner,
-  lineage: SessionLineage,
-  kind: StoredSessionEntry["kind"],
+  sessionId: string,
+  tipId: string,
 ): StoredSessionRow | undefined {
-  const raw = lineageQuery(
-    owner,
-    lineage,
-    `SELECT ${entryColumns}
-       FROM session_entries
-      WHERE session_id = ? AND state != 'streaming' AND type = ?
-        AND id IN (SELECT id FROM branch)
-      ORDER BY sequence DESC
-      LIMIT 1`,
-    lineage.sessionId,
-    kind,
-  )[0];
-  return raw === undefined ? undefined : parseEntryRow(raw);
+  const continues = (row: string) =>
+    `${row}.id NOT IN (SELECT id FROM targets)
+     AND ${row}.sequence > (SELECT MIN(sequence) FROM targets)`;
+  const [newest] = walkedTargets(
+    owner.sql
+      .exec(
+        `WITH RECURSIVE targets AS MATERIALIZED (
+           SELECT id, sequence FROM session_entries
+            WHERE session_id = ? AND type = 'model_preference'
+              AND state != 'streaming'
+         ),
+         ${targetWalk(continues("child"))}
+         ${walkSteps(continues("walk"))}`,
+        sessionId,
+        sessionId,
+        tipId,
+        sessionId,
+      )
+      .toArray(),
+  );
+  return newest === undefined
+    ? undefined
+    : readEntryRow(owner, sessionId, newest);
 }
 
 function lineageModelPreference(
   owner: SqliteOwner,
-  lineage: SessionLineage | undefined,
+  sessionId: string,
+  tipId: string,
 ): ModelPreference | null {
-  const entry =
-    lineage === undefined
-      ? undefined
-      : readNewestLineageEntry(owner, lineage, "model_preference")?.entry;
+  const entry = newestLineagePreference(owner, sessionId, tipId)?.entry;
   return entry?.kind === "model_preference" ? entry.preference : null;
 }
 
@@ -2076,9 +2639,11 @@ function readLineageDocument(
   name: string,
 ): string | undefined {
   if (lineage === undefined) return undefined;
+  // No index finds documents yet, so this still walks the whole lineage.
   const raw = lineageQuery(
     owner,
     lineage,
+    0,
     `SELECT ${entryColumns}
        FROM session_entries
       WHERE session_id = ? AND state != 'streaming' AND type = 'document'
@@ -2091,7 +2656,7 @@ function readLineageDocument(
     extensionId,
     name,
   )[0];
-  const entry = raw === undefined ? undefined : parseEntryRow(raw).entry;
+  const entry = raw === undefined ? undefined : parseEntryRow(owner, raw).entry;
   if (entry === undefined) return undefined;
   if (
     entry.kind !== "document" ||
@@ -2102,20 +2667,26 @@ function readLineageDocument(
   return entry.valueJson;
 }
 
+const decodeOldestWorkRow = Schema.decodeUnknownResult(
+  Schema.Struct({ sequence: Schema.NullOr(sequence) }),
+  closed,
+);
+
 /** What a bounded client page needs to know about the works it shows. */
 export type LineageWorkFacts = Readonly<{
   /** Works whose command entry lies on the lineage. */
   commands: ReadonlySet<string>;
-  /** Newest failure text each work recorded on the lineage. */
+  /** Newest owner-produced terminal diagnostic on the lineage. */
   diagnostics: ReadonlyMap<string, string>;
   /** Host metadata of the cancellation that ended each work. */
   cancellations: ReadonlyMap<string, Json>;
 }>;
 
 /**
- * Look up, across the whole lineage, only the facts of the given works. A
- * diagnostic is the newest of an assistant error, a final retry error or a
- * work terminal's diagnostic; only that text is extracted, never the message.
+ * Look up, on the lineage, only the facts of the given works. Diagnostics come
+ * only from owned terminal fields, never provider message or retry text. The works'
+ * indexes give their oldest row, and the walks stop just below it, so a page
+ * of recent works never visits older history.
  */
 export function readLineageWorkFacts(
   owner: SqliteOwner,
@@ -2129,16 +2700,49 @@ export function readLineageWorkFacts(
       cancellations: new Map<string, Json>(),
     });
   const works = JSON.stringify([...workIds]);
+  const oldest = decodeOldestWorkRow(
+    owner.sql
+      .exec(
+        `SELECT MIN(sequence) AS sequence FROM (
+           SELECT MIN(sequence) AS sequence
+             FROM session_entries INDEXED BY idx_session_entries_work
+            WHERE work_id IN (SELECT value FROM json_each(?))
+              AND session_id = ?
+           UNION ALL
+           SELECT MIN(sequence) FROM session_entries
+                  INDEXED BY idx_session_entries_cancellation_target
+            WHERE session_id = ? AND type = 'cancellation'
+              AND json_extract(data_json, '$.targetWorkId')
+                  IN (SELECT value FROM json_each(?))
+         )`,
+        works,
+        lineage.sessionId,
+        lineage.sessionId,
+        works,
+      )
+      .one(),
+  );
+  if (oldest._tag === "Failure")
+    throw unavailable("Stored Session work order is invalid");
+  if (oldest.success.sequence === null)
+    return Object.freeze({
+      commands: new Set<string>(),
+      diagnostics: new Map<string, string>(),
+      cancellations: new Map<string, Json>(),
+    });
+  const floor = oldest.success.sequence - 1;
   const commands = new Set(
     lineageQuery(
       owner,
       lineage,
+      floor,
       `SELECT DISTINCT work_id
          FROM session_entries
-        WHERE session_id = ? AND state != 'streaming' AND type = 'command'
+        WHERE session_id = ? AND sequence > ? AND state != 'streaming' AND type = 'command'
           AND work_id IN (SELECT value FROM json_each(?))
           AND id IN (SELECT id FROM branch)`,
       lineage.sessionId,
+      floor,
       works,
     ).map((raw) => {
       const decoded = decodeLineageWorkId(raw);
@@ -2151,26 +2755,20 @@ export function readLineageWorkFacts(
   for (const raw of lineageQuery(
     owner,
     lineage,
+    floor,
     `SELECT work_id, diagnostic FROM (
        SELECT work_id, sequence,
-              CASE
-                WHEN type = 'work_terminal'
-                  THEN json_extract(data_json, '$.diagnostic')
-                WHEN type = 'message'
-                  THEN json_extract(data_json, '$.value.errorMessage')
-                WHEN json_extract(data_json, '$.event.type') = 'auto_retry_end'
-                  THEN json_extract(data_json, '$.event.finalError')
-              END AS diagnostic
+              json_extract(data_json, '$.diagnostic') AS diagnostic
          FROM session_entries
-        WHERE session_id = ? AND state != 'streaming'
+        WHERE session_id = ? AND sequence > ? AND state != 'streaming'
           AND work_id IN (SELECT value FROM json_each(?))
-          AND (type IN ('work_terminal', 'live_retry')
-               OR (type = 'message' AND role = 'assistant'))
+          AND type IN ('work_terminal', 'run_terminal')
           AND id IN (SELECT id FROM branch)
      )
      WHERE diagnostic IS NOT NULL
      ORDER BY sequence ASC`,
     lineage.sessionId,
+    floor,
     works,
   )) {
     const decoded = decodeLineageDiagnostic(raw);
@@ -2182,16 +2780,18 @@ export function readLineageWorkFacts(
   for (const { entry } of lineageQuery(
     owner,
     lineage,
+    floor,
     `SELECT ${entryColumns}
        FROM session_entries
-      WHERE session_id = ? AND state != 'streaming' AND type = 'cancellation'
+      WHERE session_id = ? AND sequence > ? AND state != 'streaming' AND type = 'cancellation'
         AND json_extract(data_json, '$.targetWorkId')
             IN (SELECT value FROM json_each(?))
         AND id IN (SELECT id FROM branch)
       ORDER BY sequence ASC`,
     lineage.sessionId,
+    floor,
     works,
-  ).map(parseEntryRow))
+  ).map((raw) => parseEntryRow(owner, raw)))
     if (entry.kind === "cancellation" && entry.meta !== undefined)
       cancellations.set(entry.targetWorkId, entry.meta);
   return Object.freeze({ commands, diagnostics, cancellations });
@@ -2213,163 +2813,334 @@ export function readSelectedPath(
     : readLineageRange(owner, lineage, 1, lineage.newestSequence);
 }
 
-/** One lineage, optionally only its rows after `after` that belong to `work`. */
-type ContextSegment = Readonly<{
-  lineage: SessionLineage;
-  after: number;
-  work: string | null;
-}>;
-
-function segmentQuery(
-  owner: SqliteOwner,
-  segment: ContextSegment,
-  columns: string,
-  clause: string,
-  ...bindings: SqliteValue[]
-): readonly RawRow[] {
-  return lineageQuery(
-    owner,
-    segment.lineage,
-    `SELECT ${columns}
-       FROM session_entries
-      WHERE session_id = ? AND state != 'streaming'
-        AND id IN (SELECT id FROM branch)
-        AND sequence > ?
-        AND (? IS NULL OR work_id = ?
-             OR (type = 'command'
-                 AND json_extract(data_json, '$.targetWorkId') = ?))
-        ${clause}`,
-    segment.lineage.sessionId,
-    segment.after,
-    segment.work,
-    segment.work,
-    segment.work,
-    ...bindings,
-  );
+/**
+ * A walk from one row toward the root for the `targets` the statement
+ * selects first by index. `continues` decides, per row, whether the walk
+ * steps past it; a statement without targets reads only its starting row,
+ * so a missing one is still refused.
+ */
+function targetWalk(continues: string): string {
+  return `walk (id, parent_id, sequence, state) AS (
+       SELECT id, parent_id, sequence, state
+         FROM session_entries
+        WHERE session_id = ? AND id = ?
+       UNION ALL
+       SELECT parent.id, parent.parent_id, parent.sequence, parent.state
+         FROM session_entries AS parent
+         JOIN walk AS child ON parent.id = child.parent_id
+        WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+          AND ${continues}
+     )`;
 }
 
 /**
- * First sequence the model context reads: the latest compaction's kept
- * entry. Zero when nothing compacted, or when that entry is not on these
- * segments, where `buildSessionContext` also reads the whole path.
+ * The walked targets, newest first, then the deepest walked row, each with
+ * whether the walk meant to pass it. Only these rows reach JavaScript.
  */
-function contextStart(
-  owner: SqliteOwner,
-  segments: readonly ContextSegment[],
-): number {
-  for (const segment of [...segments].reverse()) {
-    const raw = segmentQuery(
-      owner,
-      segment,
-      "json_extract(data_json, '$.firstKeptEntryId') AS first_kept",
-      "AND type = 'compaction' ORDER BY sequence DESC LIMIT 1",
-    )[0];
-    if (raw === undefined) continue;
-    const latest = decodeFirstKept(raw);
-    if (latest._tag === "Failure")
-      throw unavailable("Stored Session compaction boundary is invalid");
-    for (const candidate of segments) {
-      const kept = segmentQuery(
-        owner,
-        candidate,
-        "sequence",
-        "AND id = ?",
-        latest.success.first_kept,
-      )[0];
-      if (kept === undefined) continue;
-      const decoded = decodeLineageSequence(kept);
-      if (decoded._tag === "Failure")
-        throw unavailable("Stored Session entry sequence is invalid");
-      return decoded.success.sequence;
-    }
-    return 0;
-  }
-  return 0;
+function walkSteps(continues: string): string {
+  return `SELECT id, parent_id, target, continues FROM (
+             SELECT id, parent_id, sequence,
+                    id IN (SELECT id FROM targets) AS target,
+                    COALESCE((${continues}), 0) AS continues
+               FROM walk
+           )
+           WHERE target = 1 OR sequence = (SELECT MIN(sequence) FROM walk)
+           ORDER BY sequence DESC`;
+}
+
+const flag = Schema.Literals([0, 1]);
+const decodeWalkStep = Schema.decodeUnknownResult(
+  Schema.Struct({
+    id: boundedId,
+    parent_id: Schema.NullOr(Schema.String),
+    target: flag,
+    continues: flag,
+  }),
+  closed,
+);
+
+/**
+ * The targets a bounded walk reached, newest first, once the walk is known to
+ * have ended at the root or where it meant to stop, never at a missing or
+ * out-of-order parent. Walks step only to an older parent, so they end.
+ * A walk that found not even its starting row is refused as an unavailable
+ * leaf.
+ */
+function walkedTargets(raws: readonly RawRow[]): readonly string[] {
+  const failures = lineageFailures.selected;
+  if (raws.length === 0) throw unavailable(failures.empty);
+  const steps = raws.map((raw) => {
+    const decoded = decodeWalkStep(raw);
+    if (decoded._tag === "Failure")
+      throw unavailable("Stored Session walk row is invalid");
+    return decoded.success;
+  });
+  const deepest = steps.at(-1);
+  if (deepest?.continues === 1 && deepest.parent_id !== null)
+    throw unavailable(failures.missingParent);
+  return steps.flatMap((step) => (step.target === 1 ? [step.id] : []));
+}
+
+/** The kept head of a complete compaction row, else null. */
+function compactionHead(row: string): string {
+  return `CASE WHEN ${row}.type = 'compaction' AND ${row}.state != 'streaming'
+               THEN json_extract(${row}.data_json, '$.head') END`;
 }
 
 /**
- * The rows model context and compaction read: the latest compaction's kept
- * window through the tip, preceded only by the older facts that still decide
- * it. Those are cancellations that withdrew a command inside the window, and
- * earlier compactions of the active work, whose recovery runs at most once.
+ * The walk a settled context reads: from the tip back to the kept entry of
+ * the newest complete compaction, which `head` carries once passed, or to the
+ * root when nothing compacted or that entry is not on this lineage. It never
+ * visits the history a compaction already cut.
  */
-function readContextRows(
+const contextWalk = `WITH RECURSIVE walk (id, parent_id, sequence, state, head) AS (
+       SELECT id, parent_id, sequence, state,
+              ${compactionHead("session_entries")}
+         FROM session_entries
+        WHERE session_id = ? AND id = ?
+       UNION ALL
+       SELECT parent.id, parent.parent_id, parent.sequence, parent.state,
+              COALESCE(child.head, ${compactionHead("parent")})
+         FROM session_entries AS parent
+         JOIN walk AS child ON parent.id = child.parent_id
+        WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+          AND (child.head IS NOT child.id OR child.state = 'streaming')
+     )`;
+
+/**
+ * The older facts that still decide a kept window: compactions of the active
+ * work and cancellations of a command inside the window. Their indexes find
+ * them; the walk down from the kept entry stops at the oldest of them, so
+ * only facts on this lineage count and a window without any walks nothing.
+ */
+function readDecidingFacts(
   owner: SqliteOwner,
-  segments: readonly ContextSegment[],
+  sessionId: string,
+  kept: StoredSessionRow,
+  window: readonly StoredSessionRow[],
   workId: string | null,
 ): readonly StoredSessionRow[] {
-  const start = contextStart(owner, segments);
-  let stored = 0;
-  for (const segment of segments) {
-    const measured = decodeContextBytes(
-      segmentQuery(
-        owner,
-        segment,
-        "COALESCE(SUM(LENGTH(CAST(data_json AS BLOB))), 0) AS bytes",
-        "AND sequence >= ?",
-        start,
-      )[0],
-    );
-    if (measured._tag === "Failure")
-      throw unavailable("Stored Session context size is invalid");
-    stored += measured.success.bytes;
-  }
-  if (stored > contextByteLimit)
-    throw new ShiitakeError(
-      "store",
-      "context_too_large",
-      "This Session's model context is too large to read safely. Branch or fork from an earlier entry to continue.",
-    );
-  const window = segments.flatMap((segment) =>
-    segmentQuery(
-      owner,
-      segment,
-      entryColumns,
-      "AND sequence >= ? ORDER BY sequence ASC",
-      start,
-    ).map(parseEntryRow),
-  );
-  if (start === 0) return Object.freeze(window);
   const commands = JSON.stringify(
     window.flatMap(({ entry }) =>
       entry.kind === "command" ? [entry.workId] : [],
     ),
   );
-  const prefix = segments.flatMap((segment) =>
-    segmentQuery(
-      owner,
-      segment,
-      entryColumns,
-      `AND sequence < ?
-       AND ((type = 'compaction' AND work_id = ?)
-            OR (type = 'cancellation'
-                AND json_extract(data_json, '$.targetWorkId')
-                    IN (SELECT value FROM json_each(?))))
-       ORDER BY sequence ASC`,
-      start,
-      workId,
-      commands,
-    ).map(parseEntryRow),
+  const continues = (row: string) =>
+    `${row}.sequence > (SELECT MIN(sequence) FROM targets)`;
+  const facts = walkedTargets(
+    owner.sql
+      .exec(
+        `WITH RECURSIVE targets AS MATERIALIZED (
+         SELECT id, sequence FROM session_entries
+          WHERE session_id = ? AND type = 'compaction' AND work_id = ?
+            AND sequence < ? AND state != 'streaming'
+         UNION ALL
+         SELECT id, sequence
+           FROM session_entries
+                INDEXED BY idx_session_entries_cancellation_target
+          WHERE session_id = ? AND type = 'cancellation'
+            AND json_extract(data_json, '$.targetWorkId')
+                IN (SELECT value FROM json_each(?))
+            AND sequence < ? AND state != 'streaming'
+       ),
+       ${targetWalk(continues("child"))}
+       ${walkSteps(continues("walk"))}`,
+        sessionId,
+        workId,
+        kept.sequence,
+        sessionId,
+        commands,
+        kept.sequence,
+        sessionId,
+        kept.id,
+        sessionId,
+      )
+      .toArray(),
   );
-  return Object.freeze([...prefix, ...window]);
+  if (facts.length === 0) return Object.freeze([]);
+  return Object.freeze(
+    owner.sql
+      .exec(
+        `SELECT ${entryColumns}
+           FROM session_entries
+          WHERE id IN (SELECT value FROM json_each(?))
+          ORDER BY sequence ASC`,
+        JSON.stringify(facts),
+      )
+      .toArray()
+      .map((raw) => parseEntryRow(owner, raw)),
+  );
+}
+
+/**
+ * One lineage's settled window: the walk from `tipId` to the kept entry of
+ * its newest complete compaction, or to the root. `compacted` says the walk
+ * stopped at a kept entry rather than at the root. Only the walked rows are
+ * read, and they are checked the way `locateLineage` checks a whole lineage.
+ */
+function readContextWindow(
+  owner: SqliteOwner,
+  sessionId: string,
+  tipId: string,
+): Readonly<{ rows: readonly StoredSessionRow[]; compacted: boolean }> {
+  const failures = lineageFailures.selected;
+  const rows = owner.sql
+    .exec(
+      `${contextWalk}
+       SELECT ${entryColumns}
+         FROM session_entries
+        WHERE id IN (SELECT id FROM walk) AND state != 'streaming'
+        ORDER BY sequence ASC`,
+      sessionId,
+      tipId,
+      sessionId,
+    )
+    .toArray()
+    .map((raw) => parseEntryRow(owner, raw));
+  const kept = rows[0];
+  if (kept === undefined) throw unavailable(failures.empty);
+  let head: string | undefined;
+  let previous: StoredSessionRow | undefined;
+  for (const row of rows) {
+    if (previous !== undefined && row.parentId !== previous.id)
+      throw unavailable(failures.invalid);
+    if (row.entry.kind === "compaction") head = row.entry.head;
+    previous = row;
+  }
+  const compacted = head === kept.id;
+  if (!compacted && kept.parentId !== null)
+    throw unavailable(failures.missingParent);
+  return Object.freeze({ rows: Object.freeze(rows), compacted });
 }
 
 /**
  * Context rows of the current selected lineage for one accepted work, or,
- * without a work, the settled context the next run starts from.
+ * without a work, the settled context the next run starts from: the kept
+ * window through the tip, preceded only by the older facts that still decide
+ * it. Those are cancellations that withdrew a command inside the window, and
+ * earlier compactions of the active work, whose recovery runs at most once.
+ * The read is bounded by the kept window and its deciding facts, not by the
+ * history a compaction cut.
  */
 export function readSessionContextPath(
   owner: SqliteOwner,
   input: Readonly<{ sessionId: string; workId?: string }>,
 ): readonly StoredSessionRow[] {
-  const lineage = readSessionLineage(owner, { sessionId: input.sessionId });
-  return lineage === undefined
-    ? Object.freeze([])
-    : readContextRows(
-        owner,
-        [{ lineage, after: 0, work: null }],
-        input.workId ?? null,
-      );
+  const leaf = readSessionRow(owner, input.sessionId)?.leaf_id;
+  if (leaf === undefined || leaf === null) return Object.freeze([]);
+  const window = readContextWindow(owner, input.sessionId, leaf);
+  const kept = window.rows[0];
+  if (!window.compacted || kept === undefined) return window.rows;
+  return Object.freeze([
+    ...readDecidingFacts(
+      owner,
+      input.sessionId,
+      kept,
+      window.rows,
+      input.workId ?? null,
+    ),
+    ...window.rows,
+  ]);
+}
+
+/** Whether a row is an older fact that decides `commands` for `workId`. */
+function decides(
+  row: StoredSessionRow,
+  workId: string,
+  commands: ReadonlySet<string>,
+): boolean {
+  return (
+    (row.entry.kind === "compaction" && row.entry.workId === workId) ||
+    (row.entry.kind === "cancellation" && commands.has(row.entry.targetWorkId))
+  );
+}
+
+/**
+ * The context a prepared run reads: its command's own lineage through the
+ * command, then only this work's later rows on the current lineage (the
+ * tail). The newest compaction of the tail, else of the command's lineage,
+ * decides where the window starts, with the same deciding facts before it as
+ * a settled context. The command's lineage is walked only from the command
+ * down to that start, and the tail only down to the command.
+ */
+function readRunContextRows(
+  owner: SqliteOwner,
+  sessionId: string,
+  command: StoredSessionRow,
+  current: SessionLineage | undefined,
+  workId: string,
+): readonly StoredSessionRow[] {
+  const through = readSessionLineage(owner, { sessionId, leafId: command.id });
+  if (through === undefined)
+    throw unavailable("Accepted Session command lineage is unavailable");
+  const tail =
+    current === undefined
+      ? []
+      : lineageQuery(
+          owner,
+          current,
+          command.sequence,
+          `SELECT ${entryColumns}
+             FROM session_entries
+            WHERE session_id = ? AND sequence > ? AND state != 'streaming'
+              AND id IN (SELECT id FROM branch)
+              AND (work_id = ?
+                   OR (type = 'command'
+                       AND json_extract(data_json, '$.targetWorkId') = ?))
+            ORDER BY sequence ASC`,
+          sessionId,
+          command.sequence,
+          workId,
+          workId,
+        ).map((raw) => parseEntryRow(owner, raw));
+  let latest: string | undefined;
+  for (const row of tail)
+    if (row.entry.kind === "compaction") latest = row.entry.head;
+  let start = 0;
+  let lineageRows: readonly StoredSessionRow[];
+  if (latest === undefined) {
+    const window = readContextWindow(owner, sessionId, command.id);
+    lineageRows = window.rows;
+    if (window.compacted) start = window.rows[0]?.sequence ?? 0;
+  } else {
+    const head = latest;
+    start =
+      tail.find(({ id }) => id === head)?.sequence ??
+      lineageEntrySequence(owner, through, head) ??
+      0;
+    lineageRows =
+      start > command.sequence
+        ? []
+        : readLineageRange(
+            owner,
+            through,
+            Math.max(start, 1),
+            command.sequence,
+          );
+  }
+  if (start === 0) return Object.freeze([...lineageRows, ...tail]);
+  const window = [
+    ...lineageRows,
+    ...tail.filter(({ sequence }) => sequence >= start),
+  ];
+  const commands = new Set(
+    window.flatMap(({ entry }) =>
+      entry.kind === "command" ? [entry.workId] : [],
+    ),
+  );
+  return Object.freeze([
+    ...readDecidingFacts(
+      owner,
+      sessionId,
+      lineageRows[0] ?? command,
+      window,
+      workId,
+    ),
+    ...tail.filter(
+      (row) => row.sequence < start && decides(row, workId, commands),
+    ),
+    ...window,
+  ]);
 }
 
 /** Work cancelled before delivery stays in history but never enters model context. */
@@ -2392,7 +3163,7 @@ export function withdrawnWorkIds(
 export function buildSessionContext(
   path: readonly StoredSessionRow[],
   activeWorkId?: string,
-): readonly Message[] {
+): readonly ModelMessage[] {
   const withdrawn = withdrawnWorkIds(path);
   let compaction: StoredSessionRow | undefined;
   for (let index = path.length - 1; index >= 0; index -= 1) {
@@ -2407,15 +3178,11 @@ export function buildSessionContext(
   const keptIndex =
     compactionEntry === undefined
       ? -1
-      : path.findIndex(({ id }) => id === compactionEntry.firstKeptEntryId);
+      : path.findIndex(({ id }) => id === compactionEntry.head);
   const contextPath = keptIndex >= 0 ? path.slice(keptIndex) : path;
   const visible = contextMessageIds(contextPath, activeWorkId);
-  const messages: Message[] = [];
-  if (compactionEntry !== undefined && compaction !== undefined) {
-    messages.push(
-      compactionSummaryMessage(compactionEntry.summary, compaction.timestamp),
-    );
-  }
+  const messages: ModelMessage[] = [];
+  if (compactionEntry !== undefined) messages.push(...compactionEntry.model);
   for (const row of contextPath) {
     const prompt = promptCommand(row.entry);
     if (prompt !== undefined && !withdrawn.has(prompt.workId))
@@ -2459,14 +3226,6 @@ export function prepareSessionRun(
       throw unavailable(
         "Accepted Session command disagrees with its admission",
       );
-    const through = locateLineage(
-      owner,
-      input.sessionId,
-      command.id,
-      "selected",
-    );
-    if (through.newestId !== command.id)
-      throw unavailable("Accepted Session command lineage is unavailable");
     // The current claim owns the command. Empty placeholders from a lost
     // reader carry no recoverable text and must not survive as live progress.
     owner.sql.exec(
@@ -2482,14 +3241,11 @@ export function prepareSessionRun(
     const workId = command.entry.workId;
     const current = readSessionLineage(owner, { sessionId: input.sessionId });
     // The command's own lineage, then only this work's later rows.
-    const continuedPath = readContextRows(
+    const continuedPath = readRunContextRows(
       owner,
-      current === undefined
-        ? [{ lineage: through, after: 0, work: null }]
-        : [
-            { lineage: through, after: 0, work: null },
-            { lineage: current, after: command.sequence, work: workId },
-          ],
+      input.sessionId,
+      command,
+      current,
       workId,
     );
     const selectedCommand: PreparedSessionRun["command"] = Object.freeze({
@@ -2498,7 +3254,11 @@ export function prepareSessionRun(
     });
     return Object.freeze({
       command: selectedCommand,
-      modelPreference: lineageModelPreference(owner, through),
+      modelPreference: lineageModelPreference(
+        owner,
+        input.sessionId,
+        command.id,
+      ),
       messages: buildSessionContext(continuedPath, command.entry.workId),
       path: continuedPath,
       entryDelivery,
@@ -2508,15 +3268,70 @@ export function prepareSessionRun(
   });
 }
 
+/**
+ * Whether a summary whose first kept entry is `head` still fits the selected
+ * lineage (Pi Durable §6). It is stale when `head` is not on the selected
+ * lineage or sits before the current context start, where a later compaction
+ * already cut; placing it would bring cut history back. One bounded read.
+ */
+export function compactionHeadState(
+  owner: SqliteOwner,
+  input: Readonly<{ sessionId: string; head: string }>,
+): "current" | "stale" {
+  const leaf = readSessionRow(owner, input.sessionId)?.leaf_id;
+  if (leaf === undefined || leaf === null) return "stale";
+  // The head is current exactly when it lies in the settled window.
+  const raw = owner.sql
+    .exec(
+      `${contextWalk}
+       SELECT sequence
+         FROM session_entries
+        WHERE state != 'streaming' AND id = ? AND id IN (SELECT id FROM walk)`,
+      input.sessionId,
+      leaf,
+      input.sessionId,
+      input.head,
+    )
+    .toArray()[0];
+  if (raw === undefined) return "stale";
+  const decoded = decodeLineageSequence(raw);
+  if (decoded._tag === "Failure")
+    throw unavailable("Stored Session entry sequence is invalid");
+  return "current";
+}
+
 /** One compaction that committed nothing, recorded so clients show the result. */
 export type CompactionNoticeInput = Readonly<{
   sessionId: string;
   workId: string;
   trigger: CompactionTrigger;
-  result: "nothing_to_compact" | "failed";
-  /** Bounded, display-safe reason; only a failure carries one. */
-  diagnostic?: string | undefined;
-}>;
+}> &
+  (
+    | Readonly<{
+        result: "nothing_to_compact";
+        /** Bounded, display-safe notice diagnostic. */
+        diagnostic?: string | undefined;
+      }>
+    | Readonly<{
+        result: "failed";
+        /** Bounded, display-safe reason for the failure. */
+        diagnostic?: string | undefined;
+        /** Known completed summary spend, even if its handoff failed. */
+        usage?: Usage | undefined;
+      }>
+    | Readonly<{
+        /** A finished summary dropped because its head moved. */
+        result: "stale";
+        /** What the dropped summary cost, so its spend is not lost. */
+        usage?: Usage | undefined;
+      }>
+    | Readonly<{
+        /** A finished summary dropped because, placed, it would not fit. */
+        result: "insufficient";
+        /** What the dropped summary cost, so its spend is not lost. */
+        usage?: Usage | undefined;
+      }>
+  );
 
 /** Append one compaction notice on the selected lineage. */
 export function appendCompactionNoticeOwned(
@@ -2524,19 +3339,51 @@ export function appendCompactionNoticeOwned(
   input: CompactionNoticeInput,
 ): StoredSessionRow {
   return owner.transactionSync(() => {
-    const entry: StoredSessionEntry = {
+    const common = {
       kind: "compaction_notice",
       workId: input.workId,
       trigger: input.trigger,
-      result: input.result,
-    };
+    } as const;
+    let entry: Extract<StoredSessionEntry, { kind: "compaction_notice" }>;
+    if (input.result === "stale" || input.result === "insufficient") {
+      const dropped = { ...common, result: input.result };
+      entry =
+        input.usage === undefined
+          ? dropped
+          : { ...dropped, usage: input.usage };
+    } else if (input.result === "failed") {
+      const failed: Extract<
+        StoredSessionEntry,
+        { kind: "compaction_notice"; result: "failed" }
+      > = {
+        ...common,
+        result: "failed",
+      };
+      const diagnosed =
+        input.diagnostic === undefined
+          ? failed
+          : { ...failed, diagnostic: input.diagnostic.slice(0, 200) };
+      entry =
+        input.usage === undefined
+          ? diagnosed
+          : { ...diagnosed, usage: input.usage };
+    } else {
+      const nothing: Extract<
+        StoredSessionEntry,
+        { kind: "compaction_notice"; result: "nothing_to_compact" }
+      > = {
+        ...common,
+        result: "nothing_to_compact",
+      };
+      entry =
+        input.diagnostic === undefined
+          ? nothing
+          : { ...nothing, diagnostic: input.diagnostic.slice(0, 200) };
+    }
     return appendSessionEntry(owner, {
       sessionId: input.sessionId,
       id: sessionIds.fact.generate(),
-      entry:
-        input.diagnostic === undefined
-          ? entry
-          : { ...entry, diagnostic: input.diagnostic.slice(0, 200) },
+      entry,
     });
   });
 }
@@ -2546,34 +3393,69 @@ export function appendCompactionTransitionOwned(
   owner: SqliteOwner,
   input: AppendCompactionInput,
 ): StoredSessionRow {
-  return owner.transactionSync(() => {
-    const session = readSessionRow(owner, input.sessionId);
-    if (session?.leaf_id !== input.expectedLeafId)
-      throw new ShiitakeError(
-        "store",
-        "conflict",
-        "Session leaf changed during compaction",
-      );
-    const entry: StoredSessionEntry = {
-      kind: "compaction",
+  return owner.transactionSync(() => appendCompactionRow(owner, input));
+}
+
+/**
+ * Place a summary selected before now (a background compaction): the head
+ * check of `compactionHeadState` and the leaf CAS in one transaction, so a
+ * head that moved after any earlier check still makes it `stale` (Pi
+ * Durable §6). A stale summary writes nothing.
+ */
+export function placeCompactionTransitionOwned(
+  owner: SqliteOwner,
+  input: AppendCompactionInput,
+): StoredSessionRow | "stale" {
+  return owner.transactionSync(() =>
+    compactionHeadState(owner, {
+      sessionId: input.sessionId,
+      head: input.head,
+    }) === "stale"
+      ? "stale"
+      : appendCompactionRow(owner, input),
+  );
+}
+
+/** The leaf CAS and the compaction row; callers own the transaction. */
+function appendCompactionRow(
+  owner: SqliteOwner,
+  input: AppendCompactionInput,
+): StoredSessionRow {
+  const session = readSessionRow(owner, input.sessionId);
+  if (session?.leaf_id !== input.expectedLeafId)
+    throw new ShiitakeError(
+      "store",
+      "conflict",
+      "Session leaf changed during compaction",
+    );
+  const entry: StoredSessionEntry = {
+    kind: "compaction",
+    workId: input.workId,
+    head: input.head,
+    model: [compactionSummaryMessage(input.summary, Date.now())],
+    data: {
+      reason: input.trigger,
       resumesRun: input.resumesRun ?? false,
-      trigger: input.trigger,
-      tokensAfter: input.tokensAfter,
-      workId: input.workId,
-      firstKeptEntryId: input.firstKeptEntryId,
-      summary: input.summary,
       tokensBefore: input.tokensBefore,
+      tokensAfter: input.tokensAfter,
       usage: input.usage,
       contextRevision: input.contextRevision,
-    };
-    return appendSessionEntry(owner, {
-      sessionId: input.sessionId,
-      id: sessionIds.fact.generate(),
-      entry:
-        input.details === undefined
-          ? entry
-          : { ...entry, details: input.details },
-    });
+    },
+  };
+  const withReceipt =
+    input.receipt === undefined
+      ? entry
+      : { ...entry, data: { ...entry.data, receipt: input.receipt } };
+  return appendSessionEntry(owner, {
+    sessionId: input.sessionId,
+    id: sessionIds.fact.generate(),
+    entry:
+      input.details === undefined
+        ? withReceipt
+        : {
+            ...withReceipt,
+            data: { ...withReceipt.data, details: input.details },
+          },
   });
 }
 
@@ -2756,6 +3638,65 @@ export function acceptSessionCommandOwned(
     commandFactId,
   });
   return acceptanceFromAdmission(command, "new");
+}
+
+/** Called only in the admission door's transaction, shared by admission and withdrawal. */
+export function assertSessionRequestNotWithdrawn(
+  owner: SqliteOwner,
+  sessionId: string,
+  requestId: string,
+): void {
+  if (
+    owner.sql
+      .exec(
+        "SELECT 1 FROM session_request_withdrawals WHERE session_id = ? AND request_id = ?",
+        sessionId,
+        requestId,
+      )
+      .toArray().length > 0
+  )
+    throw new ShiitakeError(
+      "contract",
+      "closed",
+      "Request was withdrawn",
+      requestId,
+    );
+}
+
+/** An admitted request wins; otherwise its key becomes a durable admission fence. */
+export function withdrawSessionRequestOwned(
+  owner: SqliteOwner,
+  sessionId: string,
+  requestId: string,
+): import("../../client.js").WithdrawResult {
+  const admitted = readSessionCommandAdmissionByRequest(
+    owner,
+    sessionId,
+    requestId,
+  );
+  if (admitted !== undefined)
+    return { status: "accepted", commandId: admitted.id };
+  // A held website reply records an operator line rather than scheduling work.
+  // It is already durable and must not be restored as though it were unsent.
+  const recorded = owner.sql
+    .exec(
+      "SELECT id FROM session_entries WHERE session_id = ? AND request_id = ? AND type = 'operator'",
+      sessionId,
+      requestId,
+    )
+    .toArray()[0];
+  if (recorded !== undefined) {
+    const decoded = decodeSessionIdRow(recorded);
+    if (decoded._tag === "Failure")
+      throw unavailable("Stored operator receipt is invalid");
+    return { status: "accepted", commandId: decoded.success.id };
+  }
+  owner.sql.exec(
+    "INSERT OR IGNORE INTO session_request_withdrawals(session_id, request_id) VALUES (?, ?)",
+    sessionId,
+    requestId,
+  );
+  return { status: "unknown" };
 }
 
 function acceptanceFromAdmission(
@@ -3035,6 +3976,7 @@ export function appendOperatorEntry(
   }>,
 ): boolean {
   return owner.transactionSync(() => {
+    assertSessionRequestNotWithdrawn(owner, input.sessionId, input.requestId);
     if (readSessionRow(owner, input.sessionId) === undefined)
       throw unavailable("Session is unavailable for an operator entry");
     const existing = owner.sql
@@ -3085,15 +4027,14 @@ function readSessionRows(
 ): readonly StoredSessionRow[] {
   return owner.sql
     .exec(
-      `SELECT id, session_id, parent_id, sequence, type, role, state,
-              request_id, work_id, data_json, timestamp, completed_at
+      `SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND state != 'streaming'
         ORDER BY sequence ASC`,
       sessionId,
     )
     .toArray()
-    .map(parseEntryRow);
+    .map((raw) => parseEntryRow(owner, raw));
 }
 
 /** Link every stored row into a forest, retaining rows with no parent. */
@@ -3237,8 +4178,8 @@ export function forkSessionAt(
           row.entry.kind === "compaction"
             ? {
                 ...row.entry,
-                firstKeptEntryId:
-                  idMap.get(row.entry.firstKeptEntryId) ??
+                head:
+                  idMap.get(row.entry.head) ??
                   (() => {
                     throw unavailable(
                       "Fork compaction boundary is unavailable",

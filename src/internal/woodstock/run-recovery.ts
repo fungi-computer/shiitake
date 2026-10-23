@@ -27,7 +27,7 @@ export function recoverAssistantTurn(
     after.some(
       ({ entry }) =>
         entry.kind === "turn_started" ||
-        (entry.kind === "compaction" && entry.resumesRun === true) ||
+        (entry.kind === "compaction" && entry.data.resumesRun) ||
         (entry.kind === "live_retry" &&
           entry.event.type === "auto_retry_start"),
     )
@@ -52,7 +52,10 @@ export function recoverAssistantTurn(
           {
             call,
             state: "completed",
-            result: outcome.result,
+            result:
+              outcome.data === undefined
+                ? outcome.result
+                : { ...outcome.result, data: outcome.data },
             message: toolResults.find(
               (result) => result.toolCallId === call.id,
             ),
@@ -95,7 +98,7 @@ export function contextMessageIds(
         messages.add(row.id);
     }
     if (
-      (entry.kind === "compaction" && entry.resumesRun === true) ||
+      (entry.kind === "compaction" && entry.data.resumesRun) ||
       (entry.kind === "live_retry" && entry.event.type === "auto_retry_start")
     ) {
       const failed = lastWorkAssistant.get(entry.workId);
@@ -117,7 +120,7 @@ export function abnormalTerminal(
       ({ sequence, entry }) =>
         sequence > terminal.sequence &&
         (entry.kind === "run_started" ||
-          (entry.kind === "compaction" && entry.resumesRun === true)),
+          (entry.kind === "compaction" && entry.data.resumesRun)),
     )
   )
     return undefined;

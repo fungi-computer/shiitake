@@ -102,5 +102,14 @@ export type ExtensionContractV0<C extends CommandsV0, P, PI> = Readonly<{
   projection: ProjectionSpecV0<P, PI> | null;
 }>;
 
-/** Activity already observed by the client, never an execution authority. */
-export type ClientActivityV0 = "idle" | "working" | "blocked" | "unknown";
+/** What a client observed about the Session, never an execution authority. */
+export type ClientActivityStateV0 = "idle" | "working" | "blocked" | "unknown";
+
+/**
+ * Activity already observed by the client. `header` is only the short heading
+ * of what blocks the Session; it never carries question bodies or answers.
+ */
+export type ClientActivityV0 = Readonly<{
+  state: ClientActivityStateV0;
+  header?: string;
+}>;

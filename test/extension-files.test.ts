@@ -43,12 +43,9 @@ function port(name: string, reads: string[]): FilesPort {
         truncated: false,
       });
     },
-    list: ({ path }) =>
-      Promise.resolve({ path, entries: [], truncated: false }),
-    glob: ({ path }) =>
-      Promise.resolve({ path, matches: [], truncated: false }),
-    grep: ({ path }) =>
-      Promise.resolve({ path, matches: [], truncated: false }),
+    list: ({ path }) => Promise.resolve({ path, results: [], truncated: null }),
+    glob: ({ path }) => Promise.resolve({ path, results: [], truncated: null }),
+    grep: ({ path }) => Promise.resolve({ path, results: [], truncated: null }),
     replace: ({ path }) => Promise.resolve({ path, bytes: 0 }),
   };
 }
@@ -138,6 +135,7 @@ it.each([true, false])(
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -236,6 +234,7 @@ it.each(["ungranted", "none", "throwing"])(
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: (model, context, streamOptions) => {
               modelCalls += 1;
               const system = context.messages.find(

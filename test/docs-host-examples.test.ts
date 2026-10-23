@@ -32,13 +32,13 @@ it("pages 6–7: Bookmarks rows decode against the public row schema", async () 
   expect(rows.panel).toEqual([
     {
       id: "bookmark-0",
-      title: "Fungi",
-      detail: "https://fungi.computer/",
+      title: "Shiitake docs",
+      detail: "https://docs.fungi.computer/shiitake/",
     },
     {
       id: "bookmark-1",
-      title: "Shiitake docs",
-      detail: "https://shiitake.shiit.app/",
+      title: "Fungi",
+      detail: "https://fungi.computer/",
     },
   ]);
 });

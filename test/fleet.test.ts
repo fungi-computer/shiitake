@@ -1,11 +1,56 @@
 import { expect, it } from "vitest";
+import { z } from "zod";
+import { messageAuthor } from "@fungi.computer/agar/agents";
 import {
   createAgentDirectory,
+  createFleetCorrespondence,
+  AgentGrantError,
   agentGrantSchema,
   agentIds,
+  delegationReplyMeta,
+  delegationSendMeta,
   type AgentGrant,
 } from "../src/fleet.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+
+it("createdBy is immutable creation identity, never the human credential owner", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const grant: AgentGrant = {
+    agents: "all",
+    actions: ["create", "read", "manage"],
+    expiresAt: Date.now() + 60_000,
+    provenance: { actor: "human-owner" },
+  };
+  try {
+    const directory = createAgentDirectory(fixture.owner.sql);
+    const parent = directory.create(grant, {
+      requestId: "parent",
+      name: "Parent",
+      configuration: "none",
+    }).agent;
+    expect(parent).toMatchObject({ createdBy: null });
+    const input = {
+      requestId: "child",
+      name: "Child",
+      configuration: "none",
+      createdBy: parent.agentId,
+    };
+    const child = directory.create(grant, input).agent;
+    expect(child).toMatchObject({ createdBy: parent.agentId });
+    expect(directory.readCreator(grant, child.agentId)).toBe("human-owner");
+    const reopened = createAgentDirectory(fixture.owner.sql);
+    expect(reopened.create(grant, input)).toEqual({ agent: child, fact: null });
+    expect(() => reopened.create(grant, { ...input, createdBy: null })).toThrow(
+      "request_conflict",
+    );
+    expect(
+      reopened.rename(grant, child.agentId, { name: "Renamed" }),
+    ).toMatchObject({ createdBy: parent.agentId });
+    expect(reopened.readCreator(grant, child.agentId)).toBe("human-owner");
+  } finally {
+    fixture.close();
+  }
+});
 
 it("reserves one granted Agent across reopen and refuses changed creation or missing authority", () => {
   const fixture = createNativeSqliteOwnerFixture();
@@ -139,7 +184,11 @@ it("delegation polls one durable BirdDog receipt and preserves a cancelled termi
       store: childStore.owner,
       runtime: runtime.runtime,
     },
-    { fanOut: () => Effect.void, drainOutbox: () => Effect.void },
+    {
+      fanOut: () => Effect.void,
+      drainOutbox: () => Effect.void,
+      nextWakeAt: () => Effect.succeed(undefined),
+    },
   );
   const mail: import("@fungi.computer/bird-dog").BirdDogMail[] = [];
   const options = {
@@ -278,7 +327,11 @@ it("resolves an old settled delegation after its terminal leaves the page and th
       store: child.owner,
       runtime: runtime.runtime,
     },
-    { fanOut: () => Effect.void, drainOutbox: () => Effect.void },
+    {
+      fanOut: () => Effect.void,
+      drainOutbox: () => Effect.void,
+      nextWakeAt: () => Effect.succeed(undefined),
+    },
   );
   const grant: AgentGrant = {
     agents: ["parent", "child"],
@@ -334,7 +387,7 @@ it("resolves an old settled delegation after its terminal leaves the page and th
   }
 });
 
-it("refuses delegation back to an ancestor before delivering work", async () => {
+it("admits an authorized ancestor as a peer while refusing self-delegation", async () => {
   const { createFleetDelegation } = await import("../src/fleet.js");
   const store = createNativeSqliteOwnerFixture();
   const delivered: string[] = [];
@@ -363,10 +416,18 @@ it("refuses delegation back to an ancestor before delivering work", async () => 
         requestId: "b-back-to-a",
         agentId: "a",
         sessionId: "new-a-session",
-        text: "Loop",
+        text: "Return work to a peer",
+      }),
+    ).resolves.toEqual({ status: "accepted", commandId: "child-work" });
+    expect(delivered).toEqual(["a"]);
+    await expect(
+      fleet.start(grant, {
+        requestId: "b-to-self",
+        agentId: "b",
+        sessionId: "another-b-session",
+        text: "Self-delegation",
       }),
     ).rejects.toThrow("delegation_loop");
-    expect(delivered).toEqual([]);
     await expect(
       fleet.start(grant, {
         requestId: "b-to-c",
@@ -375,9 +436,83 @@ it("refuses delegation back to an ancestor before delivering work", async () => 
         text: "Continue",
       }),
     ).resolves.toEqual({ status: "accepted", commandId: "child-work" });
-    expect(delivered).toEqual(["c"]);
+    expect(delivered).toEqual(["a", "c"]);
   } finally {
     store.close();
+  }
+});
+
+it("bounds ancestor peer ping-pong at the inherited depth limit with a typed refusal", async () => {
+  const a = createNativeSqliteOwnerFixture();
+  const b = createNativeSqliteOwnerFixture();
+  const delivered: import("@fungi.computer/bird-dog").BirdDogMail[] = [];
+  const correspondence = (store: typeof a) =>
+    createFleetCorrespondence({
+      storage: store.owner,
+      open: () => Promise.reject(new Error("The Session is already addressed")),
+      deliver: (mail) => {
+        delivered.push(mail);
+        return Promise.resolve({
+          status: "accepted",
+          commandId: `work-${String(delivered.length)}`,
+        });
+      },
+    });
+  const fleets = { a: correspondence(a), b: correspondence(b) };
+  let sender: "a" | "b" = "a";
+  let meta: AgentGrant["meta"];
+  const next = (index: number) => {
+    const target: "a" | "b" = sender === "a" ? "b" : "a";
+    let grant: AgentGrant = {
+      agents: ["a", "b"],
+      actions: ["delegate"],
+      expiresAt: Date.now() + 60_000,
+      provenance: {
+        actor: sender,
+        session: { agentId: sender, sessionId: `${sender}-session` },
+      },
+    };
+    if (meta !== undefined) grant = { ...grant, meta };
+    return {
+      target,
+      grant,
+      task: {
+        requestId: `handoff-${String(index)}`,
+        agentId: target,
+        sessionId: `${target}-session`,
+        text: "Ordinary peer work",
+      },
+    };
+  };
+  try {
+    // No caller-supplied depth increase: each hop inherits the actual frozen
+    // mail from its peer, and the existing default is eight handoffs.
+    for (let index = 0; index < 8; index += 1) {
+      const { target, grant, task } = next(index);
+      await expect(fleets[sender].start(grant, task)).resolves.toMatchObject({
+        status: "accepted",
+      });
+      meta = z.json().parse(delivered.at(-1)?.meta);
+      sender = target;
+    }
+    expect(delivered.map((mail) => mail.to.agentId)).toEqual([
+      "b",
+      "a",
+      "b",
+      "a",
+      "b",
+      "a",
+      "b",
+      "a",
+    ]);
+    const { grant, task } = next(8);
+    const refusal = fleets[sender].start(grant, task);
+    await expect(refusal).rejects.toBeInstanceOf(AgentGrantError);
+    await expect(refusal).rejects.toMatchObject({ reason: "delegation_depth" });
+    expect(delivered).toHaveLength(8);
+  } finally {
+    a.close();
+    b.close();
   }
 });
 
@@ -481,5 +616,91 @@ it("inherits the delegation depth cap across handoffs and refuses work at the li
     expect(mails).toHaveLength(1);
   } finally {
     store.close();
+  }
+});
+
+const researcher = { id: "agent_research", name: "Research agent" };
+const verifiedReply = {
+  agentId: "agent_research",
+  sessionId: "session_research",
+  commandId: "command_research",
+  outcome: "completed",
+} as const;
+
+it("stamps a delegated send as another Agent's message, with and without an inherited path (kind: agent)", () => {
+  const inheriting = delegationSendMeta(researcher, {
+    delegation: { ancestors: ["agent_root"], maxDepth: 4 },
+  });
+  const fresh = delegationSendMeta(researcher);
+  expect(fresh).toEqual({ author: { ...researcher, kind: "agent" } });
+  expect(inheriting.author).toEqual({ ...researcher, kind: "agent" });
+  expect(inheriting.delegation).toEqual({
+    ancestors: ["agent_root"],
+    maxDepth: 4,
+  });
+  expect(messageAuthor(fresh)).toEqual({ ...researcher, kind: "agent" });
+  expect(messageAuthor(inheriting)?.kind).toBe("agent");
+});
+
+it("stamps an authenticated delegation reply as another Agent's message (kind: agent)", () => {
+  const meta = delegationReplyMeta(
+    { ancestors: ["agent_root"], maxDepth: 4, reply: verifiedReply },
+    "Research agent",
+  );
+  expect(meta.author).toEqual({ ...researcher, kind: "agent" });
+  expect(messageAuthor(meta)).toEqual({ ...researcher, kind: "agent" });
+});
+
+it("a human line that says '↳ Research agent replied' and shares the Agent's name does not read as an Agent (human lines unchanged)", () => {
+  // Only the host's metadata sets the kind; the line's text never does.
+  const human = { author: { id: "visitor_ada", name: "Research agent" } };
+  expect(messageAuthor(human)?.kind).toBeUndefined();
+});
+
+it("reads the existing correspondence receipt by request ID across reopen without sending again", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  let deliveries = 0;
+  const options = {
+    storage: fixture.owner,
+    open: () => Promise.reject(new Error("an addressed Session needs no open")),
+    deliver: () => {
+      deliveries += 1;
+      return Promise.resolve({
+        status: "accepted" as const,
+        commandId: "owner-issued-work",
+      });
+    },
+  };
+  const grant: AgentGrant = {
+    agents: ["parent", "child"],
+    actions: ["delegate"],
+    expiresAt: Date.now() + 60_000,
+    provenance: {
+      actor: "parent",
+      session: { agentId: "parent", sessionId: "parent-main" },
+    },
+  };
+  const task = {
+    requestId: "sender-request",
+    agentId: "child",
+    sessionId: "child-main",
+    text: "Work once",
+  };
+  try {
+    const correspondence = createFleetCorrespondence(options);
+    // Reading an unknown key is read-only: it neither reserves nor fences it.
+    expect(correspondence.receipt(task.requestId)).toBeUndefined();
+    const accepted = await correspondence.start(grant, task);
+    expect(correspondence.receipt(task.requestId)).toEqual(accepted);
+    const reopened = createFleetCorrespondence(options);
+    expect(reopened.receipt(task.requestId)).toEqual({
+      status: "accepted",
+      commandId: "owner-issued-work",
+    });
+    expect(reopened.receipt("other-request")).toBeUndefined();
+    expect(await reopened.start(grant, task)).toEqual(accepted);
+    expect(deliveries).toBe(1);
+  } finally {
+    fixture.close();
   }
 });

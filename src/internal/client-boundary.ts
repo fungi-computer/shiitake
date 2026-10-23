@@ -15,7 +15,15 @@ function boundedText(maximumBytes: number) {
   );
 }
 
-const boundedId = boundedText(256);
+/** A lone UTF-16 surrogate; SQLite's UTF-8 text columns cannot store one. */
+const loneSurrogate = /\p{Cs}/u;
+/**
+ * Session and request ids are indexed SQLite text, so they must be well-formed
+ * Unicode: a lone surrogate would be stored as U+FFFD and never match again.
+ */
+const boundedId = boundedText(256).check(
+  Schema.makeFilter((value) => !loneSurrogate.test(value)),
+);
 /**
  * The one prompt-text grammar. Human, mail, host and extension prompts are all
  * admitted through the accepted-command door under this bound. Text is

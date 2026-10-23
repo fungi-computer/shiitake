@@ -14,6 +14,10 @@
     "package/dist/client.js",
     "package/dist/cloudflare.d.ts",
     "package/dist/cloudflare.js",
+    "package/dist/cold-sessions.d.ts",
+    "package/dist/cold-sessions.js",
+    "package/dist/delegation.d.ts",
+    "package/dist/delegation.js",
     "package/dist/effect.d.ts",
     "package/dist/effect.js",
     "package/dist/errors.d.ts",
@@ -40,14 +44,16 @@
     "package/dist/internal/admission-door.js",
     "package/dist/internal/agent-close.d.ts",
     "package/dist/internal/agent-close.js",
-    "package/dist/internal/browser-sessions.d.ts",
-    "package/dist/internal/browser-sessions.js",
     "package/dist/internal/client-boundary.d.ts",
     "package/dist/internal/client-boundary.js",
+    "package/dist/internal/compaction/compaction-slot.d.ts",
+    "package/dist/internal/compaction/compaction-slot.js",
     "package/dist/internal/compaction/compaction.d.ts",
     "package/dist/internal/compaction/compaction.js",
     "package/dist/internal/compaction/session-compaction.d.ts",
     "package/dist/internal/compaction/session-compaction.js",
+    "package/dist/internal/compaction/settings.d.ts",
+    "package/dist/internal/compaction/settings.js",
     "package/dist/internal/compaction/utils.d.ts",
     "package/dist/internal/compaction/utils.js",
     "package/dist/internal/contracts.d.ts",
@@ -88,6 +94,8 @@
     "package/dist/internal/observation-kernel.js",
     "package/dist/internal/promise-facade.d.ts",
     "package/dist/internal/promise-facade.js",
+    "package/dist/internal/run-failure-reason.d.ts",
+    "package/dist/internal/run-failure-reason.js",
     "package/dist/internal/run-scope.d.ts",
     "package/dist/internal/run-scope.js",
     "package/dist/internal/runtime-coordinator.d.ts",
@@ -96,10 +104,18 @@
     "package/dist/internal/runtime-core.js",
     "package/dist/internal/runtime-reconciliation.d.ts",
     "package/dist/internal/runtime-reconciliation.js",
+    "package/dist/internal/session-context.d.ts",
+    "package/dist/internal/session-context.js",
     "package/dist/internal/session-status.d.ts",
     "package/dist/internal/session-status.js",
+    "package/dist/internal/woodstock/agent-reply.d.ts",
+    "package/dist/internal/woodstock/agent-reply.js",
     "package/dist/internal/woodstock/client-projection.d.ts",
     "package/dist/internal/woodstock/client-projection.js",
+    "package/dist/internal/woodstock/cold-sessions.d.ts",
+    "package/dist/internal/woodstock/cold-sessions.js",
+    "package/dist/internal/woodstock/compaction-activity.d.ts",
+    "package/dist/internal/woodstock/compaction-activity.js",
     "package/dist/internal/woodstock/cursor.d.ts",
     "package/dist/internal/woodstock/cursor.js",
     "package/dist/internal/woodstock/extension-store.d.ts",
@@ -126,6 +142,10 @@
     "package/dist/internal/woodstock/session-inbox.js",
     "package/dist/internal/woodstock/session-store.d.ts",
     "package/dist/internal/woodstock/session-store.js",
+    "package/dist/internal/woodstock/storage-admission.d.ts",
+    "package/dist/internal/woodstock/storage-admission.js",
+    "package/dist/internal/woodstock/storage-conformance.d.ts",
+    "package/dist/internal/woodstock/storage-conformance.js",
     "package/dist/model-preference.d.ts",
     "package/dist/model-preference.js",
     "package/dist/node.d.ts",
@@ -144,12 +164,14 @@
     "package/docs/api/client-entry.md",
     "package/docs/api/client.md",
     "package/docs/api/cloudflare.md",
+    "package/docs/api/delegation.md",
     "package/docs/api/effect.md",
     "package/docs/api/extensions.md",
     "package/docs/api/fleet.md",
     "package/docs/api/hosted.md",
     "package/docs/api/http.md",
     "package/docs/api/index.md",
+    "package/docs/api/internal/woodstock/storage-conformance.md",
     "package/docs/api/model-preference.md",
     "package/docs/api/node.md",
     "package/docs/api/testing.md",
@@ -159,37 +181,43 @@
     "../agar",
     "../bird-dog",
     "../cairn",
+    "../carrier",
     "../gills",
     "../knapsack",
     "../mule",
     "../mycelium",
+    "../seam",
     "../watchdog"
   ],
   "consumerDevDependencies": {
     "@modelcontextprotocol/sdk": "1.30.0"
   },
   "runtimeFixture": "test/stranger/runtime.mjs",
-  "typecheckFixture": "test/stranger/consumer.mts",
+  "typechecks": [
+    {
+      "fixture": "test/stranger/consumer.mts"
+    }
+  ],
   "docs": {
     "sigil": "agent",
     "home": {
-      "lead": "The durable Agent runtime behind Fungi: host Agent Sessions in your own TypeScript app, on Node or a Cloudflare Durable Object, and extend them with your own tools.",
+      "lead": "The Agent behind Fungi. Run it in your terminal with your own Claude or ChatGPT subscription, or host its durable Sessions in your own TypeScript app.",
       "example": {
         "file": "home.ts",
         "title": "Run your first Session",
-        "caption": "The test host runs the real durable Agent with a scripted model. Needs Node.js 24 for its built-in SQLite."
+        "caption": "The test host runs the real durable Agent with a scripted model, on Node's built-in SQLite."
       },
       "ladder": {
         "start": [
           {
+            "title": "Run it in your terminal",
+            "href": "/use-the-cli/",
+            "description": "npm i -g @fungi.computer/spore, then run fungi in your project with your Claude or ChatGPT subscription."
+          },
+          {
             "title": "Your first Session",
             "href": "/quickstart/",
             "description": "Send a prompt, settle the run and read what the Agent did."
-          },
-          {
-            "title": "Use it from the terminal",
-            "href": "/use-the-cli/",
-            "description": "The fungi CLI is a Shiitake Agent with a terminal interface."
           },
           {
             "title": "Concepts",

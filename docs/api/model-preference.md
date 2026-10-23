@@ -10,6 +10,23 @@
 
 ## Variables
 
+### modelReasoningLevels
+
+```ts
+const modelReasoningLevels: readonly [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+```
+
+The thinking levels a model choice may name, shared by every model path.
+
+---
+
 ### ModelPreferenceSchema
 
 ```ts

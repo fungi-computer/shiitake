@@ -1,10 +1,9 @@
 import * as Effect from "effect/Effect";
 
 import type { SessionContext } from "../client.js";
-import { estimateThresholdContextTokens } from "./compaction/session-compaction.js";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import type { ShiitakeEffectOptions } from "./effect-contracts.js";
 import { reportCatchFailure } from "./failure.js";
-import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import {
   buildSessionContext,
   readSessionContextPath,
@@ -22,28 +21,7 @@ function settledContextTokens(
 ): number | null {
   const path = readSessionContextPath(store, { sessionId });
   const messages = buildSessionContext(path);
-  return messages.length === 0
-    ? null
-    : estimateThresholdContextTokens(path, messages);
-}
-
-type WindowEntry = Readonly<{ preference: string; window: number | null }>;
-
-/**
- * Each runtime keeps the last described window per Session. A saved model
- * preference changes the key, so `/model` is described again at once.
- */
-const describedWindows = new WeakMap<
-  RuntimeCoordinator,
-  Map<string, WindowEntry>
->();
-
-function windowsFor(runtime: RuntimeCoordinator): Map<string, WindowEntry> {
-  const existing = describedWindows.get(runtime);
-  if (existing !== undefined) return existing;
-  const created = new Map<string, WindowEntry>();
-  describedWindows.set(runtime, created);
-  return created;
+  return messages.length === 0 ? null : estimateContextTokens(messages).tokens;
 }
 
 /**
@@ -54,7 +32,6 @@ function windowsFor(runtime: RuntimeCoordinator): Map<string, WindowEntry> {
  */
 export function readSessionContext(
   options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
   sessionId: string,
 ): Effect.Effect<SessionContext | undefined> {
   return Effect.gen(function* () {
@@ -71,25 +48,19 @@ export function readSessionContext(
     if (read._tag === "Failure" || read.success.tokens === null)
       return undefined;
     const { tokens, preference } = read.success;
-    const windows = windowsFor(runtime);
-    const key = JSON.stringify(preference);
-    const cached = windows.get(sessionId);
-    if (cached?.preference === key)
-      return Object.freeze({ tokens, window: cached.window });
     const describe = options.model.describe;
     if (describe === undefined) return Object.freeze({ tokens, window: null });
-    const described = yield* describe({ sessionId, preference }).pipe(
+    // A null Session override follows a mutable Agent default. Resolve through
+    // the host's turn-model selector on every read, without acquiring a turn.
+    const window = yield* describe({ sessionId, preference }).pipe(
       Effect.map(({ contextWindow }) => contextWindow),
       Effect.catch((error) =>
         Effect.sync(() => {
           reportCatchFailure("session-context.describe", error);
-          return undefined;
+          return null;
         }),
       ),
     );
-    // A failed description is retried on the next read, never cached.
-    if (described === undefined) return Object.freeze({ tokens, window: null });
-    windows.set(sessionId, { preference: key, window: described });
-    return Object.freeze({ tokens, window: described });
+    return Object.freeze({ tokens, window });
   });
 }

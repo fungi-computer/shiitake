@@ -21,13 +21,15 @@ import {
 } from "../src/internal/woodstock/client-projection.js";
 import { sessionIds } from "../src/internal/woodstock/identities.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
-import { admitWithoutBudget } from "../src/internal/woodstock/storage-admission.js";
+import { admitWithoutCheck } from "../src/internal/woodstock/storage-admission.js";
 import { readSessionInboxPage } from "../src/internal/woodstock/session-inbox.js";
 import {
   promptCommand,
   type PromptCommandEntry,
 } from "../src/internal/woodstock/session-entry.js";
 import { admitStoredCommand } from "./fixtures/admission-door.fixture.js";
+import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
+import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
 const digest = "a".repeat(64);
@@ -45,12 +47,12 @@ it("replays Session creation by request ID after the SQLite owner reopens", () =
     const created = woodstock.createStoredSession(
       fixture.owner,
       "model-create-session-1",
-      admitWithoutBudget.admitNew,
+      admitWithoutCheck.admitNew,
     );
     const distinct = woodstock.createStoredSession(
       fixture.owner,
       "model-create-session-2",
-      admitWithoutBudget.admitNew,
+      admitWithoutCheck.admitNew,
     );
     expect(distinct).not.toBe(created);
     fixture.close();
@@ -61,7 +63,7 @@ it("replays Session creation by request ID after the SQLite owner reopens", () =
       woodstock.createStoredSession(
         fixture.owner,
         "model-create-session-1",
-        admitWithoutBudget.admitNew,
+        admitWithoutCheck.admitNew,
       ),
     ).toBe(created);
     expect(
@@ -324,6 +326,50 @@ it("replaces one streaming placeholder with the exact completed Pi message", () 
   }
 });
 
+it("stores pi-ai 1.x response timings and malformed tool arguments exactly", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    const sessionId = "retained-pi-1x-fields";
+    const commandEntryValue = commandEntry("timed question");
+    woodstock.appendSessionEntry(fixture.owner, {
+      sessionId,
+      id: sessionIds.fact.generate(),
+      entry: commandEntryValue,
+    });
+    const timed: AssistantMessage = {
+      ...assistant("timed answer", "toolUse", [
+        {
+          type: "toolCall",
+          id: "tool-call-1",
+          name: "lookup",
+          arguments: {},
+          argumentsError: 'Invalid JSON arguments: {"query":',
+        },
+      ]),
+      durationMs: 42,
+    };
+    woodstock.appendSessionEntry(fixture.owner, {
+      sessionId,
+      id: message.value,
+      entry: {
+        kind: "message",
+        workId: commandEntryValue.workId,
+        run,
+        turn,
+        message,
+        value: timed,
+      },
+    });
+
+    expect(
+      woodstock.readSelectedPath(fixture.owner, { sessionId }).at(-1)?.entry,
+    ).toMatchObject({ kind: "message", value: timed });
+  } finally {
+    fixture.close();
+  }
+});
+
 it("projects the selected lineage with the exact completed Pi message", () => {
   const fixture = createNativeSqliteOwnerFixture();
   try {
@@ -353,7 +399,7 @@ it("projects the selected lineage with the exact completed Pi message", () => {
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
 
     expect(snapshot.cursor).toEqual(expect.any(String));
@@ -370,6 +416,7 @@ it("projects the selected lineage with the exact completed Pi message", () => {
           id: command.id,
           sequence: command.sequence,
           commandId: commandEntryValue.workId,
+          requestId: commandEntryValue.requestId,
           value: commandEntryValue.message,
         },
         {
@@ -383,17 +430,22 @@ it("projects the selected lineage with the exact completed Pi message", () => {
       compactions: [],
       compactionNotices: [],
       activity: idleActivity,
+      toolOutput: [],
       progress: null,
     });
     expect(
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: idleActivity,
+        toolOutput: [],
         progress: null,
       }),
     ).toMatchObject({
       kind: "page",
       hasMore: false,
-      frames: [{ kind: "update", messages: snapshot.messages }],
+      frames: [
+        { kind: "update", messages: snapshot.messages },
+        { kind: "tool_output", toolOutput: [] },
+      ],
     });
   } finally {
     fixture.close();
@@ -427,7 +479,7 @@ it("projects the durable extension origin without attributing human text to an e
         fixture.owner,
         sessionId,
         { limit: 200 },
-        { facts: idleActivity, progress: null },
+        { facts: idleActivity, toolOutput: [], progress: null },
       );
       if (origin.kind === "extension") {
         expect(pending.pending.prompts[0]).toHaveProperty("origin", {
@@ -451,7 +503,7 @@ it("projects the durable extension origin without attributing human text to an e
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     const expected = { extensionId: "goal", correlation: "goal-revision" };
     expect(snapshot.messages[0]).toHaveProperty("origin", expected);
@@ -462,11 +514,15 @@ it("projects the durable extension origin without attributing human text to an e
     expect(
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: idleActivity,
+        toolOutput: [],
         progress: null,
       }),
     ).toMatchObject({
       kind: "page",
-      frames: [{ messages: snapshot.messages }],
+      frames: [
+        { messages: snapshot.messages },
+        { kind: "tool_output", toolOutput: [] },
+      ],
     });
   } finally {
     fixture.close();
@@ -561,6 +617,7 @@ it("projects work terminals after intermediate tool messages without settling la
       { limit: 200 },
       {
         facts: queuedActivity("queued-command"),
+        toolOutput: [],
         progress: null,
       },
     );
@@ -579,11 +636,15 @@ it("projects work terminals after intermediate tool messages without settling la
     expect(
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: queuedActivity("queued-command"),
+        toolOutput: [],
         progress: null,
       }),
     ).toMatchObject({
       kind: "page",
-      frames: [{ terminals: snapshot.terminals }],
+      frames: [
+        { terminals: snapshot.terminals },
+        { kind: "tool_output", toolOutput: [] },
+      ],
     });
   } finally {
     fixture.close();
@@ -620,20 +681,19 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     const compaction = woodstock.appendSessionEntry(fixture.owner, {
       sessionId,
       id: sessionIds.fact.generate(),
-      entry: {
-        kind: "compaction",
+      entry: compactionEntryFixture({
         workId: selectedPrompt.workId,
-        firstKeptEntryId: selected.id,
+        head: selected.id,
         summary: "retained summary",
         tokensBefore: 42,
         usage: assistant("usage").usage,
         contextRevision: selected.id,
-      },
+      }),
     });
 
     expect(
@@ -649,12 +709,16 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       sessionId,
       preCompaction.cursor ?? undefined,
       "replay",
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     expect(replay.kind).toBe("page");
     if (replay.kind !== "page") throw new Error("expected page");
     expect(replay.hasMore).toBe(false);
-    expect(replay.frames).toHaveLength(1);
+    expect(replay.frames).toHaveLength(2);
+    expect(replay.frames[1]).toMatchObject({
+      kind: "tool_output",
+      toolOutput: [],
+    });
     expect(replay.frames[0]).toMatchObject({
       kind: "update",
       messages: [],
@@ -671,22 +735,21 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     expect(postCompaction.messages.map(({ value }) => value)).toEqual([
       { role: "user", content: "root", timestamp: 1 },
       selectedPrompt.message,
     ]);
-    // A row written before compactions recorded trigger and tokensAfter
-    // still projects, with those facts unknown.
+    // The marker carries the entry's facts and never its summary.
     expect(postCompaction.compactions).toEqual([
       {
         id: compaction.id,
         sequence: selected.sequence,
         at: compaction.timestamp,
         tokensBefore: 42,
-        tokensAfter: null,
-        trigger: null,
+        tokensAfter: 40,
+        trigger: "threshold",
       },
     ]);
     expect(
@@ -712,7 +775,7 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
     const forkedCompaction = forkedPath.at(-1);
     expect(forkedCompaction?.entry).toMatchObject({
       kind: "compaction",
-      firstKeptEntryId: forkedPath[1]?.id,
+      head: forkedPath[1]?.id,
     });
     expect(woodstock.buildSessionContext(forkedPath)).toEqual(
       woodstock.buildSessionContext([root, selected, compaction]),
@@ -757,12 +820,15 @@ it("reads an ordered immutable Session forest with orphan roots", () => {
       id: sessionIds.fact.generate(),
       entry: commandEntry("self parent"),
     });
-    fixture.owner.sql.exec(
+    // Only a writer outside Woodstock can leave orphans; the tree still shows them.
+    damageOutsideWoodstock(
+      fixture.owner,
       "UPDATE session_entries SET parent_id = ? WHERE id = ?",
       "missing-parent",
       orphan.id,
     );
-    fixture.owner.sql.exec(
+    damageOutsideWoodstock(
+      fixture.owner,
       "UPDATE session_entries SET parent_id = id WHERE id = ?",
       selfParent.id,
     );
@@ -951,6 +1017,7 @@ it("bounds the waiting view without limiting command acceptance", () => {
         { limit: 200 },
         {
           facts: queuedActivity("queued-command"),
+          toolOutput: [],
           progress: null,
         },
       );
@@ -982,6 +1049,7 @@ it("bounds the waiting view without limiting command acceptance", () => {
       "replay",
       {
         facts: queuedActivity("queued-command"),
+        toolOutput: [],
         progress: null,
       },
     );
@@ -995,6 +1063,7 @@ it("bounds the waiting view without limiting command acceptance", () => {
           messages: [],
           pending: next.pending,
         },
+        { kind: "tool_output", toolOutput: [] },
       ],
     });
   } finally {
@@ -1032,7 +1101,11 @@ it("withdraws cancelled follow-ups before their scheduler terminal is written", 
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: queuedActivity(kept.command.id), progress: null },
+      {
+        facts: queuedActivity(kept.command.id),
+        toolOutput: [],
+        progress: null,
+      },
     );
     expect(snapshot.pending.total).toBe(1);
     expect(snapshot.pending.prompts.map(({ commandId }) => commandId)).toEqual([
@@ -1071,6 +1144,7 @@ it("keeps large waiting prompt projection within the existing byte bound", () =>
       { limit: 200 },
       {
         facts: queuedActivity("queued-command"),
+        toolOutput: [],
         progress: null,
       },
     );
@@ -1122,6 +1196,7 @@ it("keeps a preference changed during streaming on the completed message lineage
       { limit: 200 },
       {
         facts: runningActivity,
+        toolOutput: [],
         progress: null,
       },
     );
@@ -1145,12 +1220,16 @@ it("keeps a preference changed during streaming on the completed message lineage
       "live",
       {
         facts: idleActivity,
+        toolOutput: [],
         progress: null,
       },
     );
     expect(replay).toMatchObject({
       kind: "page",
-      frames: [{ kind: "update", messages: [{ id: message.value, value }] }],
+      frames: [
+        { kind: "update", messages: [{ id: message.value, value }] },
+        { kind: "tool_output", toolOutput: [] },
+      ],
     });
     expect(completed.id).toBe(placeholder.id);
     expect(completed.parentId).toBe(selected.id);
@@ -1197,7 +1276,7 @@ it("durably admits image prompts and includes images in retry identity and pendi
       fixture.owner,
       "images",
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     expect(snapshot.pending.prompts[0]?.images).toEqual(prompt.images);
     const prepared = woodstock.prepareSessionRun(fixture.owner, {
@@ -1332,7 +1411,7 @@ it("settles an orphan admission without blocking the rest of cancel-all", () => 
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, progress: null },
+      { facts: idleActivity, toolOutput: [], progress: null },
     );
     expect(snapshot.messages.map(({ value }) => value.content)).toEqual([
       "orphan",

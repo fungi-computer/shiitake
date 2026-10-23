@@ -1,3 +1,4 @@
+import { compactionEntryFixture } from "./compaction-entry.fixture.js";
 import type { AssistantMessage } from "@fungi.computer/mule/effect";
 
 import * as Schema from "effect/Schema";
@@ -186,15 +187,18 @@ export function writeLargeSession(
         const keptTurn = Math.max(0, index + 1 - keepTurns);
         const kept = turns[keptTurn];
         if (kept === undefined) throw new Error("kept turn is missing");
-        const id = append(owner, options.sessionId, {
-          kind: "compaction",
-          workId,
-          firstKeptEntryId: kept.commandId,
-          summary: `summary through turn ${String(keptTurn)}`,
-          tokensBefore: 1000,
-          usage,
-          contextRevision: terminalId,
-        });
+        const id = append(
+          owner,
+          options.sessionId,
+          compactionEntryFixture({
+            workId,
+            head: kept.commandId,
+            summary: `summary through turn ${String(keptTurn)}`,
+            tokensBefore: 1000,
+            usage,
+            contextRevision: terminalId,
+          }),
+        );
         entries += 1;
         compactions.push({ id, keptTurn });
       }

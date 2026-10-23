@@ -49,6 +49,7 @@ async function openAgent(responses: readonly (() => Promise<Reply>)[]) {
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),

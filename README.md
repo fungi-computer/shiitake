@@ -8,14 +8,55 @@ There are three ways to run it:
 
 - **In your code**: install this package and host Agents yourself, on Node for
   tests or in a
-  [Cloudflare Durable Object](https://shiitake.shiit.app/run/cloudflare/).
+  [Cloudflare Durable Object](https://docs.fungi.computer/shiitake/run/cloudflare/).
 - **On your machine**: the [`fungi` CLI](https://docs.fungi.computer/install/)
   is a Shiitake Agent with a terminal interface.
-- **Hosted**: [Fungi](https://shiitake.shiit.app/run/fungi/) runs Agents for
-  your Team, and its models work from your own host too.
+- **Hosted**: [Fungi](https://docs.fungi.computer/shiitake/run/fungi/) runs
+  Agents for your Team, and its models work from your own host too.
 
 To add your own behaviour, start the extension guide at
-[Your first extension](https://shiitake.shiit.app/extensions/first-extension/).
+[Your first extension](https://docs.fungi.computer/shiitake/extensions/first-extension/).
+
+## Community-funded
+
+We don't take VC money. Fungi is built in the open and proudly backed by its
+community, including the **$SHIIT** community token.
+
+$SHIT is not $SHIIT.
+
+Official contract address (Solana):
+`412ECWXN3jGbd1kn8ck7eeupWttkmrFkNm9JqfAzpump`
+
+This is the only official address. Fungi will never DM you about the token.
+Nothing here is financial advice, and the token isn't a share in Fungi. More at
+[fungi.computer/funding](https://fungi.computer/funding).
+
+## Recover an uncertain send
+
+Both local and HTTP Sessions expose
+`session.withdraw(requestId): Promise<WithdrawResult>`:
+
+```ts
+type WithdrawResult =
+  { status: "accepted"; commandId: string } | { status: "unknown" };
+```
+
+Shiitake resolves this inside the admission owner's transaction. An existing
+admission wins and is **not cancelled**. Otherwise the owner commits a durable
+withdrawal fence; every later admission under that Session and request ID is
+refused, including after owner restart. Calls are idempotent and Session-scoped.
+A recorded operator line also wins over withdrawal, with its durable entry ID.
+
+Restore a pending draft only after `unknown` from this committed withdrawal,
+never after a failed transport or an empty observation page. If recovery itself
+fails, retain the request ID and exact text and retry recovery when connected. A
+user retry after withdrawal needs a **new** request ID. Recall can use this same
+primitive, then call `cancel({ commandId, onlyIfPending: true })` for an
+accepted queued command; withdrawal itself never cancels admitted work.
+
+Observation messages for prompts and operator lines carry `requestId`; pending
+prompts carry it too. Clients can therefore reconcile watch-first delivery
+without waiting for the command response or matching text.
 
 ## Set up
 
@@ -47,7 +88,7 @@ wake contracts. Existing host fixtures show deterministic and native adapters.
 
 ## Quick start without a provider account
 
-Node 24 or newer provides the SQLite database for the public testing helper.
+Node's built-in SQLite (Node 22.13 or newer) backs the public testing helper.
 This runs the real durable Agent with a deterministic faux model; no credentials
 or background timer are needed. Drive settlement explicitly.
 
@@ -189,14 +230,29 @@ Extension tool authority and final external access remain host decisions.
 
 ## Host metadata
 
+Tool display payloads use `SessionMessage.data`, directly, not `value.details`
+or a `data.details` envelope. Woodstock stores the same payload on each tool
+outcome/completed-message entry's `data`; model context and compaction inputs
+use only the message content. Recovery can reconstruct a tool's application
+result without putting its display payload into the next model request. Images
+remain model image content; their display metadata is application data. Live
+output counters use the tool event's `result.data`.
+
+`data` is independent of host `meta` even when their keys overlap. It is not
+host attribution and does not inherit the 4096-byte metadata cap. The ordinary
+bounded Session read still accounts for the complete projected payload.
+Woodstock schema 3 refuses older preview stores instead of migrating them on
+open; the host retains custody of incompatible storage. This is a storage
+contract, not permission to reset or migrate any live data.
+
 A host attaches its own data to a prompt or operator line, such as who sent it
 or which channel it came from, with `agent.withMeta(meta)`. Shiitake checks the
 value against the host's `meta.schema`, caps it at 4096 bytes of JSON, stores it
-beside the message and returns it as `SessionMessage.meta`. It never reads it.
-Only the in-process owner returned by `Shiitake.make` has `withMeta`: no request
-body can carry metadata, because every command schema is closed. Over HTTP the
-host's own middleware sets the `shiitakeMeta` Hono variable, and the session
-resolver receives it:
+beside the message and returns it as `SessionMessage.meta`. It does not own the
+metadata's domain grammar. Only the in-process owner returned by `Shiitake.make`
+has `withMeta`: no request body can carry metadata, because every command schema
+is closed. Over HTTP the host's own middleware sets the `shiitakeMeta` Hono
+variable, and the session resolver receives it:
 
 ```ts
 const routes = createShiitakeHttpRoutes(
@@ -222,11 +278,32 @@ to `ShiitakeHost.acceptMail(mail, meta)`; a mail's sender cannot set it, and a
 reply never carries the settled work's metadata (see
 [Delegated replies](#delegated-replies)). A retried request id replays only with
 the same metadata. A Cloudflare owner exposes its whole HTTP surface (Session
-routes, browser and ACP) as the protected `shiitakeApp()` Hono app, so a host
-mounts it behind its own identity middleware; ACP receives each request's
-metadata, so a host can serve each author over `withMeta`. The host's metadata
-schema may be an Effect schema or any synchronous Standard Schema, such as
-Zod 4. [Host metadata tests](test/host-meta.test.ts) cover each rule.
+routes and ACP) as the protected `shiitakeApp()` Hono app, so a host mounts it
+behind its own identity middleware; ACP receives each request's metadata, so a
+host can serve each author over `withMeta`. The host's metadata schema may be an
+Effect schema or any synchronous Standard Schema, such as Zod 4.
+
+For a multi-author host, `meta.identityPath` selects the host's stable principal
+ID using SQLite's JSON decoder (for example, `$.author.id`). On a
+`withMeta`-bound Session, `latestPending()` returns just that principal's newest
+owner-admitted pending prompt, or `null`. It is independent of the bounded
+oldest-first pending page and preserves the exact text, supported images and
+metadata. Steers and follow-ups are eligible; extension work, compactions and
+started commands are not.
+
+The same identity check protects `cancel` and raw
+`command({ type: "cancel", ... })`, including Accepted replay after reopening.
+Display names are not identity. The host must authenticate and bind each
+request, and recheck live Agent/Session access before forwarding it. An unbound
+in-process owner retains operational cancellation authority. A single-user Local
+host need not configure `identityPath`. Pending-only cancellation remains
+`cancel({ commandId, onlyIfPending: true })`; lookup does not reserve the work,
+so a claim race can still return TooLate.
+[Host metadata tests](test/host-meta.test.ts) cover each rule.
+
+A `ShiitakeDO` subclass serves its own routes in front of Shiitake's by
+overriding the protected `hostFetch(request)`: it returns a response, or
+`undefined` to let Shiitake serve the request.
 
 Cloudflare hosts may supply `initialize(extensions)` to commit an ordinary
 Agent-scope extension command before queued or host work resumes. Failure closes
@@ -252,23 +329,58 @@ are the same pieces for a host that composes its own store. See
 [Run it on Node](docs/site/run/node.mdx) and the
 [Node host tests](test/node-host.test.ts).
 
-The `/agent-control` source exposes `agents.create({requestId, model?})`,
-`agents.setModel({agentId, model})` and `agents.models({})` when its host
-authorizes those operations. Models use `provider/model` spelling and must be
-offered by that host; `agents.models` returns at most 200 offered addresses from
-signed-in or configured providers. A host model refusal reaches the caller as a
-`CapabilityFailed` diagnostic such as `model:rejected: …`, while other failures
-propagate unchanged. The `/model-preference` resolver orders explicit Session,
-explicit Agent, the person's last manual switch, Team default, then available
-login. Hosts own those stored layers and credential admission: choosing a model
-never bypasses an owner's Team or Agent key-source restriction. A host can
-refuse an unrunnable send before acceptance; `agents.wait` includes the failed
-run's bounded diagnostic so callers can explain login or model-selection
-problems. For a completed command, `agents.wait` also returns the command's
-final assistant `text`, at most 16,384 characters, with `truncated` set when it
-was cut; failed, cancelled and interrupted commands return no text, and
-`agents.read` stays the full bounded Session read. Hosted ACP sessions use the
-Agent and Team layers; they do not select a person's saved model preference.
+The bound runtime's pending-work answer includes BirdDog's Carrier-owned reply
+retries. Its next wake is the earliest extension timer or owed reply delivery,
+so an otherwise idle reconciliation cannot erase a mail retry timer. Reopening
+before a retained reply's due time schedules its future delivery without a
+client request.
+
+The agent-control source offers
+`agents.send({agentId, sessionId, requestId, text, delivery})` and
+`agents.recall({agentId, sessionId, requestId})` only when the host supplies the
+corresponding request-owning callback. Choose a nonempty caller request ID of at
+most 256 UTF-8 bytes before sending; reuse it for retries or recovery after a
+lost acceptance response. The host scopes it to the sending Agent and invoking
+Session and the target Agent and Session. Model input cannot supply the invoking
+Session or override the pending-only recall guard. Local replay uses that caller
+identity, not the current tool ID or model program bytes. Recall cancels only
+pending work: `accepted` names the known command, `too_late` names active or
+settled work without aborting it, and `unknown` carries no invented command ID.
+An unknown recall still retains the target owner's late-admission fence.
+
+The `/agent-control` source exposes
+`agents.create({requestId, name?, model?, reasoning?})`,
+`agents.setModel({agentId, model, reasoning?})` and `agents.models({})` when its
+host authorizes those operations. `name` labels the new Agent and `reasoning`
+(`minimal` to `max`, one of `modelReasoningLevels`) needs a `model`.
+`agents.create` returns the Agent's `name`, the requested `model` and
+`reasoning` (the stored default; absent when it inherits), and the
+`workingDirectory` its tools use; `agents.list` reports the same facts for
+existing Agents. A host that can archive also accepts `archived: true` there to
+list only the archived ones (other hosts refuse that input). A host can offer
+`agents.archive({agentId})` and `agents.unarchive`: an Agent archiving an Agent
+it created hides it from lists and delegation without deleting anything, and the
+host refuses any other target, the caller itself, or an Agent with a running
+command or delegated work still waiting. Each refusal, and a send to an archived
+Agent, reaches the caller as a `CapabilityFailed` diagnostic such as
+`archive:not_creator: …`, `archive:self`, `archive:running`, `archive:pending`,
+`archive:unreadable` (its store predates the schema) or `archive:archived`.
+`agents.wait` accepts `timeoutMs` from 1 to 30000. Models use `provider/model`
+spelling and must be offered by that host; `agents.models` returns at most 200
+offered addresses from signed-in or configured providers. A host model refusal
+reaches the caller as a `CapabilityFailed` diagnostic such as
+`model:rejected: …`, while other failures propagate unchanged. The
+`/model-preference` resolver orders explicit Session, explicit Agent, the
+person's last manual switch, Team default, then available login. Hosts own those
+stored layers and credential admission: choosing a model never bypasses an
+owner's Team or Agent key-source restriction. A host can refuse an unrunnable
+send before acceptance; `agents.wait` includes the failed run's bounded
+diagnostic so callers can explain login or model-selection problems. For a
+completed command, `agents.wait` also returns the command's final assistant
+`text`, at most 16,384 characters, with `truncated` set when it was cut; failed,
+cancelled and interrupted commands return no text, and `agents.read` stays the
+full bounded Session read. Hosted ACP sessions use the Agent and Team layers;
+they do not select a person's saved model preference.
 
 ## API and examples
 
@@ -361,8 +473,17 @@ cell's ID is its positive safe integer sequence written as decimal text.
 Producer history commits in the same owner transaction as its state change,
 deduplicates unchanged state, and retains at most thirty-two events and 32 KiB
 with an explicit omitted count. A real command ID anchors cells after its last
-loaded durable row; an unloaded anchor stays hidden until its page loads. Null
-anchors appear under **Extension changes**.
+loaded durable row; an unloaded anchor stays hidden until its page loads.
+Alternatively, a cell may supply `afterSequence` with `commandId: null` to
+choose a fixed committed Session position. This is not its producer-local event
+sequence. Zero places it before the first Session entry; unloaded positions stay
+hidden until their page loads. Without either anchor, a cell appears under
+**Extension changes**. An event may not choose both anchor kinds.
+
+Goal uses the fixed-position addition: its host reads `ctx.sessionPosition`
+inside the ending transaction and persists that position. Later output from the
+same running work cannot move the ending line. Renderers resolve it using the
+same row visibility policy and split tool groups at that position.
 
 The frozen client V1 contract includes fields, placements, bounds, identities,
 ordering, admission, dispatch, detach, and history laws. Host extension V0 and

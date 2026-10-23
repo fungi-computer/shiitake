@@ -72,6 +72,8 @@ faux.setResponses(
           );
           if (result === undefined)
             throw new Error("Model did not receive the recovered tool result");
+          if ("details" in result || "data" in result || "meta" in result)
+            throw new Error("Recovered model message leaked application data");
           return fauxAssistantMessage("finished from saved result");
         },
       ],
@@ -87,6 +89,7 @@ await Effect.runPromise(
       yield* muleEffect.run(
         {
           model: faux.model,
+          retryable: () => false,
           stream:
             mode === "crash-after-result"
               ? () => {
@@ -138,6 +141,7 @@ await Effect.runPromise(
                               },
                             ],
                             isError: false,
+                            data: { display: "saved outcome display payload" },
                             terminate: mode === "crash-terminate",
                           },
                         };
@@ -170,7 +174,7 @@ process.send?.(
     fixture.owner,
     "restart",
     { limit: 200 },
-    { facts: idleActivity, progress: null },
+    { facts: idleActivity, toolOutput: [], progress: null },
   ),
 );
 fixture.close();

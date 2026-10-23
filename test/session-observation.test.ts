@@ -63,6 +63,7 @@ it("continues live observation from the baseline carried by a reset", async () =
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),

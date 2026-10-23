@@ -3,6 +3,10 @@ import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { VerifiedAgentReply } from "./internal/woodstock/index.js";
 import type { BirdDogEffect } from "@fungi.computer/bird-dog/effect";
 import type { Accepted } from "./client.js";
+import type {
+  ColdSessionPage,
+  ColdSessionPageRequest,
+} from "./cold-sessions.js";
 import type { HostMetaOptions } from "./internal/host-meta.js";
 import { DurableObject } from "cloudflare:workers";
 import type {
@@ -24,7 +28,6 @@ import {
 } from "@fungi.computer/watchdog";
 
 import type { ExtensionRosterV0, Json } from "./extensions.js";
-import { composeAgentClose } from "./internal/agent-close.js";
 import { ShiitakeError } from "./errors.js";
 import {
   createShiitakeHttpRoutes,
@@ -38,7 +41,7 @@ import type {
   GrantsDeliveryResult,
   ShiitakeOwnerAgent,
   SqliteOwner,
-  StorageBudget,
+  StoragePressureCheck,
   CompactionOptions,
   ToolAccess,
 } from "./internal/contracts.js";
@@ -57,19 +60,19 @@ import {
   deliverSessionGrants,
   prepareSessionGrants,
   pruneSessionInboxTombstones,
+  readColdSessionPage,
   readSessionInboxChanges,
   readSessionSummary,
   readSessionInboxSummary,
   type SessionInboxChanges,
 } from "./internal/woodstock/index.js";
 
-import {
-  BrowserSessions,
-  type BrowserHost,
-} from "./internal/browser-sessions.js";
-
 export type { SessionInboxChanges } from "./internal/woodstock/index.js";
-export type { BrowserHost } from "./internal/browser-sessions.js";
+export type {
+  ColdSessionPage,
+  ColdSessionPageRequest,
+  ColdSessionRow,
+} from "./cold-sessions.js";
 export type {
   GrantsDelivery,
   GrantsDeliveryResult,
@@ -109,6 +112,11 @@ export type CloudflareShiitakeState = Readonly<{
     };
   /** Extend the Durable Object event lifetime through runtime reconciliation. */
   waitUntil: (task: Promise<unknown>) => void;
+  /** The Durable Object's identity, named when its store refuses a Session. */
+  id?: Readonly<{
+    /** The identity as text, used to name the store in refusals. */
+    toString: () => string;
+  }>;
 }>;
 
 /** Non-empty Mycelium capabilities supplied by a Cloudflare host. */
@@ -176,10 +184,10 @@ export type CloudflareShiitakeOptions = Readonly<{
   instructions: InstructionSource;
   tools?: readonly [] | CloudflareShiitakeTools;
   /**
-   * Disk budget for this Durable Object's SQLite, measured with
-   * `ctx.storage.sql.databaseSize`; absent never refuses for storage pressure.
+   * The host's storage-pressure check for this Durable Object; absent never
+   * refuses for storage pressure. The budget and thresholds are the host's.
    */
-  storageBudget?: StorageBudget;
+  storagePressure?: StoragePressureCheck;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** The host's explicit extension roster and grants; there is no default. */
@@ -195,8 +203,6 @@ export type CloudflareShiitakeOptions = Readonly<{
   hostJobs?: CloudflareHostJobs;
   /** Host-owned addressed mail and settlement replies; absent disables mail. */
   mailRoom?: BirdDogEffect;
-  /** Session-scoped browser tools and maintained HTTP transport; absent disables it. */
-  browser?: (sessionId: string) => BrowserHost;
   /**
    * Lazily open ACP over the owned in-process handle. The host authorizes
    * ingress and supplies its context policy. ACP borrows this handle: closing
@@ -474,7 +480,6 @@ function effectOptions(
   state: CloudflareShiitakeState,
   options: CloudflareShiitakeOptions,
   runtime: RuntimeHostEffect,
-  browser: BrowserSessions | undefined,
 ): ShiitakeEffectOptions {
   const tools = configuredTools(options.tools);
   const base: Omit<ShiitakeEffectOptions, "tools"> = {
@@ -483,38 +488,15 @@ function effectOptions(
     extensions: options.extensions,
     instructions: {
       load: ({ sessionId, commandId }) =>
-        Effect.gen(function* () {
-          const lease =
-            browser === undefined
-              ? undefined
-              : yield* Effect.acquireRelease(
-                  Effect.try({
-                    try: () => browser.acquire(sessionId),
-                    catch: () =>
-                      new ShiitakeError(
-                        "instructions",
-                        "rejected",
-                        "Browser acquisition failed",
-                      ),
-                  }),
-                  (acquired) => Effect.sync(acquired.release),
-                );
-          const snapshot = yield* Effect.tryPromise({
-            try: (signal) =>
-              options.instructions.load({ sessionId, commandId, signal }),
-            catch: () =>
-              new ShiitakeError(
-                "instructions",
-                "rejected",
-                "Instruction acquisition failed",
-              ),
-          });
-          return lease === undefined
-            ? snapshot
-            : {
-                ...snapshot,
-                modules: [...(snapshot.modules ?? []), ...lease.host.modules],
-              };
+        Effect.tryPromise({
+          try: (signal) =>
+            options.instructions.load({ sessionId, commandId, signal }),
+          catch: () =>
+            new ShiitakeError(
+              "instructions",
+              "rejected",
+              "Instruction acquisition failed",
+            ),
         }),
     },
     model: adaptModelSource(options.model),
@@ -546,8 +528,8 @@ function effectOptions(
     });
   }
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
-  if (options.storageBudget !== undefined)
-    Object.assign(base, { storageBudget: options.storageBudget });
+  if (options.storagePressure !== undefined)
+    Object.assign(base, { storagePressure: options.storagePressure });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
   return tools === undefined ? base : { ...base, tools };
@@ -572,57 +554,63 @@ export type CloudflareShiitake = ShiitakeOwnerAgent &
     ) => Promise<Accepted>;
     /** Deliver the native owner alarm to the bound runtime. */
     alarm: () => Promise<void>;
-    /** Snapshot actual live executors, independent of instruction or browser leases. */
+    /** Snapshot actual live executors, independent of instruction leases. */
     activeSessions: () => Promise<readonly string[]>;
     /** Abort each currently executing Session through its ordinary cancellation door. */
     abortActive: () => Promise<void>;
-    /** Session-scoped browser transport and teardown, owned by this host. */
-    browser: Readonly<{
-      /** Serve a Session browser request after host ingress authorization. */
-      fetch: (request: Request) => Promise<Response>;
-      /** Cancel browser connections and release the current ephemeral hosts. */
-      clear: () => Promise<void>;
-    }>;
   }>;
 
 /** Construct Shiitake over one Durable Object's SQLite and lifetime. */
+/**
+ * The state with its storage named for Woodstock's refusals after the
+ * Durable Object's id, when it has one. Its owner and every reader of it
+ * share this one storage object, so the name travels with the owner.
+ */
+function namedState(state: CloudflareShiitakeState): CloudflareShiitakeState {
+  const { id, storage } = state;
+  if (id === undefined || storage.storeName !== undefined) return state;
+  return {
+    id,
+    waitUntil: (task) => {
+      state.waitUntil(task);
+    },
+    storage: {
+      sql: storage.sql,
+      transactionSync: (operation) => storage.transactionSync(operation),
+      transaction: (body) => storage.transaction(body),
+      getAlarm: (alarmOptions) => storage.getAlarm(alarmOptions),
+      setAlarm: (time, alarmOptions) => storage.setAlarm(time, alarmOptions),
+      deleteAlarm: (alarmOptions) => storage.deleteAlarm(alarmOptions),
+      storeName: `Durable Object ${id.toString()}`,
+    },
+  };
+}
+
+/**
+ * Open Shiitake over one Durable Object's storage. It resolves once the runtime
+ * is started and `initialize` has run; if `initialize` throws, the runtime is
+ * closed and the error is rethrown.
+ */
 export function makeCloudflareShiitake(
-  state: CloudflareShiitakeState,
+  unnamed: CloudflareShiitakeState,
   options: CloudflareShiitakeOptions,
 ): Promise<CloudflareShiitake> {
+  const state = namedState(unnamed);
   const startup = Deferred.makeUnsafe<boolean>();
   const host = runtimeHost(state, options.hostWork, Deferred.await(startup));
-  const browser =
-    options.browser === undefined
-      ? undefined
-      : new BrowserSessions(
-          options.browser,
-          async (sessionId) =>
-            (await runShiitakePromise(
-              readSessionSummary(state.storage, sessionId),
-            )) !== undefined,
-        );
-  const coreOptions = effectOptions(state, options, host.runtime, browser);
+  const coreOptions = effectOptions(state, options, host.runtime);
   return import("./internal/runtime-core.js")
     .then(({ openRuntimeCore }) =>
       runShiitakePromise(openRuntimeCore(coreOptions, options.mailRoom)),
     )
     .then(
       async ({ agent, activeSessions, acceptMail, readSettlement }) => {
-        const close = composeAgentClose(
-          Effect.tryPromise({
-            try: () => browser?.close() ?? Promise.resolve(),
-            catch: () =>
-              runtimeFailure("unavailable", "Browser teardown failed"),
-          }),
-          agent.close,
-        );
         const handle = toPromiseOwner(agent);
         try {
           await options.initialize?.(handle);
         } catch (cause) {
           await runShiitakePromise(Deferred.succeed(startup, false));
-          await runShiitakePromise(close);
+          await runShiitakePromise(agent.close);
           throw cause;
         }
         await runShiitakePromise(Deferred.succeed(startup, true));
@@ -641,18 +629,11 @@ export function makeCloudflareShiitake(
               );
             return runShiitakePromise(acceptMail(mail, meta, reply));
           },
-          close: () => runShiitakePromise(close),
           alarm: host.alarm,
           activeSessions: () => runShiitakePromise(activeSessions),
           abortActive: async () => {
             for (const sessionId of await runShiitakePromise(activeSessions))
               await runShiitakePromise(agent.session(sessionId).abort);
-          },
-          browser: {
-            fetch: (request: Request) =>
-              browser?.fetch(request) ??
-              Promise.resolve(new Response(null, { status: 404 })),
-            clear: () => browser?.clear() ?? Promise.resolve(),
           },
         });
       },
@@ -674,6 +655,11 @@ export abstract class ShiitakeOwner<
   ) {}
   private agentPromise: Promise<CloudflareShiitake> | undefined;
   private openAcp: CloudflareShiitakeOptions["acp"];
+  #named: CloudflareShiitakeState | undefined;
+  /** This owner's state, its storage named once for Woodstock's refusals. */
+  private get named(): CloudflareShiitakeState {
+    return (this.#named ??= namedState(this.ctx));
+  }
   private acpServer: Promise<CloudflareShiitakeAcpServer> | undefined;
   /** Consecutive native alarm failures; reset on the next successful alarm. */
   private alarmFailures = 0;
@@ -691,15 +677,18 @@ export abstract class ShiitakeOwner<
   );
 
   /** Supply this agent's model, instructions, and optional capabilities. */
-  protected abstract shiitakeOptions(): CloudflareShiitakeOptions;
+  protected abstract shiitakeOptions():
+    CloudflareShiitakeOptions | Promise<CloudflareShiitakeOptions>;
 
   /** Borrow this owner's runtime directly; only the host owns its lifetime. */
   public async shiitake(): Promise<CloudflareShiitake> {
-    if (this.agentPromise === undefined) {
-      const options = this.shiitakeOptions();
+    // Publish the flight before loading options: concurrent cold requests
+    // share both first-use imports and the runtime they configure.
+    this.agentPromise ??= Promise.resolve().then(async () => {
+      const options = await this.shiitakeOptions();
       this.openAcp = options.acp;
-      this.agentPromise = makeCloudflareShiitake(this.ctx, options);
-    }
+      return makeCloudflareShiitake(this.named, options);
+    });
     try {
       return await this.agentPromise;
     } catch (error) {
@@ -719,13 +708,13 @@ export abstract class ShiitakeOwner<
   }
 
   /** Indexed owner-local existence check; corrupt stored Sessions remain unavailable. */
-  protected async hasStoredSession(sessionId: string): Promise<boolean> {
+  public async hasStoredSession(sessionId: string): Promise<boolean> {
     await this.shiitake();
-    const inbox = readSessionInboxSummary(this.ctx.storage, sessionId);
+    const inbox = readSessionInboxSummary(this.named.storage, sessionId);
     if (inbox === undefined || inbox.state === "unavailable") return false;
     return (
       (await runShiitakePromise(
-        readSessionSummary(this.ctx.storage, sessionId),
+        readSessionSummary(this.named.storage, sessionId),
       )) !== undefined
     );
   }
@@ -736,18 +725,35 @@ export abstract class ShiitakeOwner<
     limit: number,
   ): Promise<SessionInboxChanges> {
     await this.shiitake();
-    return readSessionInboxChanges(this.ctx.storage, after, limit);
+    return readSessionInboxChanges(this.named.storage, after, limit);
+  }
+
+  /**
+   * One bounded, read-only page of Sessions with stored bytes, last activity
+   * and an idle flag, coldest first. The store keeper's only view of cold
+   * Sessions; it carries no SQL, transaction or write.
+   */
+  public async readColdSessions(
+    request: ColdSessionPageRequest,
+  ): Promise<ColdSessionPage> {
+    await this.shiitake();
+    return await runShiitakePromise(
+      readColdSessionPage(this.named.storage, request),
+    );
   }
 
   /** Latest inbox revision; read only after the owner has opened. */
   public readInboxRevision(): number {
-    return readSessionInboxChanges(this.ctx.storage, Number.MAX_SAFE_INTEGER, 0)
-      .latest;
+    return readSessionInboxChanges(
+      this.named.storage,
+      Number.MAX_SAFE_INTEGER,
+      0,
+    ).latest;
   }
 
   /** Prune deletion deltas after every current member inbox has acknowledged them. */
   public pruneInboxTombstones(through: number): void {
-    pruneSessionInboxTombstones(this.ctx.storage, through);
+    pruneSessionInboxTombstones(this.named.storage, through);
   }
 
   /** Persist a wake and run one reconciliation pass, including host work. */
@@ -803,15 +809,12 @@ export abstract class ShiitakeOwner<
   private app: Hono<ShiitakeHttpEnv> | undefined;
 
   /**
-   * Shiitake's whole HTTP surface (Session routes, browser and ACP) as one
+   * Shiitake's whole HTTP surface (Session routes and ACP) as one
    * Hono app. A host mounts it behind its own middleware, which alone may
    * set the `shiitakeMeta` variable.
    */
   protected shiitakeApp(): Hono<ShiitakeHttpEnv> {
     return (this.app ??= new Hono<ShiitakeHttpEnv>()
-      .all("/browser/*", async (context) =>
-        (await this.shiitake()).browser.fetch(context.req.raw),
-      )
       .all("/acp", async (context) => {
         const agent = await this.shiitake();
         if (this.openAcp === undefined)
@@ -830,7 +833,7 @@ export abstract class ShiitakeOwner<
         );
       })
       .route("/", this.routes)
-      // Browser and ACP failures reach the Durable Object caller unchanged,
+      // ACP failures reach the Durable Object caller unchanged,
       // as they did before the routes shared one app.
       .onError((error) => {
         throw error;
@@ -847,7 +850,8 @@ export abstract class ShiitakeOwner<
 export abstract class ShiitakeDO<Env> extends DurableObject<Env> {
   #owner: ShiitakeOwner<Env> | undefined;
 
-  protected abstract shiitakeOptions(): CloudflareShiitakeOptions;
+  protected abstract shiitakeOptions():
+    CloudflareShiitakeOptions | Promise<CloudflareShiitakeOptions>;
 
   protected runtimeOwner(): ShiitakeOwner<Env> {
     const options = () => this.shiitakeOptions();
@@ -867,11 +871,17 @@ export abstract class ShiitakeDO<Env> extends DurableObject<Env> {
   protected closeShiitake() {
     return this.runtimeOwner().closeShiitake();
   }
+  protected hasStoredSession(sessionId: string) {
+    return this.runtimeOwner().hasStoredSession(sessionId);
+  }
   protected readInboxChanges(after: number, limit: number) {
     return this.runtimeOwner().readInboxChanges(after, limit);
   }
   protected readInboxRevision() {
     return this.runtimeOwner().readInboxRevision();
+  }
+  protected readColdSessions(request: ColdSessionPageRequest) {
+    return this.runtimeOwner().readColdSessions(request);
   }
   protected pruneInboxTombstones(through: number) {
     this.runtimeOwner().pruneInboxTombstones(through);
@@ -883,8 +893,13 @@ export abstract class ShiitakeDO<Env> extends DurableObject<Env> {
   public override alarm() {
     return this.runtimeOwner().alarm();
   }
-  /** Route an authenticated client request through the owner. */
+  /**
+   * The host's own routes, in front of Shiitake's: return a response to answer
+   * the request, or undefined to let Shiitake serve it. Absent means none.
+   */
+  protected hostFetch?(request: Request): Promise<Response> | undefined;
+  /** Route an authenticated client request through the host's routes, then the owner. */
   public override fetch(request: Request) {
-    return this.runtimeOwner().fetch(request);
+    return this.hostFetch?.(request) ?? this.runtimeOwner().fetch(request);
   }
 }

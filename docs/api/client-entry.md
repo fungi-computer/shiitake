@@ -60,7 +60,7 @@ Borrowed latest-value activity; each iterator subscribes separately.
 type ClientEntryV1 = Readonly<{
   protocol: "shiitake.client/v1";
   id: ExtensionId;
-  correlatedPrompts?: "note";
+  promptPresentation?: "footer";
   attach?: (context) => Effect.Effect<void, Error, Scope.Scope>;
   contribute?: (slot) => ClientContributionV1;
 }>;
@@ -71,13 +71,27 @@ closure.
 
 ---
 
+### ClientActivityStateV0
+
+```ts
+type ClientActivityStateV0 = "idle" | "working" | "blocked" | "unknown";
+```
+
+What a client observed about the Session, never an execution authority.
+
+---
+
 ### ClientActivityV0
 
 ```ts
-type ClientActivityV0 = "idle" | "working" | "blocked" | "unknown";
+type ClientActivityV0 = Readonly<{
+  state: ClientActivityStateV0;
+  header?: string;
+}>;
 ```
 
-Activity already observed by the client, never an execution authority.
+Activity already observed by the client. `header` is only the short heading of
+what blocks the Session; it never carries question bodies or answers.
 
 ## Variables
 
@@ -138,6 +152,7 @@ const clientTimelineCellSchemaV1: Struct<{
   sequence: Int;
   at: Int;
   commandId: NullOr<String>;
+  afterSequence: optionalKey<Int>;
   rows: $Array<Struct<{
      id: String;
      title: String;
@@ -162,7 +177,7 @@ const clientTimelineCellSchemaV1: Struct<{
 }>;
 ```
 
-One committed presentation event anchored to its real command, if any.
+One committed presentation event with an explicit placement choice.
 
 ---
 
@@ -227,6 +242,7 @@ const clientContributionSchemaV1: Struct<{
         sequence: Int;
         at: Int;
         commandId: NullOr<String>;
+        afterSequence: optionalKey<Int>;
         rows: $Array<Struct<{
            id: String;
            title: String;
@@ -263,7 +279,7 @@ const parseClientEntryV1: (
 ) => Readonly<{
   protocol: "shiitake.client/v1";
   id: string & Brand<"ExtensionId">;
-  correlatedPrompts?: "note";
+  promptPresentation?: "footer";
   attach?: (context) => Effect<void, Error, Scope>;
   contribute?: (slot) => object;
 }> = decodeEntry;
@@ -281,7 +297,7 @@ Admit exactly V1; installed executable code is not sandboxed.
 #### Returns
 
 `Readonly`\<\{ `protocol`: `"shiitake.client/v1"`; `id`: `string` &
-`Brand`\<`"ExtensionId"`\>; `correlatedPrompts?`: `"note"`; `attach?`:
+`Brand`\<`"ExtensionId"`\>; `promptPresentation?`: `"footer"`; `attach?`:
 (`context`) => `Effect`\<`void`, `Error`, `Scope`\>; `contribute?`: (`slot`) =>
 `object`; \}\>
 
@@ -305,10 +321,10 @@ One typed author seam, usable with ordinary async attachment code.
 
 #### Parameters
 
-| Parameter  | Type                                                                                                                                                                                                                                                                                               |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `contract` | [`ExtensionContractV0`](extensions.md#extensioncontractv0)\<`C`, `P`, `PI`\>                                                                                                                                                                                                                       |
-| `client`   | `Readonly`\<\{ `correlatedPrompts?`: [`ClientEntryV1`](#cliententryv1)\[`"correlatedPrompts"`\]; `attach?`: (`context`) => \| `void` \| `Promise`\<`void`\> \| `Effect.Effect`\<`void`, `Error`, `Scope.Scope`\>; `contribute?`: (`view`) => [`ClientContributionV1`](#clientcontributionv1); \}\> |
+| Parameter  | Type                                                                                                                                                                                                                                                                                                 |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contract` | [`ExtensionContractV0`](extensions.md#extensioncontractv0)\<`C`, `P`, `PI`\>                                                                                                                                                                                                                         |
+| `client`   | `Readonly`\<\{ `promptPresentation?`: [`ClientEntryV1`](#cliententryv1)\[`"promptPresentation"`\]; `attach?`: (`context`) => \| `void` \| `Promise`\<`void`\> \| `Effect.Effect`\<`void`, `Error`, `Scope.Scope`\>; `contribute?`: (`view`) => [`ClientContributionV1`](#clientcontributionv1); \}\> |
 
 #### Returns
 

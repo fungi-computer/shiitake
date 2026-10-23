@@ -53,17 +53,20 @@ it("captures a typed projection in the same entry admitted for builtins and inst
   ).toEqual(empty);
   expect(Object.keys(entry).sort()).toEqual(["contribute", "id", "protocol"]);
 });
-it("preserves an owner's note presentation for correlated extension prompts", () => {
+it("preserves an owner's footer presentation for its own prompts", () => {
   const entry = defineClientEntry(contract, {
     contribute: () => empty,
-    correlatedPrompts: "note",
+    promptPresentation: "footer",
   });
-  expect(parseClientEntryV1(entry)).toHaveProperty("correlatedPrompts", "note");
+  expect(parseClientEntryV1(entry)).toHaveProperty(
+    "promptPresentation",
+    "footer",
+  );
   expect(
     defineClientEntry(contract, { contribute: () => empty }),
-  ).not.toHaveProperty("correlatedPrompts");
+  ).not.toHaveProperty("promptPresentation");
   expect(() =>
-    parseClientEntryV1({ ...entry, correlatedPrompts: "bubble" }),
+    parseClientEntryV1({ ...entry, promptPresentation: "note" }),
   ).toThrow();
 });
 it("normalizes plain Promise attachment without requiring Effect from its author", async () => {
@@ -80,7 +83,7 @@ it("normalizes plain Promise attachment without requiring Effect from its author
       entry.attach({
         activity: {
           async *[Symbol.asyncIterator]() {
-            yield await Promise.resolve("idle");
+            yield await Promise.resolve({ state: "idle" as const });
           },
         },
         signal: new AbortController().signal,
@@ -164,6 +167,29 @@ it("strictly admits the four bounded data placements and rejects executable or a
     }),
   ).toThrow();
   const cell = { id: "1", sequence: 1, at: 1, commandId: null, rows: [] };
+  expect(
+    decode({
+      ...empty,
+      timeline: { cells: [{ ...cell, afterSequence: 0 }], omitted: 0 },
+    }).timeline.cells[0]?.afterSequence,
+  ).toBe(0);
+  for (const afterSequence of [-1, 0.5, "1"]) {
+    expect(() =>
+      decode({
+        ...empty,
+        timeline: { cells: [{ ...cell, afterSequence }], omitted: 0 },
+      }),
+    ).toThrow();
+  }
+  expect(() =>
+    decode({
+      ...empty,
+      timeline: {
+        cells: [{ ...cell, afterSequence: 0, commandId: "conflicting-anchor" }],
+        omitted: 0,
+      },
+    }),
+  ).toThrow();
   expect(() =>
     decode({ ...empty, timeline: { cells: [cell, cell], omitted: 0 } }),
   ).toThrow();

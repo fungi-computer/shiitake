@@ -368,6 +368,17 @@ export function deleteTimer(
   );
 }
 
+/** Release all timer registrations when their extension leaves the roster. */
+export function deleteExtensionTimers(
+  owner: SqliteOwner,
+  extensionId: string,
+): void {
+  owner.sql.exec(
+    "DELETE FROM shiitake_extension_timers WHERE extension_id = ?",
+    extensionId,
+  );
+}
+
 /** Read one timer's due instant. */
 export function readTimer(
   owner: SqliteOwner,

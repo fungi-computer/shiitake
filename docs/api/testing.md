@@ -160,12 +160,14 @@ function memoryHost(options?): Promise<Readonly<{
      hasMore: boolean;
      oldestCursor?: string | null;
      messages: readonly Readonly<{
+        requestId?: ... | ...;
         meta?: ... | ...;
+        data?: ... | ...;
         origin?: ... | ...;
         id: string;
         sequence: number;
         commandId: ... | ...;
-        value: Message;
+        value: ModelMessage;
      }>[];
      terminals: readonly Readonly<{
         commandId: string;
@@ -202,6 +204,13 @@ function memoryHost(options?): Promise<Readonly<{
         thinkingTruncated: boolean;
       }>
         | null;
+     toolOutput: readonly Readonly<{
+        toolCallId: string;
+        revision: number;
+        tail: string;
+        droppedBytes: number;
+        totalBytes: number;
+     }>[];
      extensions: SessionExtensionSlots;
      attention: readonly object[];
      context?: Readonly<{
@@ -231,8 +240,9 @@ privileges. No submitted JavaScript is evaluated by this helper.
 `Promise`\<`void`\>; `settle`: (`sessionId`, `maxTicks?`) =>
 `Promise`\<`Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`;
 `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly
-`Readonly`\<\{ `meta?`: ... \| ...; `origin?`: ... \| ...; `id`: `string`;
-`sequence`: `number`; `commandId`: ... \| ...; `value`: `Message`; \}\>[];
+`Readonly`\<\{ `requestId?`: ... \| ...; `meta?`: ... \| ...; `data?`: ... \|
+...; `origin?`: ... \| ...; `id`: `string`; `sequence`: `number`; `commandId`:
+... \| ...; `value`: [`ModelMessage`](client.md#modelmessage); \}\>[];
 `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: ... \|
 ... \| ... \| ...; `sequence`: `number`; `diagnostic`: ... \| ...; `meta?`: ...
 \| ...; \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: ...; `sequence`:
@@ -244,7 +254,9 @@ privileges. No submitted JavaScript is evaluated by this helper.
 [`SessionActivity`](client.md#sessionactivity); `progress`: \| `Readonly`\<\{
 `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`:
 `string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \|
-`null`; `extensions`:
+`null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`;
+`revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`:
+`number`; \}\>[]; `extensions`:
 [`SessionExtensionSlots`](client.md#sessionextensionslots); `attention`:
 readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`:
 ... \| ...; \}\>; \}\>\>; `close`: () => `Promise`\<`void`\>; \}\>\>

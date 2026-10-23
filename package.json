@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Effect-native durable Session acceptance and bounded run orchestration",
   "type": "module",
@@ -51,6 +51,10 @@
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
     },
+    "./storage-conformance": {
+      "types": "./dist/internal/woodstock/storage-conformance.d.ts",
+      "import": "./dist/internal/woodstock/storage-conformance.js"
+    },
     "./node": {
       "types": "./dist/node.d.ts",
       "import": "./dist/node.js"
@@ -62,6 +66,10 @@
     "./fleet": {
       "types": "./dist/fleet.d.ts",
       "import": "./dist/fleet.js"
+    },
+    "./delegation": {
+      "types": "./dist/delegation.d.ts",
+      "import": "./dist/delegation.js"
     }
   },
   "files": [
@@ -80,7 +88,7 @@
     "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
     "test": "pnpm run test:unit && pnpm run test:merge",
     "test:unit": "vitest run",
-    "test:merge": "node test/cloudflare-durable-wake.native.mjs && pnpm run test:docs",
+    "test:merge": "node test/cloudflare-durable-wake.native.mjs && node test/woodstock-storage-conformance.native.mjs && pnpm run test:docs",
     "test:docs": "node --import tsx --test examples/bookmarks/checks.ts",
     "docs": "tsx ../../tooling/repository/src/docs/cli.ts check --root ../..",
     "docs:write": "tsx ../../tooling/repository/src/docs/cli.ts write --root ../..",
@@ -93,14 +101,15 @@
   "dependencies": {
     "@fungi.computer/bird-dog": "workspace:*",
     "@fungi.computer/cairn": "workspace:*",
+    "@fungi.computer/carrier": "workspace:*",
     "@fungi.computer/knapsack": "workspace:*",
     "@fungi.computer/mule": "workspace:*",
     "@fungi.computer/mycelium": "workspace:*",
+    "@fungi.computer/seam": "workspace:*",
     "@fungi.computer/watchdog": "workspace:*",
     "effect": "4.0.2",
-    "hono": "4.13.5",
     "zod": "4.4.3",
-    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-ai": "1.3.0",
     "@fungi.computer/gills": "workspace:*",
     "@fungi.computer/agar": "workspace:*"
   },
@@ -109,8 +118,8 @@
     "@types/node": "24.13.3",
     "typescript": "5.9.3",
     "vitest": "4.1.11",
-    "@fungi.computer/carrier": "workspace:*",
-    "@astrojs/starlight": "0.42.4"
+    "@astrojs/starlight": "0.42.4",
+    "hono": "4.13.5"
   },
   "botanical": {
     "role": "package",
@@ -129,5 +138,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/fungi-computer/shiitake.git"
+  },
+  "peerDependencies": {
+    "hono": "^4.13.5"
   }
 }

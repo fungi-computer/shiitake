@@ -1,5 +1,5 @@
 // Runtime for every law here: Node 24, `node:sqlite` (Woodstock's Local host),
-// with the host's storage measurement supplied as a controllable budget.
+// with the host's storage-pressure check supplied as a controllable fake.
 import * as Effect from "effect/Effect";
 import { describe, expect, it } from "vitest";
 
@@ -7,15 +7,11 @@ import { createShiitakeClient } from "../src/client.js";
 import { ShiitakeError } from "../src/errors.js";
 import { createShiitakeHttpRoutes } from "../src/http-routes.js";
 import { Shiitake } from "../src/index.js";
-import { readClientSnapshot } from "../src/internal/woodstock/client-projection.js";
 import {
-  contextByteLimit,
   openStorageAdmission,
   prepareSessionRun,
   prepareWoodstockSchema,
-  readSelectedPath,
 } from "../src/internal/woodstock/index.js";
-import { idleActivity } from "./fixtures/client.fixture.js";
 import { writeLargeSession } from "./fixtures/large-session.fixture.js";
 import {
   compatibilityRunDependencies,
@@ -34,43 +30,39 @@ function prompt(requestId: string, text: string) {
 
 const pressure = { boundary: "store", cause: "storage_pressure" } as const;
 
-describe("storage admission thresholds", () => {
-  it("refuses at 80%, keeps refusing until below 75%, then re-admits", () => {
-    let used = 0;
-    const admission = openStorageAdmission({
-      usedBytes: () => used,
-      budgetBytes: 1_000,
-    });
-    const admits = (bytes: number) => {
-      used = bytes;
-      try {
-        admission.admitNew();
-        return true;
-      } catch (error) {
-        expect(error).toBeInstanceOf(ShiitakeError);
-        expect(error).toMatchObject(pressure);
-        return false;
-      }
-    };
-    expect(admits(790)).toBe(true);
-    expect(admits(800)).toBe(false);
-    expect(admits(780)).toBe(false);
-    expect(admits(750)).toBe(false);
-    expect(admits(749)).toBe(true);
-    expect(admits(790)).toBe(true);
+describe("storage refusal door", () => {
+  it("refuses new work with the typed storage_pressure error while the host check reports pressure", () => {
+    let pressured = false;
+    const admission = openStorageAdmission({ underPressure: () => pressured });
+    expect(() => {
+      admission.admitNew();
+    }).not.toThrow();
+    pressured = true;
+    expect(() => {
+      admission.admitNew();
+    }).toThrow(expect.objectContaining(pressure));
+    pressured = false;
+    expect(() => {
+      admission.admitNew();
+    }).not.toThrow();
   });
 
-  it("fails closed on an invalid budget or an unreadable measurement", () => {
-    expect(() =>
-      openStorageAdmission({ usedBytes: () => 0, budgetBytes: 0 }),
-    ).toThrow(expect.objectContaining({ cause: "invalid" }));
+  it("carries the host check's own error through the door when it cannot measure", () => {
+    const unreadable = new ShiitakeError("store", "unavailable", "unreadable");
     const admission = openStorageAdmission({
-      usedBytes: () => Number.NaN,
-      budgetBytes: 1_000,
+      underPressure: () => {
+        throw unreadable;
+      },
     });
     expect(() => {
       admission.admitNew();
-    }).toThrow(expect.objectContaining({ cause: "unavailable" }));
+    }).toThrow(unreadable);
+  });
+
+  it("admits everything when the host sets no check", () => {
+    expect(() => {
+      openStorageAdmission(undefined).admitNew();
+    }).not.toThrow();
   });
 });
 
@@ -83,7 +75,7 @@ describe("storage pressure backpressure (Node, node:sqlite)", () => {
       ...compatibilityRunDependencies(),
       store: fixture.owner,
       runtime: runtime.runtime,
-      storageBudget: { usedBytes: () => used, budgetBytes: 1_000 },
+      storagePressure: { underPressure: () => used >= 800 },
     });
     const routes = createShiitakeHttpRoutes(
       (id) => agent.session(id),
@@ -134,12 +126,6 @@ describe("storage pressure backpressure (Node, node:sqlite)", () => {
       ]);
       expect(settled.activity.queue.state).toBe("idle");
 
-      // Hysteresis: dropping just under 80% does not re-admit yet.
-      used = 780;
-      await expect(
-        session.command(prompt("third", "plant the oak")),
-      ).rejects.toMatchObject(pressure);
-
       // Headroom returned: admission resumes on its own.
       used = 700;
       const third = await session.command(prompt("third", "plant the oak"));
@@ -153,93 +139,26 @@ describe("storage pressure backpressure (Node, node:sqlite)", () => {
   });
 });
 
-describe("model context ceiling (Node, node:sqlite)", () => {
-  // 120 uncompacted turns of two 56 KiB texts: about 13.5 MiB of context.
-  const oversized = { turns: 120, textBytes: 56 * 1_024 } as const;
-
-  it("refuses an oversized context read with a typed error before decoding it", () => {
+describe("stored context size (Node, node:sqlite)", () => {
+  it("prepares a run over a large stored context without a byte ceiling", () => {
     const fixture = createNativeSqliteOwnerFixture();
     try {
       Effect.runSync(prepareWoodstockSchema(fixture.owner));
+      // 120 uncompacted turns of two 56 KiB texts: about 13.5 MiB of context.
+      // Context size is Pi's compaction threshold's concern, not the store's.
       const session = writeLargeSession(fixture.owner, {
-        sessionId: "oversized",
-        ...oversized,
+        sessionId: "large",
+        turns: 120,
+        textBytes: 56 * 1_024,
       });
       const last = session.turns.at(-1);
       if (last === undefined) throw new Error("missing turn");
-      const stored = fixture.owner.sql
-        .exec(
-          "SELECT SUM(LENGTH(CAST(data_json AS BLOB))) AS bytes FROM session_entries",
-        )
-        .one().bytes;
-      expect(Number(stored)).toBeGreaterThan(contextByteLimit);
-
-      expect(() =>
-        prepareSessionRun(fixture.owner, {
-          sessionId: session.sessionId,
-          commandFactId: last.commandId,
-        }),
-      ).toThrow(
-        expect.objectContaining({
-          boundary: "store",
-          cause: "context_too_large",
-        }),
-      );
-      // Scroll-back still pages the same history; only the model read refuses.
-      const page = readClientSnapshot(
-        fixture.owner,
-        session.sessionId,
-        { limit: 20 },
-        { facts: idleActivity, progress: null },
-      );
-      expect(page.messages).toHaveLength(20);
-      expect(page.hasMore).toBe(true);
-    } finally {
-      fixture.close();
-    }
-  });
-
-  it("settles the run as failed and keeps the Session usable from an earlier entry", async () => {
-    const fixture = createNativeSqliteOwnerFixture();
-    const runtime = createCompatibilityRuntimeHost();
-    const agent = await Shiitake.make({
-      ...compatibilityRunDependencies(),
-      store: fixture.owner,
-      runtime: runtime.runtime,
-    });
-    try {
-      const sessionId = await agent.createSession("oversized-run");
-      const history = writeLargeSession(fixture.owner, {
-        sessionId,
-        ...oversized,
+      const prepared = prepareSessionRun(fixture.owner, {
+        sessionId: session.sessionId,
+        commandFactId: last.commandId,
       });
-      const session = agent.session(sessionId);
-      const refused = await session.command(prompt("big", "one more"));
-      while (runtime.snapshot().state === "pending") await runtime.runNext();
-      const after = await session.read();
-      expect(
-        after.terminals.find(
-          ({ commandId }) => commandId === refused.commandId,
-        ),
-      ).toMatchObject({ outcome: "failed" });
-      expect(after.activity.queue.state).toBe("idle");
-
-      // Branching to an earlier entry shrinks the context below the ceiling.
-      const earlier = history.turns[10];
-      if (earlier === undefined) throw new Error("missing turn");
-      await session.command({ type: "branch", entryId: earlier.terminalId });
-      const retried = await session.command(prompt("small", "start over"));
-      while (runtime.snapshot().state === "pending") await runtime.runNext();
-      expect(
-        (await session.read()).terminals.find(
-          ({ commandId }) => commandId === retried.commandId,
-        ),
-      ).toMatchObject({ outcome: "completed" });
-      expect(
-        readSelectedPath(fixture.owner, { sessionId }).length,
-      ).toBeLessThan(history.entries);
+      expect(prepared.path.length).toBeGreaterThan(240);
     } finally {
-      await agent.close();
       fixture.close();
     }
   });

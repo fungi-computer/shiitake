@@ -16,6 +16,9 @@ import type {
 } from "@fungi.computer/mycelium";
 import { make as makeMycelium } from "@fungi.computer/mycelium/effect";
 import * as Effect from "effect/Effect";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 
 import { ShiitakeError } from "../errors.js";
@@ -33,6 +36,10 @@ import {
 } from "./compaction/session-compaction.js";
 import { openCompactionSettings } from "./compaction/settings.js";
 import { acquireOwnedModel } from "./model-acquisition.js";
+import {
+  returnedFailureReason,
+  unavailableRunReason,
+} from "./run-failure-reason.js";
 import {
   isCompactCommand,
   openMuleRecorder,
@@ -232,7 +239,8 @@ export function runAcceptedCommand(
       const settings = openCompactionSettings(options.compaction)(
         acquired.model,
       );
-      return yield* runWithCompaction({
+      let failureReason: string | undefined;
+      const run = yield* runWithCompaction({
         store: options.store,
         sessionId: prepared.command.sessionId,
         workId: prepared.command.entry.workId,
@@ -246,13 +254,24 @@ export function runAcceptedCommand(
         run: (workingMessages, betweenTurns) => {
           const continuation = resume;
           resume = undefined;
-          const listener: MuleListener = (event: MuleEvent) => recorder(event);
+          // A failed lifecycle notification precedes Mule's returned outcome
+          // (or typed error). Join them before publishing the single terminal;
+          // no observer can win a race against a later diagnostic settlement.
+          let failedEnd: Extract<MuleEvent, { type: "run_end" }> | undefined;
+          const listener: MuleListener = (event: MuleEvent) => {
+            if (event.type === "run_end" && event.outcome === "failed") {
+              failedEnd = event;
+              return Effect.void;
+            }
+            return recorder(event);
+          };
           const input: MuleRunInput = {
             model: acquired.model,
             modelStreamIdleTimeoutMs:
               options.modelStreamIdleTimeoutMs ?? piHttpIdleTimeoutMs,
             retry: options.retry ?? piCodingAgentRetryDefaults,
             retryAfterMs: acquired.retryAfterMs,
+            retryable: acquired.retryable,
             systemPrompt: instructions.text,
             prepareSystemPrompt: () =>
               (promptSections === undefined
@@ -303,16 +322,42 @@ export function runAcceptedCommand(
               listener,
             )
             .pipe(
+              Effect.onExit((exit) => {
+                if (failedEnd === undefined) return Effect.void;
+                if (Exit.isSuccess(exit)) {
+                  failureReason = (
+                    acquired.failureReason?.(exit.value.message) ??
+                    returnedFailureReason(exit.value)
+                  ).slice(0, 200);
+                  return recorder(failedEnd, failureReason);
+                }
+                const error = Cause.findErrorOption(exit.cause);
+                return recorder(
+                  failedEnd,
+                  Option.isSome(error) && error.value.phase === "model"
+                    ? `model:rejected: ${error.value.message}`.slice(0, 200)
+                    : unavailableRunReason({
+                        runId: failedEnd.run.value,
+                        provider: acquired.model.provider,
+                        model: acquired.model.id,
+                      }),
+                );
+              }),
               Effect.mapError((error) =>
-                runtimeFailure(
-                  error.phase === "model"
-                    ? error.message
-                    : "Mule rejected the durable command run",
-                ),
+                error.phase === "model"
+                  ? new ShiitakeError(
+                      "model",
+                      "rejected",
+                      error.message,
+                      undefined,
+                      error,
+                    )
+                  : runtimeFailure("Mule rejected the durable command run"),
               ),
             );
         },
       });
+      return { run, failureReason };
     }),
   );
 }

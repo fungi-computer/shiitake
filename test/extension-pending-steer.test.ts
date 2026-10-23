@@ -91,6 +91,7 @@ it("observes a pending steer without consuming it before the waiting tool return
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),

@@ -61,6 +61,7 @@ it("shows a running manual compaction live and clears it once committed", async 
         const model = faux.getModel();
         return Promise.resolve({
           model,
+          retryable: () => false,
           stream: (model, context, options) =>
             faux.provider.streamSimple(model, context, options),
           release: () => Promise.resolve(),

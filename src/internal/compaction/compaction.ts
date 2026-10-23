@@ -2,6 +2,8 @@
  * Pi v0.84.4 semantic compaction, adapted only at Woodstock's entry boundary.
  * The retained preparation/result vocabulary is intentionally visible here;
  * Shiitake supplies native Message values and its selected model stream.
+ * Range selection follows Pi Durable spec §8.7 (`earendil-works/pi` at
+ * 8efd314f) and token estimates are pi-ai's own.
  */
 import type {
   Api,
@@ -13,6 +15,10 @@ import type {
   Usage,
 } from "@earendil-works/pi-ai";
 // Leaf helpers, not Pi's root entry, which also evaluates its validators.
+import {
+  estimateContextTokens,
+  estimateMessageTokens,
+} from "@earendil-works/pi-ai/utils/estimate";
 import { retryAssistantCall } from "@earendil-works/pi-ai/utils/retry";
 import { contentText } from "@earendil-works/pi-ai/utils/text";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
@@ -32,10 +38,8 @@ import {
   SUMMARIZATION_SYSTEM_PROMPT,
   TURN_PREFIX_SUMMARIZATION_PROMPT,
   UPDATE_SUMMARIZATION_PROMPT,
-  compactionSummaryMessage,
+  compactionSummaryText,
   type CompactionSettings,
-  estimateContextTokens,
-  estimateTokens,
   summaryFailure,
 } from "./utils.js";
 
@@ -48,9 +52,10 @@ export type CompactionSourceEntry =
   | Readonly<{
       id: string;
       kind: "compaction";
-      timestamp: number;
-      firstKeptEntryId: string;
-      summary: string;
+      /** Pi's entry head: the first entry the summary keeps. */
+      head: string;
+      /** Pi's entry model message: the summary the model reads. */
+      model: import("@earendil-works/pi-ai").UserMessage;
       usage: Usage;
       details?: Readonly<{
         readFiles: readonly string[];
@@ -119,21 +124,13 @@ function contextMessages(entries: readonly CompactionSourceEntry[]) {
       ? 0
       : Math.max(
           0,
-          entries.findIndex(
-            ({ id }) => id === latestCompaction.firstKeptEntryId,
-          ),
+          entries.findIndex(({ id }) => id === latestCompaction.head),
         );
   const messages = entries.flatMap((entry, index) =>
     entry.kind === "message" && index >= keptIndex ? [entry.message] : [],
   );
   if (latestCompaction === undefined) return messages;
-  return [
-    compactionSummaryMessage(
-      latestCompaction.summary,
-      latestCompaction.timestamp,
-    ),
-    ...messages,
-  ];
+  return [latestCompaction.model, ...messages];
 }
 
 function extractFileOperations(
@@ -151,46 +148,89 @@ function extractFileOperations(
   return fileOps;
 }
 
-function isCutPoint(message: import("@earendil-works/pi-ai").Message): boolean {
-  return message.role !== "toolResult";
-}
-
 type CutClassification = Readonly<{
   isSplitTurn: boolean;
   turnStartIndex: number;
 }>;
 
+/**
+ * Whether a result for one of `calls` follows `from` before the next assistant
+ * message, so a user message there sits between a tool call and its result.
+ */
+function resultFollows(
+  entries: readonly CompactionSourceEntry[],
+  from: number,
+  endIndex: number,
+  calls: ReadonlySet<string>,
+): boolean {
+  for (let index = from; index < endIndex; index += 1) {
+    const entry = entries[index];
+    if (entry?.kind !== "message") continue;
+    if (entry.message.role === "assistant") return false;
+    if (
+      entry.message.role === "toolResult" &&
+      calls.has(entry.message.toolCallId)
+    )
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Pi Durable §8.7 rule 1: cut candidates are user and assistant messages.
+ * Tool results and system messages never are, so a kept assistant message
+ * keeps its tool results; a user message is not one while a result for a call
+ * of the assistant before it still follows it.
+ */
+function cutPoints(
+  entries: readonly CompactionSourceEntry[],
+  startIndex: number,
+  endIndex: number,
+): readonly number[] {
+  const points: number[] = [];
+  let openCalls: ReadonlySet<string> = new Set();
+  for (let index = startIndex; index < endIndex; index += 1) {
+    const entry = entries[index];
+    if (entry?.kind !== "message") continue;
+    const message = entry.message;
+    if (message.role === "assistant") {
+      points.push(index);
+      openCalls = new Set(
+        message.content.flatMap((block) =>
+          block.type === "toolCall" ? [block.id] : [],
+        ),
+      );
+    } else if (
+      message.role === "user" &&
+      !resultFollows(entries, index + 1, endIndex, openCalls)
+    )
+      points.push(index);
+  }
+  return points;
+}
+
+/**
+ * Pi Durable §8.7 rules 2-3: walk newest to oldest adding each message's
+ * estimate; where the sum reaches `keepRecentTokens`, cut at the first
+ * candidate at or after that entry, or the newest candidate when none
+ * follows. Nothing is compacted while the sum never reaches it.
+ */
 function selectCutIndex(
   entries: readonly CompactionSourceEntry[],
   startIndex: number,
   endIndex: number,
   keepRecentTokens: number,
 ): number | undefined {
-  const points = entries.flatMap((entry, index) =>
-    entry.kind === "message" &&
-    index >= startIndex &&
-    index < endIndex &&
-    isCutPoint(entry.message)
-      ? [index]
-      : [],
-  );
-  const firstPoint = points[0];
-  if (firstPoint === undefined) return undefined;
+  const points = cutPoints(entries, startIndex, endIndex);
   let accumulated = 0;
-  let cut = firstPoint;
   for (let index = endIndex - 1; index >= startIndex; index -= 1) {
     const entry = entries[index];
     if (entry?.kind !== "message") continue;
-    accumulated += estimateTokens(entry.message);
-    if (accumulated >= keepRecentTokens) {
-      // Pi 0.99.2: when trailing tool results alone exceed the budget, keep
-      // their tool call (the last cut point), never fall back to the start.
-      cut =
-        points.find((candidate) => candidate >= index) ?? points.at(-1) ?? cut;
-      break;
-    }
+    accumulated += estimateMessageTokens(entry.message);
+    if (accumulated >= keepRecentTokens)
+      return points.find((candidate) => candidate >= index) ?? points.at(-1);
   }
-  return cut;
+  return undefined;
 }
 
 function classifyCut(
@@ -246,10 +286,10 @@ export function prepareCompaction(
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (entry?.kind === "compaction") {
-      previousSummary = entry.summary;
+      previousSummary = compactionSummaryText(entry.model);
       previousIndex = index;
       const kept = entries.findIndex(
-        (candidate) => candidate.id === entry.firstKeptEntryId,
+        (candidate) => candidate.id === entry.head,
       );
       boundaryStart = kept >= 0 ? kept : index + 1;
       break;
@@ -515,9 +555,11 @@ export function compact(
 export function borrowedView(
   preparation: CompactionPreparation,
   result: CompactionResult,
+  sessionId: string,
   contextRevision: string,
 ): BorrowedCompactionViewV0 {
   return {
+    sessionId,
     messagesToSummarize: preparation.messagesToSummarize,
     turnPrefixMessages: preparation.turnPrefixMessages,
     result,

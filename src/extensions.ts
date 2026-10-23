@@ -35,6 +35,7 @@ export {
 import { extensionVersion } from "./extension-contract.js";
 export type {
   AnyCommandSpecV0,
+  ClientActivityStateV0,
   ClientActivityV0,
   CommandsV0,
   CommandSpecV0,
@@ -143,7 +144,7 @@ export class ExtensionTx extends Context.Service<
 export class ExtensionStateError extends Data.TaggedError(
   "ExtensionStateError",
 )<{
-  reason: "decode" | "encode" | "bound" | "unavailable";
+  reason: "decode" | "encode" | "bound" | "unavailable" | "session_absent";
   message: string;
 }> {}
 
@@ -459,6 +460,10 @@ export type ExtensionContextV0<
   ) => Effect.Effect<SendResultV0, AdmissionError, ExtensionTx>;
   timers: TimersV0;
   attention: AttentionV0;
+  /** Committed selected Session position, or zero before its first entry. Requires state. */
+  sessionPosition: (
+    sessionId: string,
+  ) => Effect.Effect<number, ExtensionStateError, ExtensionRead>;
   /** Observe accepted steering without consuming Mule's next control delivery. Requires run_tools. */
   hasPendingSteer: (
     run: Pick<RunIdentityV0, "sessionId" | "workId">,
@@ -1113,6 +1118,8 @@ export type ExtensionSlotV0 =
 
 /** Borrowed view of the exact objects already built for compaction. */
 export type BorrowedCompactionViewV0 = Readonly<{
+  /** Session being compacted; a host binds the Agent itself. */
+  sessionId: string;
   /** Exact Pi preparation array summarized by the history call. */
   messagesToSummarize: readonly Message[];
   /** Exact Pi preparation array summarized for a split turn, when present. */

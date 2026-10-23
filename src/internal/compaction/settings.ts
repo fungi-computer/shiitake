@@ -15,11 +15,13 @@ const tokens = Schema.Int.pipe(
 const BudgetSchema = Schema.Struct({
   reserveTokens: Schema.optionalKey(tokens),
   keepRecentTokens: Schema.optionalKey(tokens),
+  backgroundTokens: Schema.optionalKey(tokens),
 });
 const CompactionOptionsSchema = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   reserveTokens: Schema.optionalKey(tokens),
   keepRecentTokens: Schema.optionalKey(tokens),
+  backgroundTokens: Schema.optionalKey(tokens),
   modelOverrides: Schema.optionalKey(
     Schema.Record(Schema.String, BudgetSchema),
   ),
@@ -59,6 +61,10 @@ export function openCompactionSettings(
         override?.keepRecentTokens ??
         settings.keepRecentTokens ??
         DEFAULT_COMPACTION_SETTINGS.keepRecentTokens,
+      backgroundTokens:
+        override?.backgroundTokens ??
+        settings.backgroundTokens ??
+        DEFAULT_COMPACTION_SETTINGS.backgroundTokens,
     };
   };
 }

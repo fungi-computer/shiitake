@@ -21,7 +21,10 @@ import {
 import { openAdmissionDoor, type AdmissionDoor } from "./admission-door.js";
 import { openCompactionSettings } from "./compaction/settings.js";
 import type { ShiitakeEffectOptions } from "./effect-contracts.js";
-import type { AdmittedExtensionV0 } from "./extension-roster.js";
+import {
+  admitExtensionRosterV0,
+  type AdmittedExtensionV0,
+} from "./extension-roster.js";
 import {
   coreConsumer,
   openExtensionRuntime,
@@ -41,6 +44,7 @@ import {
 
 /** Bound lifecycle and owner-transaction doors used by the public coordinator. */
 export type RuntimeCoordinator = Readonly<{
+  prepareConfiguration: import("./effect-contracts.js").ShiitakeEffectOwner["prepareConfiguration"];
   activeSessions: Effect.Effect<readonly string[]>;
   runningWork: (
     jobId: string,
@@ -120,6 +124,14 @@ export function openRuntimeCoordinator(
     }).pipe(Effect.uninterruptible);
     const boundRuntime: BoundRuntimeSelfReference = {};
     const extensionsRef: ExtensionRuntimeCell = { current: undefined };
+    let turnOptions = options;
+    let pendingConfiguration:
+      | Readonly<{
+          configuration: Pick<ShiitakeEffectOptions, "extensions" | "tools">;
+          apply: Effect.Effect<void, ShiitakeError>;
+        }>
+      | undefined;
+    let preparing = false;
     const requestBoundWake = Effect.suspend(
       () =>
         boundRuntime.requestWake ??
@@ -158,11 +170,28 @@ export function openRuntimeCoordinator(
               job.lane === options.hostJobs?.lane
                 ? (hostExecutor.current?.execute(job) ??
                   Effect.fail(new WatchdogError("execution_failed")))
-                : executeAcceptedRun(
-                    options,
-                    coreDigest,
-                    job,
-                    extensionsRef.current,
+                : Effect.gen(function* () {
+                    const pending = pendingConfiguration;
+                    if (pending !== undefined) {
+                      yield* pending.apply;
+                      const { tools: oldTools, ...base } = options;
+                      void oldTools;
+                      turnOptions = { ...base, ...pending.configuration };
+                      pendingConfiguration = undefined;
+                    }
+                    return yield* executeAcceptedRun(
+                      turnOptions,
+                      coreDigest,
+                      job,
+                      extensionsRef.current,
+                    );
+                  }).pipe(
+                    Effect.tapError((error) =>
+                      Effect.logError("configuration_apply_failed", error),
+                    ),
+                    Effect.mapError(
+                      () => new WatchdogError("execution_failed"),
+                    ),
                   ),
             () =>
               Effect.sync(() => {
@@ -215,7 +244,7 @@ export function openRuntimeCoordinator(
           : runtimeFailure("Compaction settings are unavailable"),
     });
     const storage = yield* Effect.try({
-      try: () => openStorageAdmission(options.storageBudget),
+      try: () => openStorageAdmission(options.storagePressure),
       catch: (error) =>
         error instanceof ShiitakeError
           ? error
@@ -288,9 +317,31 @@ export function openRuntimeCoordinator(
         try: () => extensions.timerWake(now),
         catch: () => runtimeFailure("Extension timers are unavailable"),
       });
+      const mailWake =
+        mailRoom === undefined
+          ? undefined
+          : yield* mailRoom
+              .nextWakeAt()
+              .pipe(
+                Effect.mapError(() =>
+                  runtimeFailure("Reply retry wake is unavailable"),
+                ),
+              );
+      // Carrier owns reply retry state. Keep it in the same durable answer
+      // as runtime work, so a host cannot erase its wake with an idle result.
+      const nextWakeAt =
+        timers.nextWakeAt === null
+          ? (mailWake ?? null)
+          : mailWake === undefined
+            ? timers.nextWakeAt
+            : Math.min(timers.nextWakeAt, mailWake);
       return {
-        pending: watchdogPending || settledLag || timers.due,
-        nextWakeAt: timers.nextWakeAt,
+        pending:
+          watchdogPending ||
+          settledLag ||
+          timers.due ||
+          (mailWake !== undefined && mailWake <= now),
+        nextWakeAt,
       };
     });
     const bound = yield* options.runtime
@@ -319,6 +370,54 @@ export function openRuntimeCoordinator(
     );
 
     return Object.freeze({
+      prepareConfiguration: (configuration) =>
+        Effect.gen(function* () {
+          if (
+            lifecycleState !== "open" ||
+            preparing ||
+            pendingConfiguration !== undefined
+          )
+            return yield* Effect.fail(
+              runtimeFailure(
+                "A configuration change is already pending, or the Agent is closing",
+              ),
+            );
+          preparing = true;
+          const staged = yield* admitExtensionRosterV0(
+            configuration.extensions,
+          ).pipe(
+            Effect.flatMap((next) => extensions.stage(next)),
+            Effect.onError(() =>
+              Effect.sync(() => {
+                preparing = false;
+              }),
+            ),
+          );
+          let settled = false;
+          return {
+            commit: Effect.try({
+              try: () => {
+                if (settled || lifecycleState !== "open")
+                  throw runtimeFailure(
+                    "Configuration preparation is no longer available",
+                  );
+                pendingConfiguration = { configuration, apply: staged.apply };
+                settled = true;
+                preparing = false;
+              },
+              catch: (cause) =>
+                cause instanceof ShiitakeError
+                  ? cause
+                  : runtimeFailure("Configuration commit failed"),
+            }),
+            discard: Effect.suspend(() => {
+              if (settled) return Effect.void;
+              settled = true;
+              preparing = false;
+              return staged.discard;
+            }),
+          };
+        }),
       activeSessions: Effect.sync(() => [...activeSessions]),
       runningWork: (jobId) =>
         watchdog.read(jobId).pipe(

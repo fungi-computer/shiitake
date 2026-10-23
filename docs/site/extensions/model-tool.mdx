@@ -17,11 +17,11 @@ does.
 
 <Code code={extension} lang="ts" title="extension.ts" />
 
-Tools are [Mycelium](https://mycelium.shiit.app/) operations grouped in a
-module. The module's `name` is how the model reaches it: `bookmarks.check`. Each
-operation declares its input and output with an Effect schema. Mycelium decodes
-the model's input before `execute` runs and describes both shapes to the model,
-so the model learns the tool from the schema itself.
+Tools are [Mycelium](https://docs.fungi.computer/mycelium/) operations grouped
+in a module. The module's `name` is how the model reaches it: `bookmarks.check`.
+Each operation declares its input and output with an Effect schema. Mycelium
+decodes the model's input before `execute` runs and describes both shapes to the
+model, so the model learns the tool from the schema itself.
 
 `replay: "safe"` says calling it twice with the same input is harmless. Mark a
 tool `"unsafe"` (the default) when a repeated call would change something twice.
@@ -47,7 +47,7 @@ node --import tsx main.ts
 It prints the tool result the model received, then the model's reply:
 
 ```text
-{"ok":true,"host":"shiitake.shiit.app"}
+{"ok":true,"host":"docs.fungi.computer"}
 That link is fine.
 ```
 

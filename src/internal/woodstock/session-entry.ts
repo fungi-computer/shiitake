@@ -1,15 +1,14 @@
 import { CompactionInstructionsSchema } from "../client-boundary.js";
 import { HostMetaSchema } from "../host-meta.js";
+import type { ModelMessage } from "../../client.js";
 import { userContextMessage, VerifiedAgentReplySchema } from "./agent-reply.js";
 import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
 import type {
   AssistantMessage,
   ImageContent,
   JsonValue,
-  Message,
   SystemMessage,
   MuleIdentity,
-  MuleToolResult,
   TextContent,
   ThinkingContent,
   ToolCall,
@@ -37,6 +36,8 @@ const boundedText = (maximumBytes: number) =>
   );
 
 const boundedId = boundedText(256);
+/** An archive owner's opaque receipt: a non-empty string of at most 4096 bytes. */
+export const CompactionReceiptSchema = boundedText(4096);
 const digest = Schema.String.pipe(
   Schema.check(Schema.isPattern(/^[0-9a-f]{64}$/u)),
 );
@@ -73,6 +74,7 @@ const StoredToolCallSchema: Schema.Codec<ToolCall> = Schema.Struct({
   arguments: Schema.Record(Schema.String, jsonValue),
   thoughtSignature: Schema.optionalKey(Schema.String),
   namespace: Schema.optionalKey(Schema.String),
+  argumentsError: Schema.optionalKey(Schema.String),
 });
 /** Provider-native usage grammar shared by stored messages and settlement facts. */
 export const usage: Schema.Codec<Usage> = Schema.Struct({
@@ -203,22 +205,24 @@ const assistantMessage: Schema.Codec<AssistantMessage> = Schema.Struct({
   providerThinkingLevel: Schema.optionalKey(Schema.String),
   endTurn: Schema.optionalKey(Schema.Boolean),
   timestamp: Schema.Number,
+  durationMs: Schema.optionalKey(Schema.Number),
 });
-const toolResultMessage: Schema.Codec<ToolResultMessage> = Schema.Struct({
-  role: Schema.Literal("toolResult"),
-  toolCallId: Schema.String,
-  toolName: Schema.String,
-  content: Schema.mutable(
-    Schema.Array(Schema.Union([textContent, imageContent])),
-  ),
-  details: Schema.optionalKey(jsonValue),
-  usage: Schema.optionalKey(usage),
-  isError: Schema.Boolean,
-  timestamp: Schema.Number,
-});
+const toolResultMessage: Schema.Codec<Omit<ToolResultMessage, "details">> =
+  Schema.Struct({
+    role: Schema.Literal("toolResult"),
+    toolCallId: Schema.String,
+    toolName: Schema.String,
+    content: Schema.mutable(
+      Schema.Array(Schema.Union([textContent, imageContent])),
+    ),
+    usage: Schema.optionalKey(usage),
+    isError: Schema.Boolean,
+    timestamp: Schema.Number,
+    durationMs: Schema.optionalKey(Schema.Number),
+  });
 
-/** Exact Pi message grammar stored by Woodstock without normalization. */
-export const StoredPiMessageSchema: Schema.Codec<Message> = Schema.Union([
+/** Model content only; application data is carried by the surrounding entry. */
+export const StoredPiMessageSchema: Schema.Codec<ModelMessage> = Schema.Union([
   systemMessage,
   userMessage,
   assistantMessage,
@@ -284,11 +288,10 @@ const runContract = Schema.Struct({
     Schema.check(Schema.isMaxLength(128)),
   ),
 });
-const StoredToolResultSchema: Schema.Codec<MuleToolResult> = Schema.Struct({
+const StoredToolResultSchema = Schema.Struct({
   content: Schema.mutable(
     Schema.Array(Schema.Union([textContent, imageContent])),
   ),
-  details: Schema.optional(jsonValue),
   usage: Schema.optional(usage),
   isError: Schema.Boolean,
   terminate: Schema.optional(Schema.Boolean),
@@ -418,6 +421,7 @@ const StoredSessionEntrySchema = Schema.Union([
   Schema.Struct({
     ...common,
     kind: Schema.Literal("message"),
+    data: Schema.optionalKey(jsonValue),
     run: CausalIdentitySchema,
     turn: CausalIdentitySchema,
     message: CausalIdentitySchema,
@@ -438,6 +442,7 @@ const StoredSessionEntrySchema = Schema.Union([
   Schema.Struct({
     ...common,
     kind: Schema.Literal("tool_outcome"),
+    data: Schema.optionalKey(jsonValue),
     run: CausalIdentitySchema,
     turn: CausalIdentitySchema,
     toolCall: CausalIdentitySchema,
@@ -449,43 +454,85 @@ const StoredSessionEntrySchema = Schema.Union([
     kind: Schema.Literal("live_retry"),
     event: LiveRetryEventSchema,
   }),
+  // Pi Durable's compaction entry (`compaction.ts`): the summary is the
+  // user message the model reads, and `head` names the first kept entry.
+  // Clients render a divider from `data` and never show the summary.
   Schema.Struct({
     ...common,
     kind: Schema.Literal("compaction"),
-    resumesRun: Schema.optionalKey(Schema.Boolean),
-    // Optional only because Sessions compacted before these facts existed
-    // are still live; every new compaction records both.
-    trigger: Schema.optionalKey(CompactionTriggerSchema),
-    /** Estimated context tokens right after this compaction. */
-    tokensAfter: Schema.optionalKey(Schema.Number),
-    firstKeptEntryId: boundedId,
-    summary: Schema.String,
-    tokensBefore: Schema.Number,
-    usage,
-    contextRevision: boundedId,
-    details: Schema.optionalKey(
-      Schema.Struct({
-        readFiles: Schema.Array(Schema.String),
-        modifiedFiles: Schema.Array(Schema.String),
-      }),
-    ),
+    head: boundedId,
+    model: Schema.Tuple([userMessage]),
+    data: Schema.Struct({
+      // Absent only on rows from before these facts were recorded; the
+      // store rewrite never invents them, and every new row has both.
+      reason: Schema.optionalKey(CompactionTriggerSchema),
+      resumesRun: Schema.Boolean,
+      tokensBefore: Schema.Number,
+      /** Estimated context tokens right after this compaction. */
+      tokensAfter: Schema.optionalKey(Schema.Number),
+      usage,
+      contextRevision: boundedId,
+      /**
+       * The archive owner's opaque receipt for this compaction, committed in
+       * the same append as the transition. Absent when no handoff archived it.
+       */
+      receipt: Schema.optionalKey(CompactionReceiptSchema),
+      details: Schema.optionalKey(
+        Schema.Struct({
+          readFiles: Schema.Array(Schema.String),
+          modifiedFiles: Schema.Array(Schema.String),
+        }),
+      ),
+    }),
   }),
   // A compaction that committed nothing: a manual request with nothing to
-  // summarize, or any compaction that failed. Clients show it as a result.
+  // summarize, any compaction that failed, or a finished summary dropped
+  // unplaced: stale (its head is off the selected lineage or older than the
+  // context start) or insufficient (placed, the context would still be over
+  // the limit). A completed summary keeps its `usage`, including when its
+  // handoff fails. Nothing to compact still refuses usage. Clients show each
+  // as a result.
   Schema.Struct({
     ...common,
     kind: Schema.Literal("compaction_notice"),
     trigger: CompactionTriggerSchema,
-    result: Schema.Literals(["nothing_to_compact", "failed"]),
+    result: Schema.Literal("nothing_to_compact"),
     diagnostic: Schema.optionalKey(
       Schema.String.check(Schema.isMaxLength(200)),
     ),
   }),
   Schema.Struct({
     ...common,
+    kind: Schema.Literal("compaction_notice"),
+    trigger: CompactionTriggerSchema,
+    result: Schema.Literal("failed"),
+    usage: Schema.optionalKey(usage),
+    diagnostic: Schema.optionalKey(
+      Schema.String.check(Schema.isMaxLength(200)),
+    ),
+  }),
+  Schema.Struct({
+    ...common,
+    kind: Schema.Literal("compaction_notice"),
+    trigger: CompactionTriggerSchema,
+    result: Schema.Literal("stale"),
+    usage: Schema.optionalKey(usage),
+  }),
+  Schema.Struct({
+    ...common,
+    kind: Schema.Literal("compaction_notice"),
+    trigger: CompactionTriggerSchema,
+    result: Schema.Literal("insufficient"),
+    usage: Schema.optionalKey(usage),
+  }),
+  Schema.Struct({
+    ...common,
     kind: Schema.Literal("run_terminal"),
     run: CausalIdentitySchema,
     terminal: CausalIdentitySchema,
+    diagnostic: Schema.optionalKey(
+      Schema.String.check(Schema.isMaxLength(200)),
+    ),
     outcome: Schema.Literals(["completed", "cancelled", "failed"]),
   }),
   Schema.Struct({
@@ -593,7 +640,9 @@ export function commandContextMessage(entry: PromptCommandEntry): UserMessage {
  * What a client sees of an operator line: the party's words as a user
  * message, the operator's as an assistant message from provider `operator`.
  */
-export function operatorClientMessage(entry: OperatorSessionEntry): Message {
+export function operatorClientMessage(
+  entry: OperatorSessionEntry,
+): ModelMessage {
   if (entry.author === "party") return entry.message;
   const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   return {

@@ -171,6 +171,8 @@ const agent = await Shiitake.make({
       return {
         ...acquired,
         model: faux.model,
+        retryable: () =>
+          mode === "crash-retry" || mode === "crash-retry-abnormal",
         release:
           mode === "crash-abnormal" || mode === "crash-retry-abnormal"
             ? () => {

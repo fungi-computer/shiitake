@@ -45,6 +45,7 @@ import type {
   SessionCommand,
   SessionFrame,
   SessionSnapshot,
+  SessionPendingPrompt,
   SessionSummaryPage,
   SubscribeOptions,
   WatchOptions,
@@ -56,7 +57,7 @@ import type {
   ModelDescription,
   RuntimePendingWork,
   SqliteOwner,
-  StorageBudget,
+  StoragePressureCheck,
   CompactionOptions,
 } from "./contracts.js";
 
@@ -70,6 +71,10 @@ export type ModelAcquisitionEffect = Readonly<{
   stream?: MuleStreamFunction;
   /** Provider’s bounded Retry-After for a clean HTTP refusal, if reported. */
   retryAfterMs?: (message: AssistantMessage) => number | undefined;
+  /** Typed retry decision for this door's exact message; unknown means false. */
+  retryable: (message: AssistantMessage) => boolean;
+  /** Owner-authored reason for this door's failure message, never SDK prose. */
+  failureReason?: (message: AssistantMessage) => string | undefined;
   /** Effect finalizer for acquired model resources. */
   release: Effect.Effect<void, ShiitakeError>;
 }>;
@@ -148,8 +153,8 @@ export type ShiitakeEffectOptions = Readonly<{
   meta?: HostMetaOptions;
   /** Native owner storage and synchronous transaction capability. */
   store: SqliteOwner;
-  /** Disk budget for `store`; absent never refuses for storage pressure. */
-  storageBudget?: StorageBudget;
+  /** Host storage-pressure check; absent never refuses for storage pressure. */
+  storagePressure?: StoragePressureCheck;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** One host lane in Shiitake's existing Watchdog, opened before recovery. */
@@ -233,6 +238,10 @@ export type ShiitakeEffectSendOptions = Readonly<{
 export type ShiitakeEffectSession = Readonly<{
   /** Execute one retained type-discriminated Session command. */
   command: ShiitakeEffectCommandHandler;
+  /** Resolve admission or durably fence a request that has not been admitted. */
+  withdraw: (
+    requestId: string,
+  ) => Effect.Effect<import("../client.js").WithdrawResult, ShiitakeError>;
   /** Cancel the running turn and all queued prompts, retaining their text. */
   abort: Effect.Effect<void, ShiitakeError>;
   /** Send text with one generated or explicitly supplied request identity. */
@@ -245,6 +254,8 @@ export type ShiitakeEffectSession = Readonly<{
     commandId: string;
     onlyIfPending?: boolean;
   }) => Effect.Effect<CancelResult, ShiitakeError>;
+  /** Newest pending prompt scoped by the host's bound identity. */
+  latestPending: Effect.Effect<SessionPendingPrompt | null, ShiitakeError>;
   /** Address one rostered extension's Session-scope commands. */
   extension: (extensionId: string) => ShiitakeEffectSessionExtension;
   /** Lineage-local selection used when the next run acquires its model. */
@@ -315,6 +326,16 @@ export type ShiitakeEffectAgent = Readonly<{
  */
 export type ShiitakeEffectOwner = ShiitakeEffectAgent &
   Readonly<{
+    /** Stage a configuration without disturbing an in-flight turn. */
+    prepareConfiguration: (
+      configuration: Pick<ShiitakeEffectOptions, "extensions" | "tools">,
+    ) => Effect.Effect<
+      Readonly<{
+        commit: Effect.Effect<void, ShiitakeError>;
+        discard: Effect.Effect<void>;
+      }>,
+      ShiitakeError
+    >;
     /** Each Session's delivered tool grants, read at every call. */
     grants: Readonly<{
       /** Store one versioned delivery; versions only move forward. */

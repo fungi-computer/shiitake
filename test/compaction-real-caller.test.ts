@@ -24,10 +24,8 @@ import {
   buildSessionContext,
   readSelectedPath,
 } from "../src/internal/woodstock/session-store.js";
-import {
-  DEFAULT_COMPACTION_SETTINGS,
-  estimateContextTokens,
-} from "../src/internal/compaction/utils.js";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { DEFAULT_COMPACTION_SETTINGS } from "../src/internal/compaction/utils.js";
 import {
   createCompatibilityRuntimeHost,
   createNativeSqliteOwnerFixture,
@@ -52,6 +50,7 @@ function compactionOptions(
       acquire: () =>
         Promise.resolve({
           model: faux.getModel(),
+          retryable: () => false,
           stream: (model, context, options) =>
             faux.provider.streamSimple(model, context, options),
           release: () => Promise.resolve(),
@@ -146,6 +145,7 @@ function createRealCompactionScenario() {
         model.contextWindow = contextWindow;
         return Promise.resolve({
           model,
+          retryable: () => false,
           stream: (model, context, options) => {
             if (capture) requests.push(structuredClone(context));
             return faux.provider.streamSimple(model, context, options);
@@ -205,6 +205,7 @@ async function assertInitialCompaction(
   );
   expect(compactionIndex).toBeGreaterThan(terminalIndex);
   expect(run.scenario.handoffLeafKinds).toEqual(["run_terminal"]);
+  expect(run.scenario.received?.sessionId).toBe("real-compaction-caller");
   expect(run.scenario.received?.messagesToSummarize).toBeDefined();
   expect(run.scenario.received?.result.summary).toContain("durable summary");
   // The client now shows full history, so the kept tail is located via the
@@ -513,6 +514,7 @@ it("recovers one length result without retrying compaction", async () => {
       acquire: () =>
         Promise.resolve({
           model: faux.getModel(),
+          retryable: () => false,
           stream: (model, context, options) => {
             const target = (context.messages[0]?.role === "system"
               ? getSystemMessageText(context.messages[0])
@@ -852,7 +854,7 @@ it("compacts an idle Session once as queued manual work, idempotent by request i
     expect(compactions[0]?.entry).toMatchObject({
       kind: "compaction",
       workId: accepted.commandId,
-      resumesRun: false,
+      data: { resumesRun: false },
     });
     const command = readSelectedPath(scenario.fixture.owner, {
       sessionId: manualSession,
@@ -1032,6 +1034,132 @@ it("commits a discarded_by_policy handoff as a completed compaction", async () =
         ({ commandId }) => commandId === accepted.commandId,
       )?.outcome,
     ).toBe("completed");
+  } finally {
+    await opened.agent.close();
+    scenario.fixture.close();
+  }
+});
+
+/** The receipt stored in each committed compaction entry, and the store's text. */
+function storedReceipts(scenario: ReturnType<typeof manualCompactionScenario>) {
+  const entries = compactionsIn(scenario.fixture.owner).map(({ entry }) =>
+    entry.kind === "compaction" ? entry.data.receipt : undefined,
+  );
+  const all = scenario.fixture.owner.sql
+    .exec("SELECT data_json FROM session_entries")
+    .toArray()
+    .map((row) => JSON.stringify(row))
+    .join("\n");
+  return { entries, all };
+}
+
+it("stores the accepted handoff's receipt in the compaction entry that commits", async () => {
+  const scenario = manualCompactionScenario([
+    compactionExtension("manual-receipt-handoff", () => ({
+      type: "accepted" as const,
+      receipt: "archive-receipt-1",
+    })),
+  ]);
+  const opened = await scenario.open();
+  try {
+    const session = await buildHistory(scenario, opened);
+    summaryResponses(scenario.faux);
+    await session.command({ type: "compact", requestId: "manual-receipt" });
+    await opened.runtime.runNext();
+    expect(storedReceipts(scenario).entries).toEqual(["archive-receipt-1"]);
+  } finally {
+    await opened.agent.close();
+    scenario.fixture.close();
+  }
+});
+
+it("fails the command with the handoff diagnostic for an over-long or empty receipt", async () => {
+  for (const [label, receipt] of [
+    ["over-long", "R".repeat(4097)],
+    ["empty", ""],
+  ] as const) {
+    const scenario = manualCompactionScenario([
+      compactionExtension(`manual-${label}-receipt-handoff`, () => ({
+        type: "accepted" as const,
+        receipt,
+      })),
+    ]);
+    const opened = await scenario.open();
+    try {
+      const session = await buildHistory(scenario, opened);
+      summaryResponses(scenario.faux);
+      const before = (await session.read()).messages.length;
+      const accepted = await session.command({
+        type: "compact",
+        requestId: `manual-${label}-receipt`,
+      });
+      await opened.runtime.runNext();
+      const snapshot = await session.read();
+      const terminal = snapshot.terminals.find(
+        ({ commandId }) => commandId === accepted.commandId,
+      );
+      expect(terminal?.outcome, label).toBe("failed");
+      expect(terminal?.diagnostic, label).toContain(
+        "compaction handoff failed: it returned an invalid result",
+      );
+      expect(snapshot.messages, label).toHaveLength(before);
+      const { entries, all } = storedReceipts(scenario);
+      expect(entries, label).toEqual([]);
+      expect(all, label).not.toContain("RRRR");
+    } finally {
+      await opened.agent.close();
+      scenario.fixture.close();
+    }
+  }
+});
+
+it("stores no receipt for a discarded handoff", async () => {
+  const scenario = manualCompactionScenario([
+    compactionExtension("manual-no-receipt-handoff", () => ({
+      type: "discarded_by_policy" as const,
+    })),
+  ]);
+  const opened = await scenario.open();
+  try {
+    const session = await buildHistory(scenario, opened);
+    summaryResponses(scenario.faux);
+    await session.command({ type: "compact", requestId: "manual-no-receipt" });
+    await opened.runtime.runNext();
+    expect(storedReceipts(scenario).entries).toEqual([undefined]);
+  } finally {
+    await opened.agent.close();
+    scenario.fixture.close();
+  }
+});
+
+it("leaves no receipt anywhere when the append loses its CAS after an accepted handoff", async () => {
+  let release: () => void = () => undefined;
+  let started: () => void = () => undefined;
+  const blocked = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const scenario = manualCompactionScenario([
+    compactionExtension("manual-racing-receipt-handoff", async () => {
+      started();
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { type: "accepted" as const, receipt: "archive-receipt-lost" };
+    }),
+  ]);
+  const opened = await scenario.open();
+  try {
+    const session = await buildHistory(scenario, opened);
+    summaryResponses(scenario.faux);
+    await session.command({ type: "compact", requestId: "manual-lost-cas" });
+    const running = opened.runtime.runNext();
+    await blocked;
+    await session.modelPreference.set(null);
+    release();
+    await running;
+    const { entries, all } = storedReceipts(scenario);
+    expect(entries).toEqual([]);
+    expect(all).not.toContain("archive-receipt-lost");
   } finally {
     await opened.agent.close();
     scenario.fixture.close();

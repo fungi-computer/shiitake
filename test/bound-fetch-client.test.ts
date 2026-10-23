@@ -44,6 +44,12 @@ it("uses the host-bound fetch for ordinary Agent and Session HTTP operations", a
     ]);
     const session = client.session(sessionId);
     expect((await session.read()).sessionId).toBe(sessionId);
+    expect(await session.withdraw("late-network-request")).toEqual({
+      status: "unknown",
+    });
+    await expect(
+      session.send("Late", { requestId: "late-network-request" }),
+    ).rejects.toThrow("Request was withdrawn");
     await expect(
       session.extension("unrostered").call("read", {}),
     ).rejects.toMatchObject({ boundary: "extensions", cause: "unavailable" });
@@ -52,6 +58,8 @@ it("uses the host-bound fetch for ordinary Agent and Session HTTP operations", a
       "/sessions",
       "/sessions",
       `/sessions/${sessionId}`,
+      `/sessions/${sessionId}/withdraw`,
+      `/sessions/${sessionId}/command`,
       `/sessions/${sessionId}/extensions/unrostered/commands/read`,
     ]);
   } finally {

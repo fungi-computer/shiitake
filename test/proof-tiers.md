@@ -1,8 +1,9 @@
 # Audited Shiitake proof disposition
 
-| Audited file                         | Tier and reason                                                                                                                                               |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cloudflare-durable-wake.native.mjs` | Merge: actual Worker restart and native alarm rollback/recovery must supplement the unit laws; its fixture owns its ports, SQL store and deterministic model. |
+| Audited file                               | Tier and reason                                                                                                                                                                                                    |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cloudflare-durable-wake.native.mjs`       | Merge: actual Worker restart and native alarm rollback/recovery must supplement the unit laws; its fixture owns its ports, SQL store and deterministic model.                                                      |
+| `woodstock-storage-conformance.native.mjs` | Merge: the storage conformance cases (`src/internal/woodstock/storage-conformance.ts`) must also pass on native Durable Object SQLite; Vitest runs them on `node:sqlite` and Truffle runs them on its local owner. |
 
 `test:unit` retains the Vitest suite for batch. `test:merge` owns the native
 proof; ordinary `test` joins both for nightly and direct full verification.

@@ -26,6 +26,7 @@ const unused = () => {
 
 // A host with no rostered extension: nothing consumes settled runs.
 const noExtensions: ExtensionRuntime = {
+  stage: unused,
   runParticipants: () => [],
   incompatibleMigrations: () => [],
   modulesForRun: () => Effect.succeed([]),

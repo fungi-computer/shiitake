@@ -8,7 +8,7 @@ import {
   type AdmissionOrigin,
   type AdmitRequest,
 } from "../../src/internal/admission-door.js";
-import { admitWithoutBudget } from "../../src/internal/woodstock/storage-admission.js";
+import { admitWithoutCheck } from "../../src/internal/woodstock/storage-admission.js";
 import {
   readSessionCommandAdmission,
   type AcceptedSessionCommand,
@@ -36,7 +36,7 @@ export function openTestAdmissionDoor(
 ): AdmissionDoor {
   return openAdmissionDoor({
     owner,
-    admitNew: options.admitNew ?? admitWithoutBudget.admitNew,
+    admitNew: options.admitNew ?? admitWithoutCheck.admitNew,
     contract: () => options.contract ?? testContract,
     enqueue: (work) => options.enqueue?.(work),
     readQueueHead: options.queueHead ?? (() => ({ state: "idle" })),

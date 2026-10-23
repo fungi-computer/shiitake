@@ -154,6 +154,10 @@ export function prepareSessionInbox(owner: SqliteOwner): void {
     `CREATE INDEX IF NOT EXISTS idx_session_inbox_revision
        ON session_inbox(revision)`,
   );
+  owner.sql.exec(
+    `CREATE INDEX IF NOT EXISTS idx_session_inbox_coldest
+       ON session_inbox(last_activity_at, session_id)`,
+  );
   owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS session_inbox_clock (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),

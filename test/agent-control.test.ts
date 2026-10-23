@@ -44,6 +44,7 @@ const baseline: SessionSnapshot = {
   terminals: [],
   pending: { total: 0, prompts: [], hasMore: false },
   activity: idleActivity,
+  toolOutput: [],
   progress: null,
   extensions: {},
   attention: [],
@@ -80,6 +81,7 @@ function testSession(
   const session: ShiitakeSession = {
     address: "session-a",
     command,
+    withdraw: () => Promise.resolve({ status: "unknown" }),
     abort: () => Promise.resolve(),
     send: (text, options) => {
       onSend?.(text, options);
@@ -90,6 +92,7 @@ function testSession(
     },
     cancel: ({ commandId }) =>
       Promise.resolve({ status: "accepted" as const, commandId }),
+    latestPending: () => Promise.resolve(null),
     extension: () => ({ call: () => Promise.reject(new Error("unused")) }),
     modelPreference: {
       read: () => Promise.resolve(null),
@@ -183,8 +186,11 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
     close: () => Promise.resolve(),
   };
   const runtime = await Mycelium.make({
+    session: { sessionId: "fixture-parent" },
     sources: [
       createAgentControlSource({
+        send: ({ text, requestId, delivery }) =>
+          session.send(text, { requestId, delivery }),
         list: () => Promise.resolve([{ agentId: "agent-a", name: "Ada" }]),
         create: (input) => {
           createdAgents.push(input);
@@ -242,6 +248,7 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
       const sent = await send({
         agentId: "agent-a",
         sessionId: "session-a",
+        requestId: "caller-send-request",
         text: "hello",
         delivery: "steer",
       });
@@ -250,6 +257,7 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
         await send({
           agentId: "agent-a",
           sessionId: "session-a",
+          requestId: "missing-delivery-request",
           text: "missing delivery",
         });
       } catch {
@@ -305,7 +313,7 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
     expect(sends).toEqual([
       {
         text: "hello",
-        options: { delivery: "steer" },
+        options: { delivery: "steer", requestId: "caller-send-request" },
       },
     ]);
     expect(createdAgents).toEqual([
@@ -428,14 +436,16 @@ it.each([true, false])(
   "delegation uses only the host's invoking Session (present: %s)",
   async (hasSession) => {
     const parents: string[] = [];
+    const sends: unknown[] = [];
     const options = {
       sources: [
         createAgentControlSource({
           list: () => Promise.resolve([]),
           open: () =>
             Promise.reject(new Error("Delegation must use the host mail door")),
-          send: (_input, parentSessionId) => {
+          send: (input, parentSessionId) => {
             parents.push(parentSessionId);
+            sends.push(input);
             return Promise.resolve({
               status: "accepted",
               commandId: "owner-issued",
@@ -451,6 +461,7 @@ it.each([true, false])(
           sessionId: "child-session",
           text: "Task",
           delivery: "followUp",
+          requestId: "caller-delegation",
         };
         await expect(
           send({ ...input, sourceSessionId: "forged-parent" }),
@@ -460,7 +471,7 @@ it.each([true, false])(
         ).rejects.toThrow();
         if (!hasSession) {
           await expect(send(input)).rejects.toThrow(
-            "Delegation requires an invoking Session",
+            "Agent sends require an invoking Session",
           );
           return { refused: true };
         }
@@ -490,6 +501,19 @@ it.each([true, false])(
         result: { isError: false },
       });
       expect(parents).toEqual(hasSession ? ["trusted-parent"] : []);
+      expect(sends).toEqual(
+        hasSession
+          ? [
+              {
+                agentId: "child",
+                sessionId: "child-session",
+                text: "Task",
+                delivery: "followUp",
+                requestId: "caller-delegation",
+              },
+            ]
+          : [],
+      );
     } finally {
       await lease.release();
       await runtime.close();
@@ -537,6 +561,8 @@ it("refuses a send before acceptance and carries a model diagnostic through wait
       createAgentControlSource({
         list: () => Promise.resolve([]),
         checkModel: () => Promise.reject(new Error(diagnostic)),
+        send: () =>
+          Promise.reject(new Error("preflight must refuse before sending")),
         open: () =>
           Promise.resolve({
             agent: {
@@ -568,6 +594,7 @@ it("refuses a send before acceptance and carries a model diagnostic through wait
           sessionId: "session-a",
           text: "Hello",
           delivery: "followUp",
+          requestId: "model-refused-request",
         }),
       ).rejects.toThrow(diagnostic);
       const result = await tools.wait({
@@ -615,15 +642,19 @@ async function runAgentCode(
       Parameters<Parameters<typeof directSandbox>[0]>[0]["agents"]
     >,
   ) => Promise<null>,
+  sourceSessionId?: string,
 ) {
-  const runtime = await Mycelium.make({
+  let options: Parameters<typeof Mycelium.make>[0] = {
     sources: [createAgentControlSource(directory)],
     sandbox: directSandbox(async (bindings) => {
       const tools = bindings.agents;
       if (tools === undefined) throw new Error("Agent tools missing");
       return await run(tools);
     }),
-  });
+  };
+  if (sourceSessionId !== undefined)
+    options = { ...options, session: { sessionId: sourceSessionId } };
+  const runtime = await Mycelium.make(options);
   const lease = await runtime.acquire();
   try {
     const prepared = await Effect.runPromise(
@@ -943,7 +974,7 @@ it("read pages back with before through a full Woodstock history", async () => {
             fixture.owner,
             "session-a",
             decodeClientReadOptions(options),
-            { facts: idleActivity, progress: null },
+            { facts: idleActivity, toolOutput: [], progress: null },
           ),
         );
       },
@@ -1004,4 +1035,151 @@ it("read pages back with before through a full Woodstock history", async () => {
   } finally {
     fixture.close();
   }
+});
+
+it("preserves the typed unknown cancellation result through the public Mycelium door", async () => {
+  const session: ShiitakeSession = {
+    ...testSession(),
+    cancel: () => Promise.resolve({ status: "unknown" }),
+  };
+  const agent: ShiitakeAgent = {
+    createSession: () => Promise.reject(new Error("unused")),
+    deleteSession: () => Promise.resolve(false),
+    listSessions: () => Promise.resolve({ sessions: [], next: undefined }),
+    extensions: {
+      list: () => Promise.resolve([]),
+      resume: () => Promise.reject(new Error("unused")),
+      call: () => Promise.reject(new Error("unused")),
+    },
+    session: () => session,
+    close: () => Promise.resolve(),
+  };
+  const results: unknown[] = [];
+  const parts = await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () => Promise.resolve({ agent, release: () => Promise.resolve() }),
+    },
+    async ({ cancel }) => {
+      if (cancel === undefined) throw new Error("Agent cancellation missing");
+      results.push(
+        await cancel({
+          agentId: "agent-a",
+          sessionId: "session-a",
+          commandId: "missing",
+        }),
+      );
+      return null;
+    },
+  );
+  expect(parts[0]).toMatchObject({
+    type: "result",
+    result: { isError: false },
+  });
+  expect(results).toEqual([{ status: "unknown" }]);
+});
+
+it.each([true, false])(
+  "host recall receives only the trusted invoking Session (present: %s)",
+  async (hasSession) => {
+    const calls: unknown[] = [];
+    const options = {
+      sources: [
+        createAgentControlSource({
+          list: () => Promise.resolve([]),
+          open: () =>
+            Promise.reject(
+              new Error(
+                "Host-scoped recall must not use the raw client request ID",
+              ),
+            ),
+          recall: (task, sourceSessionId) => {
+            calls.push({ task, sourceSessionId });
+            return Promise.resolve({ status: "unknown" });
+          },
+        }),
+      ],
+      sandbox: directSandbox(async ({ agents }) => {
+        const recall = agents?.recall;
+        if (recall === undefined) throw new Error("Recall missing");
+        const task = {
+          agentId: "child",
+          sessionId: "child-main",
+          requestId: "caller-request",
+        };
+        await expect(
+          recall({ ...task, sourceSessionId: "forged-parent" }),
+        ).rejects.toThrow();
+        await expect(
+          recall({ ...task, author: "forged-author" }),
+        ).rejects.toThrow();
+        await expect(
+          recall({ ...task, onlyIfPending: false }),
+        ).rejects.toThrow();
+        if (!hasSession) {
+          await expect(recall(task)).rejects.toThrow(
+            "Recall requires an invoking Session",
+          );
+          return null;
+        }
+        return recall(task);
+      }),
+    };
+    const runtime = await Mycelium.make(
+      hasSession
+        ? { ...options, session: { sessionId: "trusted-parent" } }
+        : options,
+    );
+    const lease = await runtime.acquire();
+    try {
+      const prepared = await Effect.runPromise(
+        lease.executeTool.prepare({
+          type: "toolCall",
+          id: "host-recall",
+          name: "execute",
+          arguments: { code: "agents.recall" },
+        }),
+      );
+      const result = await Effect.runPromise(
+        Stream.runCollect(prepared.execute()),
+      );
+      expect(result[0]).toMatchObject({
+        type: "result",
+        result: { isError: false },
+      });
+      expect(calls).toEqual(
+        hasSession
+          ? [
+              {
+                task: {
+                  agentId: "child",
+                  sessionId: "child-main",
+                  requestId: "caller-request",
+                },
+                sourceSessionId: "trusted-parent",
+              },
+            ]
+          : [],
+      );
+    } finally {
+      await lease.release();
+      await runtime.close();
+    }
+  },
+);
+
+it("requires host request ownership before advertising send and recall", async () => {
+  const advertised: boolean[] = [];
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () => Promise.reject(new Error("no request owner was supplied")),
+    },
+    (tools) => {
+      advertised.push(tools.send !== undefined, tools.recall !== undefined);
+      return Promise.resolve(null);
+    },
+    "trusted-source-session",
+  );
+  expect(advertised).toEqual([false, false]);
 });

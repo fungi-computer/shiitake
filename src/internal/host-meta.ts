@@ -48,6 +48,13 @@ export type StandardHostMetaResult =
  */
 export type HostMetaOptions = Readonly<{
   schema: Schema.Codec<unknown, Json> | StandardHostMetaSchema;
+  /**
+   * Host-selected SQLite JSON path to its stable principal identity.
+   * The host owns this metadata grammar. When bound metadata is present,
+   * pending lookup and exact cancellation stay within that identity.
+   * Unbound in-process owners retain operational cancellation authority.
+   */
+  identityPath?: string;
 }>;
 
 const decodeStoredMeta = Schema.decodeUnknownResult(HostMetaSchema);

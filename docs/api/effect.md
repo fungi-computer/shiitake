@@ -34,6 +34,8 @@ type ModelAcquisitionEffect = Readonly<{
   model: Model<Api>;
   stream?: MuleStreamFunction;
   retryAfterMs?: (message) => number | undefined;
+  retryable: (message) => boolean;
+  failureReason?: (message) => string | undefined;
   release: Effect.Effect<void, ShiitakeError>;
 }>;
 ```
@@ -110,7 +112,7 @@ Effect-native owner for scheduling the opaque durable reconciler.
 type ShiitakeEffectOptions = Readonly<{
   meta?: HostMetaOptions;
   store: SqliteOwner;
-  storageBudget?: StorageBudget;
+  storagePressure?: StoragePressureCheck;
   compaction?: CompactionOptions;
   hostJobs?: Readonly<{
     lane: string;
@@ -309,9 +311,11 @@ Delivery intent and an optional private retry key for Effect-native sending.
 ```ts
 type ShiitakeEffectSession = Readonly<{
   command: ShiitakeEffectCommandHandler;
+  withdraw: (requestId) => Effect.Effect<WithdrawResult, ShiitakeError>;
   abort: Effect.Effect<void, ShiitakeError>;
   send: (text, options?) => Effect.Effect<Accepted, ShiitakeError>;
   cancel: (input) => Effect.Effect<CancelResult, ShiitakeError>;
+  latestPending: Effect.Effect<SessionPendingPrompt | null, ShiitakeError>;
   extension: (extensionId) => ShiitakeEffectSessionExtension;
   modelPreference: Readonly<{
     read: Effect.Effect<ModelPreference | null, ShiitakeError>;
@@ -375,6 +379,13 @@ Effect-native durable harness.
 ```ts
 type ShiitakeEffectOwner = ShiitakeEffectAgent &
   Readonly<{
+    prepareConfiguration: (configuration) => Effect.Effect<
+      Readonly<{
+        commit: Effect.Effect<void, ShiitakeError>;
+        discard: Effect.Effect<void>;
+      }>,
+      ShiitakeError
+    >;
     grants: Readonly<{
       deliver: (
         sessionId,
@@ -465,6 +476,7 @@ Construct the canonical Effect-native Shiitake scaffold.
 function openHost(options, mailRoom): Effect<Readonly<{
   readSettlement: (sessionId, commandId) => Effect<
      | Readonly<{
+     acceptedSender: string | null;
      terminal: SessionTerminal;
      content: string;
      usage: readonly Pick<AssistantMessage, ... | ... | ...>[];
@@ -491,7 +503,7 @@ Open the Effect-native host composition with addressed mail.
 #### Returns
 
 `Effect`\<`Readonly`\<\{ `readSettlement`: (`sessionId`, `commandId`) =>
-`Effect`\< \| `Readonly`\<\{ `terminal`:
+`Effect`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
 [`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
 readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
 `number`; \}\> \| `undefined`, [`ShiitakeError`](index.md#shiitakeerror)\>;
@@ -630,6 +642,12 @@ Re-exports [SessionMessage](client.md#sessionmessage)
 ### SessionProgress
 
 Re-exports [SessionProgress](client.md#sessionprogress)
+
+---
+
+### SessionToolOutput
+
+Re-exports [SessionToolOutput](client.md#sessiontooloutput)
 
 ---
 

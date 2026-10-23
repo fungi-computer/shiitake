@@ -19,6 +19,7 @@ import { inspect } from "node:util";
 import { afterEach, expect, it, vi } from "vitest";
 
 import {
+  defineCollection,
   defineExtension,
   ExtensionId,
   ExtensionStop,
@@ -162,6 +163,46 @@ it("stops only the extension whose hook dies, with a visible reason, and resume 
         core.agent.extensions.call("test-recorder", "seen", {}),
       ),
     ).resolves.toEqual({ count: 2 });
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("shares the earliest wake between extension timers and reply retries", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const extensionAt = Date.now() + 60_000;
+  let mailAt: number | undefined = extensionAt + 1_000;
+  const { core, host } = await openCore(
+    fixture.owner,
+    grantAll([recorderExtension()]),
+    {
+      fanOut: () => Effect.void,
+      drainOutbox: () => Effect.void,
+      nextWakeAt: () => Effect.sync(() => mailAt),
+    },
+  );
+  try {
+    await Effect.runPromise(
+      core.agent.session("timers").extension("test-recorder").call("arm", {
+        key: "later",
+        dueAt: extensionAt,
+      }),
+    );
+    expect(await host.pendingWork()).toEqual({
+      pending: false,
+      nextWakeAt: extensionAt,
+    });
+    mailAt = extensionAt - 1_000;
+    expect(await host.pendingWork()).toEqual({
+      pending: false,
+      nextWakeAt: mailAt,
+    });
+    mailAt = undefined;
+    expect(await host.pendingWork()).toEqual({
+      pending: false,
+      nextWakeAt: extensionAt,
+    });
   } finally {
     await Effect.runPromise(core.agent.close);
     fixture.close();
@@ -463,11 +504,11 @@ function trivialFilesPort(): FilesPort {
         truncated: false,
       }),
     list: (input) =>
-      Promise.resolve({ path: input.path, entries: [], truncated: false }),
+      Promise.resolve({ path: input.path, results: [], truncated: null }),
     glob: (input) =>
-      Promise.resolve({ path: input.path, matches: [], truncated: false }),
+      Promise.resolve({ path: input.path, results: [], truncated: null }),
     grep: (input) =>
-      Promise.resolve({ path: input.path, matches: [], truncated: false }),
+      Promise.resolve({ path: input.path, results: [], truncated: null }),
     replace: (input) => Promise.resolve({ path: input.path, bytes: 0 }),
   };
 }
@@ -594,7 +635,7 @@ it("does not label a changed Files set contract_changed", async () => {
   }
 });
 
-it("reserves contract_changed for an incompatible state migration", async () => {
+it("reserves contract_changed for a failed declared state migration", async () => {
   const errors = quietStops();
   const fixture = createNativeSqliteOwnerFixture();
   const extension = (version: 1 | 2, compatible: boolean) =>
@@ -604,16 +645,53 @@ it("reserves contract_changed for an incompatible state migration", async () => 
     })
       .state({
         version,
-        collections: {},
-        migrations: compatible ? { 1: (row) => [row] } : {},
+        collections: {
+          records: defineCollection(Schema.Struct({ key: Schema.String }), {
+            key: (row) => row.key,
+          }),
+        },
+        migrations:
+          version === 1
+            ? {}
+            : {
+                1: (row) => {
+                  if (!compatible) throw new Error("Declared migration failed");
+                  return [row];
+                },
+              },
       })
-      .define({ tools: () => null });
+      .define({
+        tools: () => null,
+        commands: {
+          specs: {
+            seed: {
+              scope: "agent",
+              input: Schema.Struct({}),
+              output: Schema.Null,
+            },
+          },
+          handlers: (ctx) => ({
+            seed: () =>
+              ctx.state.records
+                .put({ key: "migration-input" })
+                .pipe(Effect.as(null)),
+          }),
+        },
+      });
   try {
-    await queuedUnder(
+    const previous = await openCore(
       fixture.owner,
       grantAll([extension(1, false)]),
-      "migration",
     );
+    await Effect.runPromise(
+      previous.core.agent.extensions.call("test-migrating-tools", "seed", {}),
+    );
+    await Effect.runPromise(
+      previous.core.agent
+        .session("contract")
+        .send("migration", { requestId: "migration" }),
+    );
+    await Effect.runPromise(previous.core.agent.close);
     const blocked = await openCore(
       fixture.owner,
       grantAll([extension(2, false)]),

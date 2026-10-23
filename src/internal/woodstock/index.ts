@@ -5,11 +5,14 @@ import type {
   MuleError,
   MuleEvent,
   MuleIdentity,
-  MuleListener,
 } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 
+import type {
+  ColdSessionPage,
+  ColdSessionPageRequest,
+} from "../../cold-sessions.js";
 import type {
   ReadOptions,
   SessionExtensionSlots,
@@ -23,6 +26,7 @@ import {
 } from "../client-boundary.js";
 import type { CommandSettlement, SqliteOwner } from "../contracts.js";
 import { publishOwnerObservation } from "../observation-kernel.js";
+import { readColdSessionPageOwned } from "./cold-sessions.js";
 import type { ObservedActivity } from "../session-status.js";
 import {
   diagnosticsByWorkId,
@@ -32,7 +36,7 @@ import {
   type ClientReplayPage,
 } from "./client-projection.js";
 import { sessionIds } from "./identities.js";
-import { openProgress } from "./progress.js";
+import { openProgress, openToolProgress } from "./progress.js";
 import {
   encodeStoredSessionEntry,
   type LiveRetryEvent,
@@ -42,6 +46,7 @@ import {
   appendSessionEntry,
   appendCompactionTransitionOwned,
   appendCompactionNoticeOwned,
+  placeCompactionTransitionOwned,
   type CompactionNoticeInput,
   acceptSessionAbort,
   acceptSessionCancellation,
@@ -75,6 +80,7 @@ import {
 } from "./session-inbox.js";
 
 export * from "./extension-store.js";
+export { readLatestPendingPrompt } from "./client-projection.js";
 export {
   createFleetDirectoryStore,
   createFleetDelegationStore,
@@ -114,6 +120,16 @@ export function appendCompactionTransition(
   const row = appendCompactionTransitionOwned(owner, input);
   publishOwnerObservation(owner, input.sessionId);
   return row;
+}
+
+/** Place a background summary, head-checked in the append transaction. */
+export function placeCompactionTransition(
+  owner: SqliteOwner,
+  input: AppendCompactionInput,
+): StoredSessionRow | "stale" {
+  const placed = placeCompactionTransitionOwned(owner, input);
+  if (placed !== "stale") publishOwnerObservation(owner, input.sessionId);
+  return placed;
 }
 
 function rejected(message: string): ShiitakeError {
@@ -210,6 +226,7 @@ export function settleControls(
     sessionId: string;
     parentWorkId: string;
     outcome: "completed" | "cancelled" | "failed" | "interrupted";
+    diagnostic: string | undefined;
     enqueue: EnqueueAcceptedWork;
   }>,
 ): Effect.Effect<void, ShiitakeError> {
@@ -487,6 +504,14 @@ export function readSessionFactPage(
   );
 }
 
+/** Read one bounded page of Sessions with stored bytes, coldest first. */
+export function readColdSessionPage(
+  owner: SqliteOwner,
+  request: ColdSessionPageRequest,
+): Effect.Effect<ColdSessionPage, ShiitakeError> {
+  return storeEffect(() => readColdSessionPageOwned(owner, request));
+}
+
 /** Read one bounded inbox page in tier, then newest-activity order. */
 export function readSessionInbox(
   owner: SqliteOwner,
@@ -680,7 +705,7 @@ export function readSettledRunFacts(
   });
 }
 
-/** Record unsuccessful Watchdog settlement when Mule has no recorded terminal. */
+/** Record settlement only when Mule has no matching recorded terminal. */
 export function recordWorkSettlement(
   owner: SqliteOwner,
   input: Readonly<{
@@ -730,9 +755,10 @@ function recordLifecycle(
   accepted: AcceptedCommand,
   contract: RunContract,
   event: Extract<MuleEvent, { type: "run_start" | "turn_start" | "run_end" }>,
+  diagnostic?: string,
 ): Effect.Effect<void, ShiitakeError> {
   return storeEffect(() => {
-    const entry: StoredSessionEntry =
+    let entry: StoredSessionEntry =
       event.type === "run_start"
         ? {
             kind: "run_started",
@@ -754,6 +780,8 @@ function recordLifecycle(
               terminal: event.terminal,
               outcome: event.outcome,
             };
+    if (entry.kind === "run_terminal" && diagnostic !== undefined)
+      entry = { ...entry, diagnostic };
     appendRecordedEntry(owner, accepted, entry, ({ entry: current }) => {
       if (current.kind !== entry.kind) return false;
       if (current.kind === "run_started" && entry.kind === "run_started")
@@ -865,6 +893,8 @@ function recordMessageEnd(
       message: event.message,
       value: event.value,
     };
+    const completed =
+      event.data === undefined ? entry : { ...entry, data: event.data };
     const delivery = owner.transactionSync(() => {
       const existing = readSessionEntriesForWork(
         owner,
@@ -876,14 +906,14 @@ function recordMessageEnd(
           sameIdentity(current.message, event.message),
       );
       if (existing?.entry.kind === "message") {
-        if (!sameEntry(existing.entry, entry))
+        if (!sameEntry(existing.entry, completed))
           throw conflict("Mule completed-message identity conflicts");
         return "replay" as const;
       }
       completeSessionLeaf(owner, {
         sessionId: accepted.sessionId,
         id: event.message.value,
-        entry,
+        entry: completed,
       });
       return "new" as const;
     });
@@ -926,6 +956,7 @@ function recordToolOutcome(
   event: Extract<MuleEvent, { type: "tool_execution_end" }>,
 ): Effect.Effect<void, ShiitakeError> {
   return storeEffect(() => {
+    const { data, ...result } = event.result;
     const entry: Extract<StoredSessionEntry, { kind: "tool_outcome" }> = {
       kind: "tool_outcome",
       workId: accepted.commandId,
@@ -933,12 +964,12 @@ function recordToolOutcome(
       turn: event.turn,
       toolCall: event.toolCall,
       call: event.call,
-      result: event.result,
+      result,
     };
     appendRecordedEntry(
       owner,
       accepted,
-      entry,
+      data === undefined ? entry : { ...entry, data },
       ({ entry: current }) =>
         current.kind === "tool_outcome" &&
         sameIdentity(current.toolCall, event.toolCall),
@@ -990,6 +1021,11 @@ const listenerFailure = (): MuleError => ({
   message: "Woodstock could not record the Mule event",
 });
 
+export type MuleRecorder = (
+  event: MuleEvent,
+  diagnostic?: string,
+) => Effect.Effect<void, MuleError>;
+
 /**
  * Open the one scoped listener that projects Mule's exact event stream into
  * retained Session facts and bounded process-local progress.
@@ -998,19 +1034,23 @@ export function openMuleRecorder(
   owner: SqliteOwner,
   accepted: AcceptedCommand,
   contract: RunContract,
-): Effect.Effect<MuleListener, never, Scope.Scope> {
+): Effect.Effect<MuleRecorder, never, Scope.Scope> {
   return Effect.gen(function* () {
     const progress = yield* openProgress(owner, accepted, (event) =>
       recordMessageEnd(owner, accepted, event),
     );
-    const record = (event: MuleEvent): Effect.Effect<void, ShiitakeError> => {
+    const toolProgress = yield* openToolProgress(owner, accepted);
+    const record = (
+      event: MuleEvent,
+      diagnostic?: string,
+    ): Effect.Effect<void, ShiitakeError> => {
       switch (event.type) {
         case "model_prompt":
           return recordModelPrompt(owner, accepted, contract, event);
         case "run_start":
         case "turn_start":
         case "run_end":
-          return recordLifecycle(owner, accepted, contract, event);
+          return recordLifecycle(owner, accepted, contract, event, diagnostic);
         case "message_start":
           if (event.value.role === "user") return Effect.void;
           return recordMessageStart(owner, accepted, event).pipe(
@@ -1028,15 +1068,21 @@ export function openMuleRecorder(
             ? progress.terminal(event)
             : recordMessageEnd(owner, accepted, event);
         case "tool_execution_start":
-          return recordToolIntent(owner, accepted, contract, event);
+          return recordToolIntent(owner, accepted, contract, event).pipe(
+            Effect.andThen(toolProgress.started(event)),
+          );
         case "tool_execution_end":
-          return recordToolOutcome(owner, accepted, event);
+          return recordToolOutcome(owner, accepted, event).pipe(
+            Effect.andThen(toolProgress.terminal(event)),
+          );
         case "tool_execution_update":
+          return toolProgress.update(event);
         case "turn_end":
           return Effect.void;
       }
     };
-    return (event) => record(event).pipe(Effect.mapError(listenerFailure));
+    return (event, diagnostic) =>
+      record(event, diagnostic).pipe(Effect.mapError(listenerFailure));
   });
 }
 

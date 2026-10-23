@@ -2,6 +2,9 @@ import { fauxModel } from "@fungi.computer/mule/testing";
 import type { WatchdogTickResult } from "@fungi.computer/watchdog";
 import { flow } from "effect/Function";
 import { cloudflareStorageFixture } from "./fixtures/cloudflare-storage.fixture.js";
+import { writeLargeSession } from "./fixtures/large-session.fixture.js";
+import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
+import { prepareWoodstockSchema } from "../src/internal/woodstock/index.js";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { expect, it, vi } from "vitest";
 
@@ -82,6 +85,7 @@ function fixedModelSource(
       observe?.(input);
       return Promise.resolve({
         model: faux.model,
+        retryable: () => false,
         stream: faux.stream,
         release,
       });
@@ -215,6 +219,54 @@ it("joins an extension timer onto the shared Durable Object alarm", async () => 
     expect(alarmAt).toBe(dueAt);
   } finally {
     await agent.close();
+    fixture.close();
+  }
+});
+
+it("shares asynchronous options across cold requests and retries a rejected load", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const tasks: Promise<unknown>[] = [];
+  const state: CloudflareShiitakeState = {
+    storage: cloudflareStorageFixture(fixture.owner),
+    waitUntil: (task) => {
+      tasks.push(task);
+    },
+  };
+  let attempts = 0;
+  let release: (() => void) | undefined;
+  const loaded = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  class Agent extends ShiitakeOwner<Readonly<Record<string, never>>> {
+    protected override async shiitakeOptions(): Promise<CloudflareShiitakeOptions> {
+      attempts += 1;
+      if (attempts === 1) throw new Error("Options load failed");
+      await loaded;
+      return {
+        extensions: noExtensions,
+        model: fixedModelSource(fauxModel([])),
+        instructions: {
+          load: () => Promise.resolve({ revision: "async-options", text: "" }),
+        },
+        tools: [],
+      };
+    }
+  }
+  const owner = new Agent(state, {});
+  try {
+    await expect(owner.shiitake()).rejects.toThrow("Options load failed");
+    const first = owner.shiitake();
+    const second = owner.shiitake();
+    await Promise.resolve();
+    expect(attempts).toBe(2);
+    release?.();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toBe(b);
+    expect(attempts).toBe(2);
+    await owner.closeShiitake();
+  } finally {
+    release?.();
+    await Promise.all(tasks);
     fixture.close();
   }
 });
@@ -1018,108 +1070,19 @@ it("shares one protected runtime with HTTP and retries only a failed ACP factory
   }
 });
 
-it("shutdown sees acquisition-stage runs without browser leases and scopes browser leases through cancellation", async () => {
-  for (const browserEnabled of [false, true]) {
-    const fixture = createNativeSqliteOwnerFixture();
-    const tasks: Promise<unknown>[] = [];
-    const load = vi.fn(
-      ({ signal }: { signal: AbortSignal }) =>
-        new Promise<{ revision: string; text: string }>(() => {
-          // This host source deliberately ignores cancellation. The runtime still
-          // owns and releases its browser lease when instruction acquisition stops.
-          expect(signal.aborted).toBe(false);
-        }),
-    );
-    const browser = vi.fn(() => ({
-      modules: [],
-      fetch: () => Promise.resolve(new Response("connected")),
-    }));
-    const model = fixedModelSource(fauxModel([]));
-    const acquire = vi.spyOn(model, "acquire");
-    const options: CloudflareShiitakeOptions = {
-      extensions: noExtensions,
-      instructions: { load },
-      model,
-      tools: [],
-    };
-    if (browserEnabled) Object.assign(options, { browser });
-    const agent = await makeCloudflareShiitake(
-      {
-        storage: cloudflareStorageFixture(fixture.owner),
-        waitUntil: (task) => {
-          tasks.push(task);
-        },
-      },
-      options,
-    );
-    try {
-      const sessionId = await agent.createSession(
-        `shutdown-${String(browserEnabled)}`,
-      );
-      await agent.session(sessionId).command({
-        type: "prompt",
-        requestId: "shutdown-acquisition",
-        delivery: "followUp",
-        text: "wait for instructions",
-      });
-      await vi.waitFor(() => {
-        expect(load).toHaveBeenCalledOnce();
-      });
-      expect(await agent.activeSessions()).toEqual([sessionId]);
-      await agent.abortActive();
-      await vi.waitFor(async () => {
-        expect(await agent.activeSessions()).toEqual([]);
-      });
-      expect(acquire).not.toHaveBeenCalled();
-      if (browserEnabled) {
-        expect(browser).toHaveBeenCalledOnce();
-        expect(
-          (
-            await agent.browser.fetch(
-              new Request(
-                `http://owner/browser/sessions/${sessionId}/browser/claims`,
-              ),
-            )
-          ).status,
-        ).toBe(404);
-        const response = await agent.browser.fetch(
-          new Request(
-            `http://owner/browser/sessions/${sessionId}/browser/events`,
-          ),
-        );
-        expect(response.status).toBe(200);
-        expect(browser).toHaveBeenCalledTimes(2);
-        await response.body?.cancel();
-      } else
-        expect(
-          (
-            await agent.browser.fetch(
-              new Request(
-                "http://owner/browser/sessions/missing/browser/events",
-              ),
-            )
-          ).status,
-        ).toBe(404);
-    } finally {
-      await agent.close();
-      await Promise.all(tasks);
-      await agent.browser.clear();
-      fixture.close();
-    }
-  }
-});
-
-it("closing the Cloudflare harness releases browser streams and refuses later browser ingress", async () => {
+it("shutdown sees acquisition-stage runs", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const tasks: Promise<unknown>[] = [];
-  const cancelled = vi.fn();
-  const browser = vi.fn(() => ({
-    modules: [],
-    fetch: () =>
-      Promise.resolve(
-        new Response(new ReadableStream<Uint8Array>({ cancel: cancelled })),
-      ),
-  }));
+  const load = vi.fn(
+    ({ signal }: { signal: AbortSignal }) =>
+      new Promise<{ revision: string; text: string }>(() => {
+        // This host source deliberately ignores cancellation; the runtime
+        // still stops the run when acquisition is aborted.
+        expect(signal.aborted).toBe(false);
+      }),
+  );
+  const model = fixedModelSource(fauxModel([]));
+  const acquire = vi.spyOn(model, "acquire");
   const agent = await makeCloudflareShiitake(
     {
       storage: cloudflareStorageFixture(fixture.owner),
@@ -1129,30 +1092,28 @@ it("closing the Cloudflare harness releases browser streams and refuses later br
     },
     {
       extensions: noExtensions,
-      instructions: {
-        load: () =>
-          Promise.resolve({ revision: "close-browser-v1", text: "Answer" }),
-      },
-      model: fixedModelSource(fauxModel([])),
+      instructions: { load },
+      model,
       tools: [],
-      browser,
     },
   );
   try {
-    const sessionId = await agent.createSession("browser-close");
-    const request = new Request(
-      `http://owner/browser/sessions/${sessionId}/browser/events`,
-    );
-    const response = await agent.browser.fetch(request);
-    expect(response.status).toBe(200);
-    await Promise.all([agent.close(), agent.close()]);
-    expect(cancelled).toHaveBeenCalledOnce();
-    expect(await response.body?.getReader().read()).toEqual({
-      done: true,
-      value: undefined,
+    const sessionId = await agent.createSession("shutdown");
+    await agent.session(sessionId).command({
+      type: "prompt",
+      requestId: "shutdown-acquisition",
+      delivery: "followUp",
+      text: "wait for instructions",
     });
-    expect((await agent.browser.fetch(request)).status).toBe(410);
-    expect(browser).toHaveBeenCalledOnce();
+    await vi.waitFor(() => {
+      expect(load).toHaveBeenCalledOnce();
+    });
+    expect(await agent.activeSessions()).toEqual([sessionId]);
+    await agent.abortActive();
+    await vi.waitFor(async () => {
+      expect(await agent.activeSessions()).toEqual([]);
+    });
+    expect(acquire).not.toHaveBeenCalled();
   } finally {
     await agent.close();
     await Promise.all(tasks);
@@ -1322,6 +1283,111 @@ it("close joins both active passes even when one recovery alarm fails", async ()
     releaseAgent.release();
     await agent.close();
     logs.mockRestore();
+    fixture.close();
+  }
+});
+
+it("serves a bounded read-only cold-Session page through the Durable Object owner", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const tasks: Promise<unknown>[] = [];
+  const state: CloudflareShiitakeState = {
+    storage: cloudflareStorageFixture(fixture.owner),
+    waitUntil: (task) => {
+      tasks.push(task);
+    },
+  };
+  const faux = fauxModel([]);
+  faux.setResponses([fauxAssistantMessage("cold read answered")]);
+  const options: CloudflareShiitakeOptions = {
+    extensions: noExtensions,
+    model: fixedModelSource(faux),
+    instructions: {
+      load: () =>
+        Promise.resolve({ revision: "cold-read-v1", text: "Answer briefly." }),
+    },
+    tools: [],
+  };
+
+  class TestShiitakeDO extends ShiitakeOwner<Readonly<Record<string, never>>> {
+    protected override shiitakeOptions(): CloudflareShiitakeOptions {
+      return options;
+    }
+  }
+
+  const durableObject = new TestShiitakeDO(state, {});
+  try {
+    expect(await durableObject.readColdSessions({})).toEqual({ sessions: [] });
+    const response = await durableObject.fetch(
+      new Request("http://shiitake.test/sessions/cold-session/command", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          command: {
+            requestId: "cold-command",
+            delivery: "followUp",
+            type: "prompt",
+            text: "Fill the store a little.",
+          },
+        }),
+      }),
+    );
+    expect(response.status).toBe(200);
+    for (const task of tasks) await task;
+
+    const page = await durableObject.readColdSessions({ limit: 1 });
+    expect(page.sessions).toHaveLength(1);
+    expect(page.sessions[0]).toMatchObject({
+      sessionId: "cold-session",
+      idle: true,
+    });
+    expect(page.sessions[0]?.bytes).toBeGreaterThan(0);
+    await expect(
+      durableObject.readColdSessions({ limit: 201 }),
+    ).rejects.toMatchObject({ boundary: "contract", cause: "invalid" });
+  } finally {
+    await durableObject.closeShiitake();
+    fixture.close();
+  }
+});
+
+it("names its Durable Object when it refuses a Session with a broken lineage", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    writeLargeSession(fixture.owner, { sessionId: "damaged", turns: 2 });
+    damageOutsideWoodstock(
+      fixture.owner,
+      "DELETE FROM session_entries WHERE session_id = ? AND sequence = 2",
+      "damaged",
+    );
+    const state: CloudflareShiitakeState = {
+      storage: cloudflareStorageFixture(fixture.owner),
+      waitUntil: () => undefined,
+      id: { toString: () => "agent-do-1" },
+    };
+    class TestShiitakeDO extends ShiitakeOwner<
+      Readonly<Record<string, never>>
+    > {
+      protected override shiitakeOptions(): CloudflareShiitakeOptions {
+        return {
+          extensions: noExtensions,
+          model: fixedModelSource(fauxModel([])),
+          instructions: {
+            load: () => Promise.resolve({ revision: "v1", text: "Unused." }),
+          },
+          tools: [],
+        };
+      }
+    }
+    const agent = await new TestShiitakeDO(state, {}).shiitake();
+    try {
+      await expect(agent.session("damaged").read()).rejects.toThrow(
+        'Durable Object agent-do-1: Woodstock Session damaged holds a broken lineage (this store has 1 damaged Session, first damaged); a store never repairs itself — delete this Session with deleteSession("damaged"), or reset the owning store:',
+      );
+    } finally {
+      await agent.close();
+    }
+  } finally {
     fixture.close();
   }
 });

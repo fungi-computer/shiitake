@@ -6,7 +6,9 @@ export async function modelToolRun() {
   const host = await memoryHost({
     extensions: [bookmarks],
     script: [
-      callTool("bookmarks.check", { url: "https://shiitake.shiit.app/" }),
+      callTool("bookmarks.check", {
+        url: "https://docs.fungi.computer/shiitake/",
+      }),
       "That link is fine.",
     ],
   });

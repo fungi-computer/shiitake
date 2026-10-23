@@ -6,6 +6,7 @@ import type { Json } from "../src/extensions.js";
 import {
   parseAccepted,
   parseCancelResult,
+  parseWithdrawResult,
   parseSessionSnapshot,
   parseSessionFrame,
   parseSessionSummaryPage,
@@ -16,6 +17,42 @@ import {
   runningActivity,
   sessionSnapshot,
 } from "./fixtures/client.fixture.js";
+
+it("decodes bounded tool output and rejects excess wire keys", () => {
+  const frame = {
+    kind: "tool_output",
+    activity: runningActivity,
+    toolOutput: [
+      {
+        toolCallId: "call",
+        revision: 2,
+        tail: "step 2",
+        droppedBytes: 0,
+        totalBytes: 6,
+      },
+    ],
+  };
+  expect(parseSessionFrame(JSON.stringify(frame))).toEqual(frame);
+  expect(() =>
+    parseSessionFrame(JSON.stringify({ ...frame, extra: true })),
+  ).toThrow();
+  expect(() =>
+    parseSessionFrame(
+      JSON.stringify({
+        ...frame,
+        toolOutput: [{ ...frame.toolOutput[0], extra: true }],
+      }),
+    ),
+  ).toThrow();
+  expect(() =>
+    parseSessionFrame(
+      JSON.stringify({
+        ...frame,
+        toolOutput: [{ ...frame.toolOutput[0], tail: "a".repeat(8193) }],
+      }),
+    ),
+  ).toThrow();
+});
 
 it("parses schema-derived Session snapshot representations", async () => {
   const snapshots = await Effect.runPromise(
@@ -86,19 +123,24 @@ it("requires the current admission projection instead of silently reading an old
         messages: [],
         terminals: [],
         status: "idle",
+        toolOutput: [],
         progress: null,
       }),
     ),
   ).toThrow();
 });
 
-it("parses a cancel outcome as accepted or too late and nothing else", () => {
+it("parses accepted, known-too-late and unknown cancellation outcomes", () => {
   expect(
     parseCancelResult(JSON.stringify({ status: "accepted", commandId: "a" })),
   ).toEqual({ status: "accepted", commandId: "a" });
   expect(
     parseCancelResult(JSON.stringify({ status: "too_late", commandId: "a" })),
   ).toEqual({ status: "too_late", commandId: "a" });
+  expect(parseCancelResult('{"status":"unknown"}')).toEqual({
+    status: "unknown",
+  });
+  expect(() => parseCancelResult('{"status":"too_late"}')).toThrow();
   expect(() =>
     parseCancelResult(JSON.stringify({ status: "conflict", commandId: "a" })),
   ).toThrow();
@@ -135,6 +177,7 @@ it("requires the owner-issued id on a queued activity", () => {
       messages: [],
       terminals: [],
       activity: { ...idleActivity, queue },
+      toolOutput: [],
       progress: null,
       extensions: {},
       attention: [],
@@ -192,11 +235,13 @@ it("keeps pending prompt delivery in the canonical wire projection", () => {
       prompts: [
         {
           commandId: "steer-command",
+          requestId: "steer-request",
           text: "Change course",
           delivery: "steer",
         },
         {
           commandId: "follow-up-command",
+          requestId: "follow-up-request",
           text: "After this run",
           delivery: "followUp",
         },
@@ -204,6 +249,7 @@ it("keeps pending prompt delivery in the canonical wire projection", () => {
       hasMore: false,
     },
     activity: runningActivity,
+    toolOutput: [],
     progress: null,
     extensions: {},
     attention: [],
@@ -215,8 +261,35 @@ it("keeps pending prompt delivery in the canonical wire projection", () => {
         ...snapshot,
         pending: {
           total: 1,
-          prompts: [{ commandId: "missing-delivery", text: "No policy" }],
+          prompts: [
+            {
+              commandId: "missing-delivery",
+              requestId: "missing-delivery-request",
+              text: "No policy",
+            },
+          ],
           hasMore: false,
+        },
+      }),
+    ),
+  ).toThrow();
+});
+
+it("rejects a pending prompt without its caller request identity", () => {
+  expect(() =>
+    parseSessionSnapshot(
+      JSON.stringify({
+        ...sessionSnapshot(),
+        pending: {
+          total: 1,
+          hasMore: false,
+          prompts: [
+            {
+              commandId: "owned-command",
+              text: "No request identity",
+              delivery: "followUp",
+            },
+          ],
         },
       }),
     ),
@@ -232,6 +305,7 @@ it("carries an extension's advertised catalog through the Session wire", () => {
     terminals: [],
     pending: { total: 0, prompts: [], hasMore: false },
     activity: idleActivity,
+    toolOutput: [],
     progress: null,
     attention: [],
     extensions: {
@@ -311,6 +385,7 @@ it("preserves opaque host metadata on pending prompts across the JSON boundary",
       prompts: [
         {
           commandId: "pending-one",
+          requestId: "pending-request",
           text: "hello",
           delivery: "followUp",
           meta,
@@ -321,4 +396,14 @@ it("preserves opaque host metadata on pending prompts across the JSON boundary",
   expect(
     parseSessionSnapshot(JSON.stringify(snapshot)).pending.prompts[0],
   ).toEqual(snapshot.pending.prompts[0]);
+});
+
+it("decodes unknown request resolution without inventing a command identity", () => {
+  expect(parseWithdrawResult('{"status":"unknown"}')).toEqual({
+    status: "unknown",
+  });
+  expect(
+    parseWithdrawResult('{"status":"accepted","commandId":"owner-command"}'),
+  ).toEqual({ status: "accepted", commandId: "owner-command" });
+  expect(() => parseWithdrawResult('{"status":"withdrawn"}')).toThrow();
 });

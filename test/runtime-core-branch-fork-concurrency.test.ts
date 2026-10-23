@@ -102,6 +102,7 @@ async function openRace(): Promise<RaceContext> {
         acquire: () =>
           Effect.succeed({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: Effect.void,
           }),

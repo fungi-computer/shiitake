@@ -59,7 +59,7 @@ export function readSessionAttention(
     });
 }
 
-/** Whether any owner still requests attention; no wall-clock expiry heuristic. */
+/** Whether any owner requests inbox attention; drawer-only items stay visible. */
 export function hasSessionAttention(
   owner: SqliteOwner,
   sessionId: string,
@@ -67,7 +67,7 @@ export function hasSessionAttention(
   return (
     owner.sql
       .exec(
-        "SELECT 1 FROM session_attention a JOIN shiitake_extension_status s ON s.extension_id = a.extension_id AND s.status = 'running' JOIN session_attention_grants g ON g.extension_id = a.extension_id WHERE a.session_id = ? LIMIT 1",
+        "SELECT 1 FROM session_attention a JOIN shiitake_extension_status s ON s.extension_id = a.extension_id AND s.status = 'running' JOIN session_attention_grants g ON g.extension_id = a.extension_id WHERE a.session_id = ? AND json_extract(a.value_json, '$.inbox') IS NOT 0 LIMIT 1",
         sessionId,
       )
       .toArray().length > 0

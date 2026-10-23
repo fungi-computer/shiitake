@@ -4,7 +4,7 @@ import { Shiitake } from "../src/index.js";
 import { sessionIds } from "../src/internal/woodstock/identities.js";
 import { readSessionInboxChanges } from "../src/internal/woodstock/session-inbox.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
-import { admitWithoutBudget } from "../src/internal/woodstock/storage-admission.js";
+import { admitWithoutCheck } from "../src/internal/woodstock/storage-admission.js";
 import {
   compatibilityRunDependencies,
   createCompatibilityRuntimeHost,
@@ -159,7 +159,7 @@ it("pages past 800 Sessions newest first with one statement per page", async () 
       woodstock.createStoredSession(
         host.fixture.owner,
         `bulk-${String(index)}`,
-        admitWithoutBudget.admitNew,
+        admitWithoutCheck.admitNew,
       );
     }
     now += 1;

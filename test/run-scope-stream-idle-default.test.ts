@@ -49,6 +49,7 @@ it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
             acquire: () =>
               Effect.succeed({
                 model: faux.getModel(),
+                retryable: () => false,
                 // Never emits and never ends: only the idle deadline settles it.
                 stream: () => createAssistantMessageEventStream(),
                 release: Effect.void,

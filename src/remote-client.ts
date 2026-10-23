@@ -14,7 +14,9 @@ import * as Stream from "effect/Stream";
 
 import {
   parseAccepted,
+  parseWithdrawResult,
   parseCancelResult,
+  parseLatestPendingPrompt,
   parseForkedSession,
   parseCreatedSession,
   parseDeletedSession,
@@ -410,6 +412,22 @@ function makeRemoteEffectAgent(
     }
     return Object.freeze({
       command,
+      withdraw: (requestId: string) =>
+        ensureOpen.pipe(
+          Effect.andThen(
+            request(
+              (signal) =>
+                fetch(`${addressedUrl}/withdraw`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ requestId }),
+                  signal,
+                }),
+              parseWithdrawResult,
+              "Request withdrawal",
+            ),
+          ),
+        ),
       abort: command({ type: "abort" }),
       send: (text: string, sendOptions?: SendOptions) =>
         Effect.sync(() => sendOptions?.requestId ?? nanoid()).pipe(
@@ -440,6 +458,15 @@ function makeRemoteEffectAgent(
         ),
       cancel: (input: { commandId: string; onlyIfPending?: boolean }) =>
         command({ type: "cancel", ...input }),
+      latestPending: ensureOpen.pipe(
+        Effect.andThen(
+          request(
+            (signal) => fetch(`${addressedUrl}/pending/latest`, { signal }),
+            parseLatestPendingPrompt,
+            "Newest pending prompt",
+          ),
+        ),
+      ),
       modelPreference: Object.freeze({
         read: ensureOpen.pipe(
           Effect.andThen(

@@ -64,6 +64,7 @@ it("publishes raw activity facts and decides no readout", () => {
         queue: { state: "queued", commandId: workId, runningWork: null },
         cancellationRequested: true,
       },
+      toolOutput: [],
       progress: null,
     });
 

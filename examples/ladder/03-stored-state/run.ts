@@ -11,7 +11,7 @@ export async function storedStateRun() {
     extensions: [bookmarks],
     script: [
       callTool("bookmarks.add", {
-        url: "https://shiitake.shiit.app/",
+        url: "https://docs.fungi.computer/shiitake/",
         title: "Shiitake docs",
       }),
       echoSystemPrompt(),

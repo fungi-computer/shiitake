@@ -4,10 +4,12 @@ import type {
   AgentRunningWork,
   SessionActivity,
   SessionProgress,
+  SessionToolOutput,
 } from "../client.js";
 import type { SqliteOwner } from "./contracts.js";
 import {
   readProcessProgressForWork,
+  readProcessToolOutputForWork,
   readProcessCompaction,
   readLatestLiveRetryForWork,
   readActiveToolForWork,
@@ -18,6 +20,7 @@ import {
 export type ObservedActivity = Readonly<{
   facts: SessionActivity;
   progress: SessionProgress | null;
+  toolOutput: readonly SessionToolOutput[];
 }>;
 
 /** Join Watchdog authority with Woodstock facts and process-local progress. */
@@ -39,6 +42,7 @@ export function readSessionActivity(
         compaction: null,
       },
       progress: null,
+      toolOutput: [],
     };
   if (head.state === "queued")
     // The queue job id is the admitted command id: the one identity a person
@@ -53,6 +57,7 @@ export function readSessionActivity(
         compaction: null,
       },
       progress: null,
+      toolOutput: [],
     };
 
   const latestRetry = readLatestLiveRetryForWork(owner, sessionId, head.jobId);
@@ -76,5 +81,6 @@ export function readSessionActivity(
       compaction: readProcessCompaction(owner, sessionId),
     },
     progress: readProcessProgressForWork(owner, sessionId, head.jobId),
+    toolOutput: readProcessToolOutputForWork(owner, sessionId, head.jobId),
   };
 }

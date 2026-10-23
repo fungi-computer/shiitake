@@ -1,4 +1,5 @@
 import { nanoid } from "@fungi.computer/cairn";
+import { fromTypedSandbox } from "@fungi.computer/mycelium/effect";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -30,8 +31,28 @@ import type {
   ShiitakeEffectAgent,
   ShiitakeEffectOwner,
   ShiitakeEffectSession,
+  ShiitakeEffectOptions,
 } from "./effect-contracts.js";
-import type { GrantsDelivery, ShiitakeOwnerAgent } from "./contracts.js";
+import type {
+  GrantsDelivery,
+  ShiitakeOwnerAgent,
+  ShiitakeOptions,
+} from "./contracts.js";
+
+/** Adapt a Promise tool configuration for both initial open and reload. */
+export function liftTools(
+  toolSource: NonNullable<ShiitakeOptions["tools"]>,
+): NonNullable<ShiitakeEffectOptions["tools"]> {
+  const tools = {
+    modules: toolSource.modules ?? [],
+    sources: toolSource.sources ?? [],
+    sandbox: fromTypedSandbox(toolSource.sandbox),
+    access: toolSource.access ?? {},
+  };
+  return toolSource.execution === undefined
+    ? tools
+    : { ...tools, execution: toolSource.execution };
+}
 
 /** Run one Shiitake Effect through its sole Promise error adaptation. */
 export function runShiitakePromise<A, E>(
@@ -96,11 +117,14 @@ function sessionFacade(
   return Object.freeze({
     address,
     command,
+    withdraw: (requestId: string) =>
+      runShiitakePromise(session.withdraw(requestId)),
     abort: () => runShiitakePromise(session.abort),
     send: (text: string, options?: SendOptions) =>
       runShiitakePromise(session.send(text, options)),
     cancel: (input: { commandId: string; onlyIfPending?: boolean }) =>
       runShiitakePromise(session.cancel(input)),
+    latestPending: () => runShiitakePromise(session.latestPending),
     modelPreference: Object.freeze({
       read: () => runShiitakePromise(session.modelPreference.read),
       set: (preference: ModelPreference | null) =>
@@ -162,6 +186,22 @@ export function toPromiseOwner(owner: ShiitakeEffectOwner): ShiitakeOwnerAgent {
   const address = `local:${nanoid()}`;
   return Object.freeze({
     ...toPromiseAgent(owner, address),
+    prepareConfiguration: async (configuration) => {
+      const next: Parameters<typeof owner.prepareConfiguration>[0] = {
+        extensions: configuration.extensions,
+      };
+      if (configuration.tools !== undefined)
+        Object.assign(next, { tools: liftTools(configuration.tools) });
+      const prepared = await runShiitakePromise(
+        owner.prepareConfiguration(next),
+      );
+      return {
+        commit: () => {
+          runShiitakeSync(prepared.commit);
+        },
+        discard: () => runShiitakePromise(prepared.discard),
+      };
+    },
     grants: Object.freeze({
       deliver: (sessionId: string, delivery: GrantsDelivery) =>
         runShiitakeSync(owner.grants.deliver(sessionId, delivery)),

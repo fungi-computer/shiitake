@@ -3,12 +3,14 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import type { AcceptedWork } from "./client-boundary.js";
+import type { WithdrawResult } from "../client.js";
 import type { Json } from "../extensions.js";
 import { checkHostMeta, type HostMetaOptions } from "./host-meta.js";
 import { ShiitakeError } from "../errors.js";
 import {
   decodeClientAcceptedCommand,
   decodeClientSessionId,
+  decodeClientSessionCreationRequestId,
   requireDecoded,
 } from "./client-boundary.js";
 import type { SqliteOwner } from "./contracts.js";
@@ -17,6 +19,8 @@ import {
   AdmissionOriginSchema,
   acceptSessionCommandOwned,
   readSessionCommandAdmissionByRequest,
+  withdrawSessionRequestOwned,
+  assertSessionRequestNotWithdrawn,
   hasStoredSession,
   type AdmissionOrigin,
   type EnqueueAcceptedWork,
@@ -76,6 +80,11 @@ export type AdmissionBoundary = "request" | "reconcile";
 
 /** The one accepted-command door. Nothing else writes accepted commands. */
 export type AdmissionDoor = Readonly<{
+  /** In the same owner transaction as admission, keep the receipt or fence the key. */
+  withdraw: (
+    sessionId: string,
+    requestId: string,
+  ) => Effect.Effect<WithdrawResult, ShiitakeError>;
   /** Admit one prompt in its own transaction. */
   admit: (
     request: AdmitRequest,
@@ -190,6 +199,7 @@ export function openAdmissionDoor(
   ): AdmitResult => {
     const { sessionId, origin } = request;
     const command = request.command;
+    assertSessionRequestNotWithdrawn(input.owner, sessionId, command.requestId);
     if (
       request.requireExistingSession &&
       !hasStoredSession(input.owner, sessionId)
@@ -297,6 +307,33 @@ export function openAdmissionDoor(
 
   return Object.freeze({
     transact,
+    withdraw: (sessionId, requestId) =>
+      Effect.try({
+        try: () => ({
+          sessionId: decodeClientSessionId(sessionId),
+          requestId: decodeClientSessionCreationRequestId({ requestId }),
+        }),
+        catch: (error) =>
+          error instanceof ShiitakeError
+            ? error
+            : new ShiitakeError(
+                "contract",
+                "invalid",
+                "Withdrawal request is invalid",
+              ),
+      }).pipe(
+        Effect.flatMap((decoded) =>
+          run(
+            () =>
+              withdrawSessionRequestOwned(
+                input.owner,
+                decoded.sessionId,
+                decoded.requestId,
+              ),
+            "request",
+          ),
+        ),
+      ),
     admit: (request, boundary) =>
       Effect.try({
         try: () => decode(request),

@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 
 import {
   ModelPreferenceSchema,
+  reasoningLevels,
   parseModelPreference,
   parseModelPreferenceJson,
 } from "./internal/model-preference.js";
@@ -10,6 +11,7 @@ import type { ModelPreference } from "./internal/model-preference.js";
 
 export {
   ModelPreferenceSchema,
+  reasoningLevels as modelReasoningLevels,
   parseModelPreference,
   parseModelPreferenceJson,
 };

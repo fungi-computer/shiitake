@@ -8,9 +8,17 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
         agent_id TEXT PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
         actor_user_id TEXT NOT NULL,
+        created_by TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       ) STRICT`);
+  // Existing pre-release Agents have no recorded maker. Never infer one from
+  // correspondence or actor_user_id (the human credential owner).
+  const columns = input.sql
+    .exec("PRAGMA table_info(hub_team_agents)")
+    .toArray();
+  if (!columns.some((column) => column.name === "created_by"))
+    input.sql.exec("ALTER TABLE hub_team_agents ADD COLUMN created_by TEXT");
   input.sql.exec(`CREATE TABLE IF NOT EXISTS hub_team_agent_create_receipts (
         request_id TEXT PRIMARY KEY,
         actor_user_id TEXT NOT NULL,
@@ -35,7 +43,7 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
     read: (agentId: string) =>
       input.sql
         .exec(
-          "SELECT agent_id, name, actor_user_id, created_at, updated_at FROM hub_team_agents WHERE agent_id = ?",
+          "SELECT agent_id, name, actor_user_id, created_by, created_at, updated_at FROM hub_team_agents WHERE agent_id = ?",
           agentId,
         )
         .toArray()[0],
@@ -49,7 +57,7 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
     findByName: (name: string) =>
       input.sql
         .exec(
-          "SELECT agent_id, name, actor_user_id, created_at, updated_at FROM hub_team_agents WHERE name = ?",
+          "SELECT agent_id, name, actor_user_id, created_by, created_at, updated_at FROM hub_team_agents WHERE name = ?",
           name,
         )
         .toArray()[0],
@@ -60,12 +68,14 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
       now: number,
       requestId: string,
       configuration: string,
+      createdBy: string | null,
     ) {
       input.sql.exec(
-        "INSERT INTO hub_team_agents (agent_id, name, actor_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO hub_team_agents (agent_id, name, actor_user_id, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
         agentId,
         name,
         actorUserId,
+        createdBy,
         now,
         now,
       );
@@ -85,7 +95,7 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
     list: () =>
       input.sql
         .exec(
-          "SELECT agent_id, name, actor_user_id, created_at, updated_at FROM hub_team_agents ORDER BY created_at DESC, agent_id DESC",
+          "SELECT agent_id, name, actor_user_id, created_by, created_at, updated_at FROM hub_team_agents ORDER BY created_at DESC, agent_id DESC",
         )
         .toArray(),
     rename(agentId: string, name: string, now: number) {
@@ -143,6 +153,13 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
           requestId,
         )
         .toArray()[0],
+    /** Every delegation this owner has sent and had accepted, newest first. */
+    sent: () =>
+      storage.sql
+        .exec(
+          "SELECT input, mail, receipt FROM shiitake_fleet_delegations WHERE receipt IS NOT NULL ORDER BY rowid DESC",
+        )
+        .toArray(),
     reserve(requestId: string, input: string, mail: string) {
       storage.transactionSync(() => {
         storage.sql.exec(

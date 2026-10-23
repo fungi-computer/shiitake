@@ -21,9 +21,10 @@ import {
   writeLargeSession,
   type LargeSession,
 } from "./fixtures/large-session.fixture.js";
+import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
-const activity = { facts: idleFacts, progress: null };
+const activity = { facts: idleFacts, toolOutput: [], progress: null };
 const contract = { core: "a".repeat(64), extensions: [] } as const;
 const usage = {
   input: 1,
@@ -78,16 +79,14 @@ function compaction(
   contextRevision: string,
   resumesRun = false,
 ): StoredSessionEntry {
-  return {
-    kind: "compaction",
-    resumesRun,
+  return compactionEntryFixture({
     workId,
-    firstKeptEntryId,
+    head: firstKeptEntryId,
     summary: `summary kept from ${firstKeptEntryId}`,
-    tokensBefore: 100,
+    resumesRun,
     usage,
     contextRevision,
-  };
+  });
 }
 
 /** Every message id the lineage holds, oldest first: each prompt and answer. */
@@ -430,39 +429,59 @@ describe("fork and branch stay exact (Node, node:sqlite)", () => {
     withStore((owner) => {
       const session = writeLargeSession(owner, {
         sessionId: "fork-source",
-        turns: 1_500,
-        compactEvery: 400,
+        turns: 180,
+        textBytes: 16 * 1_024,
+        compactEvery: 150,
         keepTurns: 30,
       });
-      const at = session.turns[1_450];
+      const at = session.turns[169];
       if (at === undefined) throw new Error("missing turn");
       const source = woodstock.readSelectedPath(owner, {
         sessionId: session.sessionId,
         leafId: at.terminalId,
       });
+      const lineage = woodstock.readSessionLineage(owner, {
+        sessionId: session.sessionId,
+        leafId: at.terminalId,
+      });
+      if (lineage === undefined) throw new Error("missing fork lineage");
+      const firstWindow = woodstock.readLineageWindow(owner, lineage, {
+        from: "oldest",
+        rows: 4_000,
+      });
+      const firstWindowIds = new Set(firstWindow.rows.map(({ id }) => id));
+      // Prove the smaller fixture still crosses the actual copy boundary,
+      // with a compaction in a later window referring back to the first.
+      expect(firstWindow.more).toBe(true);
+      expect(
+        source.some(
+          ({ id, entry }) =>
+            entry.kind === "compaction" &&
+            !firstWindowIds.has(id) &&
+            firstWindowIds.has(entry.head),
+        ),
+      ).toBe(true);
       const forkedId = woodstock.forkSessionAt(owner, {
         sessionId: session.sessionId,
         entryId: at.terminalId,
       });
       const forked = woodstock.readSelectedPath(owner, { sessionId: forkedId });
 
-      expect(source.length).toBeGreaterThan(4_000);
+      expect(source.length).toBeLessThan(4_000);
       expect(forked).toHaveLength(source.length);
       const idMap = new Map(
         source.map((row, index) => [row.id, forked[index]?.id]),
       );
-      forked.forEach((row, index) => {
-        const original = source[index];
-        expect(row.sequence).toBe(index + 1);
-        expect(row.entry).toEqual(
-          original?.entry.kind === "compaction"
-            ? {
-                ...original.entry,
-                firstKeptEntryId: idMap.get(original.entry.firstKeptEntryId),
-              }
-            : original?.entry,
-        );
-      });
+      expect(forked.map(({ sequence }) => sequence)).toEqual(
+        source.map((_, index) => index + 1),
+      );
+      expect(forked.map(({ entry }) => entry)).toEqual(
+        source.map(({ entry }) =>
+          entry.kind === "compaction"
+            ? { ...entry, head: idMap.get(entry.head) }
+            : entry,
+        ),
+      );
       // The fork's model context resumes at its own remapped boundary.
       expect(woodstock.buildSessionContext(forked)).toEqual(
         woodstock.buildSessionContext(source),

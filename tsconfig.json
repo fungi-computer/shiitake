@@ -31,6 +31,9 @@
       "@fungi.computer/shiitake/client": ["./src/client.ts"],
       "@fungi.computer/shiitake/extensions": ["./src/extensions.ts"],
       "@fungi.computer/shiitake/testing": ["./src/testing.ts"],
+      "@fungi.computer/shiitake/storage-conformance": [
+        "./src/internal/woodstock/storage-conformance.ts"
+      ],
       "@examples/*?raw": ["./examples/*"]
     }
   },

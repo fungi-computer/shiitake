@@ -65,6 +65,7 @@ import {
   readAttentionSessionPage,
   replaceAttentionGrants,
   hasStoredSession,
+  readSessionLineage,
   hasPendingSessionSteer,
   hasSuccessfulToolResult,
   advanceCursor,
@@ -74,6 +75,7 @@ import {
   deleteAllRecords,
   deleteRecord,
   deleteTimer,
+  deleteExtensionTimers,
   readAllRecords,
   readCursor,
   readDueTimers,
@@ -128,17 +130,27 @@ type TransactionFrame = {
 
 type Member = {
   readonly admitted: AdmittedExtensionV0;
+  scope?: Scope.Closeable;
   hooks: Hooks | undefined;
   status: "running" | "stopped";
   reason: string | null;
   stoppedAt: number | null;
+  stateResetRequired?: ShiitakeError;
 };
 
-/** A missing or failed pure migration cannot safely decode the new state. */
+/** A declared migration failed or returned records the new state cannot decode. */
 class IncompatibleStateMigrationError extends Error {}
 
 /** Core's generic view of rostered v1 extensions. */
 export type ExtensionRuntime = Readonly<{
+  /** Prepare additions without replacing any live member; apply only between turns. */
+  stage: (admitted: readonly AdmittedExtensionV0[]) => Effect.Effect<
+    Readonly<{
+      apply: Effect.Effect<void, ShiitakeError>;
+      discard: Effect.Effect<void>;
+    }>,
+    ShiitakeError
+  >;
   /** Running extensions that participate in runs, with their fingerprints. */
   runParticipants: () => readonly (readonly [
     ExtensionId,
@@ -593,9 +605,15 @@ export function openExtensionRuntime(
               frame.observed.add(sessionId);
             },
             catch: (error) =>
-              error instanceof ShiitakeError && error.cause === "invalid"
-                ? stateError("bound", error.message)
-                : stateError("unavailable", "Attention update is unavailable"),
+              error instanceof ExtensionStateError &&
+              error.reason === "session_absent"
+                ? error
+                : error instanceof ShiitakeError && error.cause === "invalid"
+                  ? stateError("bound", error.message)
+                  : stateError(
+                      "unavailable",
+                      "Attention update is unavailable",
+                    ),
           }),
         ),
       );
@@ -608,7 +626,10 @@ export function openExtensionRuntime(
           ? Effect.fail(stateError("bound", "Attention item is invalid"))
           : mutate(sessionId, () => {
               if (!hasStoredSession(owner, sessionId))
-                throw new Error("Attention Session is unavailable");
+                throw stateError(
+                  "session_absent",
+                  "Attention Session is absent",
+                );
               setSessionAttention(owner, sessionId, id, decoded.success);
             });
       },
@@ -975,6 +996,24 @@ export function openExtensionRuntime(
         send: sendFor(member),
         timers: timersFor(member),
         attention: attentionFor(member),
+        sessionPosition: (sessionId: string) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "state")),
+            Effect.andThen(
+              storeStep(() => {
+                const id = decodeClientSessionId(sessionId);
+                if (!hasStoredSession(owner, id))
+                  throw stateError(
+                    "unavailable",
+                    "Session timeline is unavailable",
+                  );
+                return (
+                  readSessionLineage(owner, { sessionId: id })
+                    ?.newestSequence ?? 0
+                );
+              }),
+            ),
+          ),
         hasPendingSteer: (run: Pick<RunIdentityV0, "sessionId" | "workId">) =>
           requireRead(member.admitted.id).pipe(
             Effect.andThen(grantGuard(member, "run_tools")),
@@ -1049,90 +1088,101 @@ export function openExtensionRuntime(
     });
   }
 
-  /** Pure per-version migrations, applied and re-decoded in one transaction. */
+  /** Pure per-version migrations; prepare owns their transaction with declarations. */
   function migrate(member: Member): void {
     const { id, definition, revision } = member.admitted;
     const declared = definition.state.version;
-    owner.transactionSync(() => {
-      const ledger = readStateLedger(owner, id);
-      if (ledger !== undefined && ledger.version > declared)
-        throw new ShiitakeError(
-          "extensions",
-          "conflict",
-          `Stored ${id} state version ${String(ledger.version)} is newer than ${String(declared)}`,
-        );
-      if (ledger !== undefined && ledger.version < declared) {
-        let rows: readonly StoredRecordV0[] = readAllRecords(owner, id).map(
-          (row): StoredRecordV0 => ({
-            collection: row.collection,
-            key: row.key,
-            value: decodeStoredJson(row.valueJson),
-          }),
-        );
-        for (let version = ledger.version; version < declared; version += 1) {
-          const step = definition.state.migrations[version];
-          if (step === undefined)
-            throw new IncompatibleStateMigrationError(
-              `Missing ${id} state migration from ${String(version)}`,
-            );
-          try {
-            rows = rows.flatMap((row) => step(row));
-          } catch (cause) {
-            throw new IncompatibleStateMigrationError(
-              `Failed ${id} state migration from ${String(version)}`,
-              { cause },
-            );
-          }
-        }
-        deleteAllRecords(owner, id);
-        for (const row of rows) {
-          const declaredSpec = definition.state.collections[row.collection];
-          if (declaredSpec === undefined)
-            throw new IncompatibleStateMigrationError(
-              `Migrated ${id} record names an undeclared collection`,
-            );
-          const decoded = declaredSpec.indexFromEncoded(row.value);
-          if (decoded._tag === "Failure")
-            throw new IncompatibleStateMigrationError(
-              `Migrated ${id} ${row.collection} record is invalid`,
-            );
-          writeRecord(
-            owner,
-            id,
-            row.collection,
-            row.key,
-            decoded.success,
-            JSON.stringify(row.value),
+    const ledger = readStateLedger(owner, id);
+    if (ledger !== undefined && ledger.version > declared)
+      throw new ShiitakeError(
+        "extensions",
+        "conflict",
+        `Stored ${id} state version ${String(ledger.version)} is newer than ${String(declared)}`,
+      );
+    if (ledger !== undefined && ledger.version < declared) {
+      let rows: readonly StoredRecordV0[] = readAllRecords(owner, id).map(
+        (row): StoredRecordV0 => ({
+          collection: row.collection,
+          key: row.key,
+          value: decodeStoredJson(row.valueJson),
+        }),
+      );
+      for (let version = ledger.version; version < declared; version += 1) {
+        const step = definition.state.migrations[version];
+        if (step === undefined)
+          throw new ShiitakeError(
+            "extensions",
+            "state_reset_required",
+            `State reset required for ${id}: stored version ${String(ledger.version)}, declared version ${String(declared)}. An operator must authorize the reset; stored records have not been changed.`,
+          );
+        try {
+          rows = rows.flatMap((row) => step(row));
+        } catch (cause) {
+          throw new IncompatibleStateMigrationError(
+            `Failed ${id} state migration from ${String(version)}`,
+            { cause },
           );
         }
       }
-      writeStateLedger(owner, id, declared, revision);
-    });
+      deleteAllRecords(owner, id);
+      for (const row of rows) {
+        const declaredSpec = definition.state.collections[row.collection];
+        if (declaredSpec === undefined)
+          throw new IncompatibleStateMigrationError(
+            `Migrated ${id} record names an undeclared collection`,
+          );
+        const decoded = declaredSpec.indexFromEncoded(row.value);
+        if (decoded._tag === "Failure")
+          throw new IncompatibleStateMigrationError(
+            `Migrated ${id} ${row.collection} record is invalid`,
+          );
+        writeRecord(
+          owner,
+          id,
+          row.collection,
+          row.key,
+          decoded.success,
+          JSON.stringify(row.value),
+        );
+      }
+    }
+    writeStateLedger(owner, id, declared, revision);
   }
 
   function activateMember(
     member: Member,
     scope: Scope.Closeable,
+    strict = false,
   ): Effect.Effect<void, ShiitakeError> {
     const context = contextFor(member);
-    return Effect.suspend(() =>
-      member.admitted.definition.activate(context),
-    ).pipe(
-      Effect.provideService(Scope.Scope, scope),
-      Effect.exit,
-      Effect.flatMap((exit) => {
-        if (Exit.isSuccess(exit)) {
-          member.hooks = exit.value;
-          return Effect.void;
-        }
-        return recordStop(
-          member,
-          stopReason("activation", exit.cause),
-          exit.cause,
-          "own-transaction",
+    return Effect.gen(function* () {
+      // Each activation owns its resources. Closing a failed candidate must
+      // not wait for Agent shutdown or release another member's resources.
+      const activationScope = yield* Scope.fork(scope);
+      member.scope = activationScope;
+      const exit = yield* Effect.suspend(() =>
+        member.admitted.definition.activate(context),
+      ).pipe(Effect.provideService(Scope.Scope, activationScope), Effect.exit);
+      if (Exit.isSuccess(exit)) {
+        member.hooks = exit.value;
+        return;
+      }
+      yield* Scope.close(activationScope, exit);
+      if (strict)
+        return yield* Effect.fail(
+          new ShiitakeError(
+            "extensions",
+            "rejected",
+            `Extension ${member.admitted.id} failed to start: ${Cause.pretty(exit.cause)}`,
+          ),
         );
-      }),
-    );
+      yield* recordStop(
+        member,
+        stopReason("activation", exit.cause),
+        exit.cause,
+        "own-transaction",
+      );
+    });
   }
 
   const running = (capability: ExtensionCapabilityV0) =>
@@ -1208,13 +1258,14 @@ export function openExtensionRuntime(
 
   /**
    * Run pending state migrations. A stored version newer than the declared one
-   * fails construction; any other failure stops only this extension.
+   * fails construction. A missing path isolates this extension with its rows
+   * retained; a failed declared migration also guards runs as incompatible.
    */
   function prepare(member: Member): Effect.Effect<boolean, ShiitakeError> {
     return Effect.try({
       try: () => {
-        migrate(member);
         owner.transactionSync(() => {
+          migrate(member);
           for (const [name, spec] of Object.entries(member.admitted.documents))
             declareSessionDocument(owner, {
               extensionId: member.admitted.id,
@@ -1227,9 +1278,23 @@ export function openExtensionRuntime(
       },
       catch: (error) => error,
     }).pipe(
+      Effect.tap(() =>
+        Effect.sync(() => {
+          delete member.stateResetRequired;
+        }),
+      ),
       Effect.as(true),
       Effect.catch((error) => {
-        if (error instanceof ShiitakeError) return Effect.fail(error);
+        if (error instanceof ShiitakeError) {
+          if (error.cause !== "state_reset_required") return Effect.fail(error);
+          member.stateResetRequired = error;
+          return recordStop(
+            member,
+            boundReason(error.message),
+            Cause.fail(error),
+            "own-transaction",
+          ).pipe(Effect.as(false));
+        }
         if (
           error instanceof IncompatibleStateMigrationError &&
           (member.admitted.grants.has("run_tools") ||
@@ -1254,64 +1319,79 @@ export function openExtensionRuntime(
 
   return Effect.gen(function* () {
     const scope = yield* Scope.make();
-    for (const admitted of input.admitted) {
-      const stored = readStatus(owner, admitted.id);
-      const keepStopped =
-        stored?.status === "stopped" && stored.revision === admitted.revision;
-      const member: Member = {
-        admitted,
-        hooks: undefined,
-        status: keepStopped ? "stopped" : "running",
-        reason: keepStopped ? stored.reason : null,
-        stoppedAt: keepStopped ? stored.stoppedAt : null,
-      };
-      members.set(admitted.id, member);
-      // Every settled consumer has a cursor from its first roster on, so a
-      // later resume replays only what it missed.
-      yield* Effect.try({
-        try: () => {
-          if (admitted.grants.has("settled"))
+    function startMember(admitted: AdmittedExtensionV0, strict: boolean) {
+      return Effect.gen(function* () {
+        const stored = readStatus(owner, admitted.id);
+        const keepStopped =
+          stored?.status === "stopped" && stored.revision === admitted.revision;
+        const member: Member = {
+          admitted,
+          hooks: undefined,
+          status: keepStopped ? "stopped" : "running",
+          reason: keepStopped ? stored.reason : null,
+          stoppedAt: keepStopped ? stored.stoppedAt : null,
+        };
+        // Every settled consumer has a cursor from its first roster on, so a
+        // later resume replays only what it missed.
+        yield* Effect.try({
+          try: () => {
+            if (admitted.grants.has("settled"))
+              owner.transactionSync(() => {
+                if (readCursor(owner, admitted.id) === undefined)
+                  advanceCursor(
+                    owner,
+                    admitted.id,
+                    readCursor(owner, coreConsumer) ?? 0,
+                  );
+              });
+          },
+          catch: () =>
+            new ShiitakeError(
+              "store",
+              "unavailable",
+              "Settled cursor is unavailable",
+            ),
+        });
+        const prepared = yield* prepare(member);
+        if (!prepared || keepStopped) {
+          if (strict)
+            return yield* Effect.fail(
+              new ShiitakeError(
+                "extensions",
+                "rejected",
+                `Extension ${admitted.id} cannot start: ${member.reason ?? "stopped"}`,
+              ),
+            );
+          return member;
+        }
+        yield* Effect.try({
+          try: () => {
             owner.transactionSync(() => {
-              if (readCursor(owner, admitted.id) === undefined)
-                advanceCursor(
-                  owner,
-                  admitted.id,
-                  readCursor(owner, coreConsumer) ?? 0,
-                );
+              writeStatus(owner, admitted.id, {
+                status: "running",
+                reason: null,
+                stoppedAt: null,
+                revision: admitted.revision,
+              });
+              refreshAttentionOwner(admitted.id);
             });
-        },
-        catch: () =>
-          new ShiitakeError(
-            "store",
-            "unavailable",
-            "Settled cursor is unavailable",
-          ),
+          },
+          catch: () =>
+            new ShiitakeError(
+              "store",
+              "unavailable",
+              "Extension status is unavailable",
+            ),
+        });
+        yield* activateMember(member, scope, strict);
+        return member;
       });
-      const prepared = yield* prepare(member).pipe(
+    }
+    for (const admitted of input.admitted) {
+      const member = yield* startMember(admitted, false).pipe(
         Effect.onError(() => Scope.close(scope, Exit.void)),
       );
-      if (!prepared) continue;
-      if (keepStopped) continue;
-      yield* Effect.try({
-        try: () => {
-          owner.transactionSync(() => {
-            writeStatus(owner, admitted.id, {
-              status: "running",
-              reason: null,
-              stoppedAt: null,
-              revision: admitted.revision,
-            });
-            refreshAttentionOwner(admitted.id);
-          });
-        },
-        catch: () =>
-          new ShiitakeError(
-            "store",
-            "unavailable",
-            "Extension status is unavailable",
-          ),
-      });
-      yield* activateMember(member, scope);
+      members.set(admitted.id, member);
     }
 
     yield* Effect.try({
@@ -1335,6 +1415,104 @@ export function openExtensionRuntime(
     });
 
     const runtime: ExtensionRuntime = {
+      stage: (admitted) =>
+        Effect.gen(function* () {
+          const changed = admitted.filter((next) => {
+            const previous = members.get(next.id);
+            return (
+              previous !== undefined &&
+              previous.admitted.fingerprint !== next.fingerprint
+            );
+          });
+          if (changed.length > 0)
+            return yield* Effect.fail(
+              new ShiitakeError(
+                "extensions",
+                "rejected",
+                `Extensions ${changed.map(({ id }) => id).join(", ")}: this change needs a restart: run fungi stop, then reopen fungi`,
+              ),
+            );
+          const additions = new Map<string, Member>();
+          const discard = Effect.suspend(() =>
+            Effect.forEach(
+              [...additions.values()].reverse(),
+              (member) =>
+                Effect.exit(
+                  member.scope === undefined
+                    ? Effect.void
+                    : Scope.close(member.scope, Exit.void),
+                ),
+              { concurrency: 1 },
+            ).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  for (const next of admitted)
+                    if (!members.has(next.id))
+                      incompatibleMigrations.delete(next.id);
+                }),
+              ),
+              Effect.flatMap(Exit.asVoidAll),
+            ),
+          );
+          yield* Effect.gen(function* () {
+            for (const next of admitted)
+              if (!members.has(next.id))
+                additions.set(next.id, yield* startMember(next, true));
+          }).pipe(Effect.onError(() => discard));
+          const target = new Set(admitted.map(({ id }) => id));
+          let settled = false;
+          return {
+            discard: Effect.suspend(() => {
+              if (settled) return Effect.void;
+              settled = true;
+              return discard;
+            }),
+            apply: Effect.gen(function* () {
+              if (settled)
+                return yield* Effect.fail(
+                  new ShiitakeError(
+                    "extensions",
+                    "rejected",
+                    "Roster transition already settled",
+                  ),
+                );
+              // Finish fallible store work atomically before releasing live
+              // resources. A rolled-back publication must leave both the old
+              // timers and the old member scopes available.
+              yield* Effect.try({
+                try: () => {
+                  owner.transactionSync(() => {
+                    for (const [id, member] of members)
+                      if (!target.has(member.admitted.id))
+                        deleteExtensionTimers(owner, id);
+                    const changed = replaceAttentionGrants(
+                      owner,
+                      admitted
+                        .filter((entry) => entry.grants.has("attention"))
+                        .map(({ id }) => id),
+                    );
+                    for (const id of changed) refreshAttentionOwner(id);
+                  });
+                },
+                catch: () =>
+                  new ShiitakeError(
+                    "store",
+                    "unavailable",
+                    "Roster publication storage is unavailable",
+                  ),
+              });
+              for (const [id, member] of members)
+                if (!target.has(member.admitted.id)) {
+                  if (member.scope !== undefined)
+                    yield* Scope.close(member.scope, Exit.void);
+                  members.delete(id);
+                  incompatibleMigrations.delete(member.admitted.id);
+                }
+              for (const [id, member] of additions) members.set(id, member);
+              settled = true;
+            }),
+          };
+        }),
       runParticipants: () =>
         [...members.values()]
           .filter(isRunParticipant)
@@ -1642,11 +1820,12 @@ export function openExtensionRuntime(
             );
           if (member.status !== "running" || member.hooks === undefined)
             return yield* Effect.fail(
-              new ShiitakeError(
-                "extensions",
-                "unavailable",
-                `Extension ${extensionId} is stopped: ${member.reason ?? "not activated"}`,
-              ),
+              member.stateResetRequired ??
+                new ShiitakeError(
+                  "extensions",
+                  "unavailable",
+                  `Extension ${extensionId} is stopped: ${member.reason ?? "not activated"}`,
+                ),
             );
           const commands = member.admitted.definition.contract.commands;
           const spec = Object.hasOwn(commands, command)

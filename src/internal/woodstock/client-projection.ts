@@ -1,4 +1,5 @@
 import type { Json } from "../../extensions.js";
+import { messageAuthor } from "@fungi.computer/agar/agents";
 import { readSessionAttention } from "./session-attention.js";
 import type { SessionAttention } from "../../session-attention.js";
 import type { UserMessage } from "@fungi.computer/mule/effect";
@@ -29,6 +30,9 @@ import {
   readSessionLineage,
   readPendingSessionCommands,
   readSessionCommandAdmission,
+  readNewestPendingSessionCommand,
+  type AdmissionIdentity,
+  type StoredCommandAdmission,
   type SessionLineage,
   type StoredSessionRow,
 } from "./session-store.js";
@@ -160,6 +164,7 @@ function projectMessage(
       id: row.id,
       sequence: row.sequence,
       commandId: prompt.workId,
+      requestId: prompt.requestId,
       value: prompt.message,
     };
     let projected: SessionMessage = message;
@@ -173,6 +178,7 @@ function projectMessage(
       id: row.id,
       sequence: row.sequence,
       commandId: null,
+      requestId: row.entry.requestId,
       value: operatorClientMessage(row.entry),
     };
     let projected: SessionMessage = message;
@@ -180,37 +186,37 @@ function projectMessage(
       projected = { ...projected, meta: row.entry.meta };
     return Object.freeze(projected);
   }
-  if (row.entry.kind === "message")
-    return Object.freeze({
+  if (row.entry.kind === "message") {
+    const message: SessionMessage = {
       id: row.entry.message.value,
       sequence: row.sequence,
       commandId: work.commandIds.get(row.entry.workId) ?? null,
       value: row.entry.value,
-    });
+    };
+    return Object.freeze(
+      row.entry.data === undefined
+        ? message
+        : { ...message, data: row.entry.data },
+    );
+  }
   return undefined;
 }
 
 /**
- * Newest failure message each work recorded: a work-terminal diagnostic, an
- * assistant error or a final retry error. Raw text; clients and the reply
- * fan-out decide how to present and bound it.
+ * Newest owner-produced terminal diagnostic for each work. Pi assistant errors
+ * and retry text can contain private provider bodies, not safe diagnostics.
  */
 export function diagnosticsByWorkId(
   path: readonly StoredSessionRow[],
 ): ReadonlyMap<string, string> {
   const diagnostics = new Map<string, string>();
   for (const { entry } of path) {
-    if (entry.kind === "work_terminal" && entry.diagnostic !== undefined) {
+    if (
+      (entry.kind === "work_terminal" || entry.kind === "run_terminal") &&
+      entry.diagnostic !== undefined
+    ) {
       diagnostics.set(entry.workId, entry.diagnostic);
-    } else if (entry.kind === "message" && entry.value.role === "assistant") {
-      if (entry.value.errorMessage !== undefined)
-        diagnostics.set(entry.workId, entry.value.errorMessage);
-    } else if (
-      entry.kind === "live_retry" &&
-      entry.event.type === "auto_retry_end" &&
-      entry.event.finalError !== undefined
-    )
-      diagnostics.set(entry.workId, entry.event.finalError);
+    }
   }
   return diagnostics;
 }
@@ -243,6 +249,8 @@ function projectTerminal(
  * compaction kept (the same boundary `buildSessionContext` resumes from) so
  * the client can render "the agent's memory starts below" accurately even
  * when the kept entries are not the compaction row's immediate predecessors.
+ * A kept entry that is itself one of the validated page rows needs no lineage
+ * lookup; only one outside the page is checked against the lineage.
  */
 function compactionMarkersIn(
   owner: SqliteOwner,
@@ -253,7 +261,9 @@ function compactionMarkersIn(
   for (const row of rows) {
     const entry = row.entry;
     if (entry.kind !== "compaction") continue;
-    const kept = lineageEntrySequence(owner, lineage, entry.firstKeptEntryId);
+    const kept =
+      rows.find((candidate) => candidate.id === entry.head)?.sequence ??
+      lineageEntrySequence(owner, lineage, entry.head);
     if (kept === undefined)
       throw unavailable("Session compaction horizon is unavailable");
     markers.push(
@@ -261,9 +271,9 @@ function compactionMarkersIn(
         id: row.id,
         sequence: kept,
         at: row.timestamp,
-        tokensBefore: entry.tokensBefore,
-        tokensAfter: entry.tokensAfter ?? null,
-        trigger: entry.trigger ?? null,
+        tokensBefore: entry.data.tokensBefore,
+        tokensAfter: entry.data.tokensAfter ?? null,
+        trigger: entry.data.reason ?? null,
       }),
     );
   }
@@ -284,7 +294,10 @@ function compactionNoticesIn(
               at: timestamp,
               trigger: entry.trigger,
               result: entry.result,
-              diagnostic: entry.diagnostic ?? null,
+              diagnostic:
+                entry.result === "stale" || entry.result === "insufficient"
+                  ? null
+                  : (entry.diagnostic ?? null),
             }),
           ]
         : [],
@@ -419,41 +432,7 @@ function readPendingPrompts(
     JSON.stringify({ prompts: [], hasMore: false, total }),
   ).byteLength;
   for (const row of rows) {
-    const entry = promptCommand(row.entry);
-    if (entry === undefined)
-      throw unavailable("Pending Session prompt is unavailable");
-    const content = entry.message.content;
-    const prompt: SessionPendingPrompts["prompts"][number] = isPromptParts(
-      content,
-    )
-      ? {
-          commandId: row.entry.workId,
-          text: content
-            .filter((part) => part.type === "text")
-            .map((part) => part.text)
-            .join(""),
-          images: content.filter((part) => part.type === "image"),
-          delivery: entry.delivery ?? "followUp",
-        }
-      : {
-          commandId: row.entry.workId,
-          text: content,
-          delivery: entry.delivery ?? "followUp",
-        };
-    const withMeta =
-      row.entry.meta === undefined
-        ? prompt
-        : { ...prompt, meta: row.entry.meta };
-    const attributed =
-      row.origin.kind === "extension"
-        ? {
-            ...withMeta,
-            origin: {
-              extensionId: row.origin.extensionId,
-              correlation: row.origin.correlation,
-            },
-          }
-        : withMeta;
+    const attributed = projectPendingPrompt(row);
     const size =
       encoder.encode(JSON.stringify(attributed)).byteLength +
       (prompts.length === 0 ? 0 : 1);
@@ -466,6 +445,57 @@ function readPendingPrompts(
     bytes += size;
   }
   return { prompts, hasMore: false, total };
+}
+
+/** Same payload projection as the FIFO page, selected independently of that page's bounds. */
+export function readLatestPendingPrompt(
+  owner: SqliteOwner,
+  sessionId: string,
+  identity?: AdmissionIdentity,
+): SessionPendingPrompts["prompts"][number] | null {
+  const row = readNewestPendingSessionCommand(owner, sessionId, identity);
+  return row === undefined ? null : projectPendingPrompt(row);
+}
+
+function projectPendingPrompt(
+  row: StoredCommandAdmission,
+): SessionPendingPrompts["prompts"][number] {
+  const entry = promptCommand(row.entry);
+  if (entry === undefined)
+    throw unavailable("Pending Session prompt is unavailable");
+  const content = entry.message.content;
+  const prompt: SessionPendingPrompts["prompts"][number] = isPromptParts(
+    content,
+  )
+    ? {
+        commandId: row.entry.workId,
+        requestId: entry.requestId,
+        text: content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join(""),
+        images: content.filter((part) => part.type === "image"),
+        delivery: entry.delivery ?? "followUp",
+      }
+    : {
+        commandId: row.entry.workId,
+        requestId: entry.requestId,
+        text: content,
+        delivery: entry.delivery ?? "followUp",
+      };
+  const withMeta =
+    row.entry.meta === undefined ? prompt : { ...prompt, meta: row.entry.meta };
+  const attributed =
+    row.origin.kind === "extension"
+      ? {
+          ...withMeta,
+          origin: {
+            extensionId: row.origin.extensionId,
+            correlation: row.origin.correlation,
+          },
+        }
+      : withMeta;
+  return attributed;
 }
 
 /**
@@ -514,6 +544,7 @@ export function readClientSnapshot(
         pending,
         activity: activity.facts,
         progress: activity.progress,
+        toolOutput: activity.toolOutput,
         extensions: projectExtensions(),
         attention: readSessionAttention(owner, sessionId),
       });
@@ -561,6 +592,7 @@ export function readClientSnapshot(
       pending,
       activity: activity.facts,
       progress: options.before === undefined ? activity.progress : null,
+      toolOutput: options.before === undefined ? activity.toolOutput : [],
       extensions: projectExtensions(),
       attention: readSessionAttention(owner, sessionId),
     };
@@ -653,7 +685,18 @@ function replayFrames(
     );
   return Object.freeze({
     kind: "page" as const,
-    frames: Object.freeze(frames),
+    frames: Object.freeze(
+      !page.hasMore
+        ? [
+            ...frames,
+            {
+              kind: "tool_output" as const,
+              toolOutput: activity.toolOutput,
+              activity: activity.facts,
+            },
+          ]
+        : frames,
+    ),
     hasMore: page.hasMore,
   });
 }
@@ -745,7 +788,9 @@ export function projectCommandSettlement(
   const last = answers.at(-1);
   const meta =
     terminal.outcome === "cancelled" ? terminal.meta : admission.entry.meta;
+  const sender = messageAuthor(admission.entry.meta);
   return {
+    acceptedSender: sender?.kind === "agent" ? sender.id : null,
     terminal: meta === undefined ? terminal : { ...terminal, meta },
     content:
       terminal.outcome === "cancelled"

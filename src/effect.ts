@@ -31,6 +31,7 @@ export type {
   SessionFrame,
   SessionMessage,
   SessionProgress,
+  SessionToolOutput,
   SessionSnapshot,
   SessionActivity,
   AgentRunningWork,

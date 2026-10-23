@@ -3,13 +3,18 @@ import * as Schema from "effect/Schema";
 const identity = Schema.NonEmptyString.check(Schema.isMaxLength(256));
 const instant = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
-/** An extension-owned request for human attention; expiry is owned by its timer. */
+/**
+ * An extension-owned request for human attention; expiry is owned by its timer.
+ * Items marked `inbox: false` remain visible without changing the inbox state.
+ */
 export const AttentionItemSchema = Schema.Struct({
   id: identity,
   kind: Schema.NonEmptyString.check(Schema.isMaxLength(64)),
   summary: Schema.NonEmptyString.check(Schema.isMaxLength(200)),
   since: instant,
   expiresAt: Schema.optional(instant),
+  /** This item does not change the Session's inbox state; omission does. */
+  inbox: Schema.optional(Schema.Literal(false)),
 });
 
 /** Input to the granted attention door, scoped to the calling extension. */

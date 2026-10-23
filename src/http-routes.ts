@@ -315,6 +315,13 @@ export function createShiitakeHttpRoutes(
       const page = await listSessions(cursor);
       return context.json(page, 200);
     })
+    .get("/sessions/:sessionId/pending/latest", async (context) => {
+      const session = await resolveSession(
+        decodeClientSessionId(context.req.param("sessionId")),
+        context.get("shiitakeMeta"),
+      );
+      return context.json(await session.latestPending(), 200);
+    })
     .get("/sessions/:sessionId/model-preference", async (context) => {
       const session = await resolveSession(
         decodeClientSessionId(context.req.param("sessionId")),
@@ -343,6 +350,30 @@ export function createShiitakeHttpRoutes(
         );
         await session.modelPreference.set(context.req.valid("json"));
         return context.body(null, 204);
+      },
+    )
+    .post(
+      "/sessions/:sessionId/withdraw",
+      validator("json", (value, context) => {
+        const decoded = decodeClientSessionCreationRequest(value);
+        if (decoded._tag === "Failure")
+          return context.json(
+            toShiitakeErrorWire(
+              invalidRequest("Withdrawal request is invalid"),
+            ),
+            400,
+          );
+        return decoded.success;
+      }),
+      async (context) => {
+        const session = await resolveSession(
+          decodeClientSessionId(context.req.param("sessionId")),
+          context.get("shiitakeMeta"),
+        );
+        return context.json(
+          await session.withdraw(context.req.valid("json").requestId),
+          200,
+        );
       },
     )
     .post(
@@ -434,5 +465,14 @@ export function createShiitakeHttpRoutes(
         );
       },
     )
-    .onError((error, context) => context.json(toShiitakeErrorWire(error), 503));
+    .onError((error, context) =>
+      context.json(
+        toShiitakeErrorWire(error),
+        error instanceof ShiitakeError &&
+          error.boundary === "runtime" &&
+          error.cause === "rejected"
+          ? 403
+          : 503,
+      ),
+    );
 }

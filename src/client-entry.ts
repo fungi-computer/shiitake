@@ -17,7 +17,10 @@ import {
   rowSchemaV1,
 } from "@fungi.computer/gills";
 
-export type { ClientActivityV0 } from "./extension-contract.js";
+export type {
+  ClientActivityStateV0,
+  ClientActivityV0,
+} from "./extension-contract.js";
 export { viewExtension } from "./extension-client.js";
 
 const unsigned = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -61,17 +64,23 @@ export const clientChipSchemaV1 = Schema.Struct({
 });
 /** An admitted, display-only status chip. */
 export type ClientChipV1 = typeof clientChipSchemaV1.Type;
-/** One committed presentation event anchored to its real command, if any. */
+/** One committed presentation event with an explicit placement choice. */
 export const clientTimelineCellSchemaV1 = Schema.Struct({
   id: rowIdentitySchemaV1,
   sequence,
   at: unsigned,
   commandId: Schema.NullOr(Schema.String),
+  /** Fixed committed Session position; requires a null command anchor. */
+  afterSequence: Schema.optionalKey(unsigned),
   rows: Schema.Array(commandRow).check(Schema.isMaxLength(200)),
 }).check(
   Schema.makeFilter((cell) => cell.id === String(cell.sequence), {
     message: "Client event identity must equal its sequence",
   }),
+  Schema.makeFilter(
+    (cell) => cell.afterSequence === undefined || cell.commandId === null,
+    { message: "A client event cannot have both command and position anchors" },
+  ),
 );
 /** An admitted committed event with its producer identity and anchor. */
 export type ClientTimelineCellV1 = typeof clientTimelineCellSchemaV1.Type;
@@ -134,8 +143,8 @@ export type ClientExtensionContextV1 = Readonly<{
 export type ClientEntryV1 = Readonly<{
   protocol: "shiitake.client/v1";
   id: ExtensionId;
-  /** Render this owner's correlated prompts as notes instead of human bubbles. */
-  correlatedPrompts?: "note";
+  /** Keep this extension's own prompts out of the timeline; its footer row reports status. */
+  promptPresentation?: "footer";
   /** Normalized lifetime attachment; authors use defineClientEntry for async code. */
   attach?: (
     context: ClientExtensionContextV1,
@@ -146,7 +155,7 @@ export type ClientEntryV1 = Readonly<{
 const entrySchema: Schema.Codec<ClientEntryV1, unknown> = Schema.Struct({
   protocol: Schema.Literal("shiitake.client/v1"),
   id: ExtensionId,
-  correlatedPrompts: Schema.optionalKey(Schema.Literal("note")),
+  promptPresentation: Schema.optionalKey(Schema.Literal("footer")),
   attach: Schema.optionalKey(
     Schema.declare<NonNullable<ClientEntryV1["attach"]>>(
       (value): value is NonNullable<ClientEntryV1["attach"]> =>
@@ -174,7 +183,7 @@ export const parseClientEntryV1 = decodeEntry;
 export function defineClientEntry<C extends CommandsV0, P, PI>(
   contract: ExtensionContractV0<C, P, PI>,
   client: Readonly<{
-    correlatedPrompts?: ClientEntryV1["correlatedPrompts"];
+    promptPresentation?: ClientEntryV1["promptPresentation"];
     attach?: (
       context: ClientExtensionContextV1,
     ) => void | Promise<void> | Effect.Effect<void, Error, Scope.Scope>;
@@ -187,8 +196,8 @@ export function defineClientEntry<C extends CommandsV0, P, PI>(
     protocol: "shiitake.client/v1",
     id: contract.id,
   } satisfies Pick<ClientEntryV1, "protocol" | "id">;
-  if (client.correlatedPrompts !== undefined)
-    Object.assign(entry, { correlatedPrompts: client.correlatedPrompts });
+  if (client.promptPresentation !== undefined)
+    Object.assign(entry, { promptPresentation: client.promptPresentation });
   const attach = client.attach;
   const contribute = client.contribute;
   if (attach !== undefined)

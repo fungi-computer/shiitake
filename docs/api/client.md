@@ -38,13 +38,36 @@ is an ordinary outcome, never an error.
 
 ---
 
+### UnknownRequest
+
+```ts
+type UnknownRequest = Readonly<{
+  status: "unknown";
+}>;
+```
+
+No command has been admitted under this request key in the addressed Session.
+
+---
+
 ### CancelResult
 
 ```ts
-type CancelResult = Accepted | TooLate;
+type CancelResult = Accepted | TooLate | UnknownRequest;
 ```
 
-Outcome of one cancel command.
+Outcome of one cancel command or request-based recall.
+
+---
+
+### WithdrawResult
+
+```ts
+type WithdrawResult = Accepted | UnknownRequest;
+```
+
+Atomic admission resolution: accepted work is kept; an unknown key is fenced
+forever.
 
 ---
 
@@ -212,11 +235,39 @@ Optional controls for the Promise-friendly text sender.
 
 ---
 
+### ModelMessage
+
+```ts
+type ModelMessage =
+  | Exclude<
+      Message,
+      {
+        role: "toolResult";
+      }
+    >
+  | Omit<
+      Extract<
+        Message,
+        {
+          role: "toolResult";
+        }
+      >,
+      "details"
+    >;
+```
+
+Model-facing Pi content. Application tool display payloads belong to the
+surrounding entry's `data`, never to a message sent back to a provider.
+
+---
+
 ### SessionMessage
 
 ```ts
 type SessionMessage = Readonly<{
+  requestId?: string;
   meta?: Json;
+  data?: Json;
   origin?: Readonly<{
     extensionId: string;
     correlation: string | null;
@@ -224,11 +275,11 @@ type SessionMessage = Readonly<{
   id: string;
   sequence: number;
   commandId: string | null;
-  value: Message;
+  value: ModelMessage;
 }>;
 ```
 
-One exact completed Pi message on the selected Session lineage.
+One completed model message and its separate application payload.
 
 ---
 
@@ -368,6 +419,22 @@ Generic Agent-scope extension controls.
 
 ---
 
+### SessionToolOutput
+
+```ts
+type SessionToolOutput = Readonly<{
+  toolCallId: string;
+  revision: number;
+  tail: string;
+  droppedBytes: number;
+  totalBytes: number;
+}>;
+```
+
+Process-local running tool tail; never a durable Session fact.
+
+---
+
 ### SessionProgress
 
 ```ts
@@ -389,6 +456,7 @@ Process-local assistant progress; never a durable Session fact.
 
 ```ts
 type SessionPendingPrompt = Readonly<{
+  requestId: string;
   meta?: SessionMessage["meta"];
   origin?: SessionMessage["origin"];
   commandId: string;
@@ -454,14 +522,17 @@ type SessionCompactionNotice = Readonly<{
   sequence: number;
   at: number;
   trigger: SessionCompactionTrigger;
-  result: "nothing_to_compact" | "failed";
+  result: "nothing_to_compact" | "failed" | "stale" | "insufficient";
   diagnostic: string | null;
 }>;
 ```
 
 A compaction that changed nothing: a manual request with nothing to summarize
-yet, or a compaction that failed. Automatic failures are never silent; each one
-is a notice at its own place in the timeline.
+yet, a compaction that failed, or a finished background summary dropped
+unplaced: stale because the context had moved past its head, or insufficient
+because placing it would have left the context over the limit. Automatic
+failures are never silent; each one is a notice at its own place in the
+timeline.
 
 ---
 
@@ -495,6 +566,7 @@ type SessionSnapshot = Readonly<{
   pending: SessionPendingPrompts;
   activity: SessionActivity;
   progress: SessionProgress | null;
+  toolOutput: readonly SessionToolOutput[];
   extensions: SessionExtensionSlots;
   attention: readonly SessionAttention[];
   context?: SessionContext;
@@ -509,6 +581,11 @@ Bounded Session baseline at one opaque owner cursor.
 
 ```ts
 type SessionFrame =
+  | Readonly<{
+      kind: "tool_output";
+      toolOutput: readonly SessionToolOutput[];
+      activity: SessionActivity;
+    }>
   | Readonly<{
       kind: "update";
       delivery: "replay" | "live";
@@ -598,9 +675,11 @@ Race-safe baseline plus live changes resource.
 type ShiitakeSession = Readonly<{
   address: string;
   command: SessionCommandHandler;
+  withdraw: (requestId) => Promise<WithdrawResult>;
   abort: () => Promise<void>;
   send: (text, options?) => Promise<Accepted>;
   cancel: (input) => Promise<CancelResult>;
+  latestPending: () => Promise<SessionPendingPrompt | null>;
   extension: (extensionId) => SessionExtensionControls;
   modelPreference: Readonly<{
     read: () => Promise<ModelPreference | null>;
@@ -813,36 +892,6 @@ One Agent bound to one extension contract.
 
 ---
 
-### OperatorCommand
-
-```ts
-type OperatorCommand = Extract<
-  SessionCommand,
-  Readonly<{
-    type: "operator";
-  }>
->;
-```
-
-Public command that records one operator or party line without a run.
-
----
-
-### TitleCommand
-
-```ts
-type TitleCommand = Extract<
-  SessionCommand,
-  Readonly<{
-    type: "title";
-  }>
->;
-```
-
-Public command that sets or clears the user's Session title.
-
----
-
 ### ShiitakeClientOptions
 
 ```ts
@@ -876,6 +925,26 @@ const AcceptedSchema: Schema.Codec<Accepted>;
 Decode a durable command acceptance value at an RPC boundary.
 
 ## Functions
+
+### parseWithdrawResult()
+
+```ts
+function parseWithdrawResult(value): WithdrawResult;
+```
+
+Decode the owner's atomic request resolution.
+
+#### Parameters
+
+| Parameter | Type     |
+| --------- | -------- |
+| `value`   | `string` |
+
+#### Returns
+
+[`WithdrawResult`](#withdrawresult)
+
+---
 
 ### parseAccepted()
 
@@ -914,6 +983,41 @@ Parse one serialized cancel outcome: accepted, or too late.
 #### Returns
 
 [`CancelResult`](#cancelresult)
+
+---
+
+### parseLatestPendingPrompt()
+
+```ts
+function parseLatestPendingPrompt(value): Readonly<{
+  requestId: string;
+  meta?: Json;
+  origin?: Readonly<{
+    extensionId: string;
+    correlation: string | null;
+  }>;
+  commandId: string;
+  text: string;
+  images?: readonly object[];
+  delivery: PromptDelivery;
+}> | null;
+```
+
+Decode the host-authorized newest pending lookup, including an empty result.
+
+#### Parameters
+
+| Parameter | Type     |
+| --------- | -------- |
+| `value`   | `string` |
+
+#### Returns
+
+\| `Readonly`\<\{ `requestId`: `string`; `meta?`: [`Json`](extensions.md#json);
+`origin?`: `Readonly`\<\{ `extensionId`: `string`; `correlation`: `string` \|
+`null`; \}\>; `commandId`: `string`; `text`: `string`; `images?`: readonly
+`object`[]; `delivery`: [`PromptDelivery`](index.md#promptdelivery); \}\> \|
+`null`
 
 ---
 
@@ -1089,6 +1193,12 @@ Re-exports [ForkCommand](index.md#forkcommand)
 
 ---
 
+### OperatorCommand
+
+Re-exports [OperatorCommand](index.md#operatorcommand)
+
+---
+
 ### PromptCommand
 
 Re-exports [PromptCommand](index.md#promptcommand)
@@ -1104,6 +1214,12 @@ Re-exports [PromptDelivery](index.md#promptdelivery)
 ### SessionCommand
 
 Re-exports [SessionCommand](index.md#sessioncommand)
+
+---
+
+### TitleCommand
+
+Re-exports [TitleCommand](index.md#titlecommand)
 
 ---
 
