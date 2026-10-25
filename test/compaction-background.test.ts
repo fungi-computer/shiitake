@@ -1,3 +1,7 @@
+import {
+  fauxModel,
+  type FauxResponseFactory,
+} from "@fungi.computer/mule/testing";
 // Runtime for every law here: Node 24, `node:sqlite`, Pi's faux provider and
 // the real accepted run (`runAcceptedCommand` through the runtime host).
 import { directSandbox } from "@fungi.computer/mycelium/testing";
@@ -10,9 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
-  fauxProvider,
   fauxToolCall,
-  type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
@@ -238,10 +240,10 @@ function harness(
     },
   };
   const runtime = createCompatibilityRuntimeHost();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "background-1", contextWindow: 60_000, maxTokens: 100_000 }],
   });
-  const model = faux.getModel();
+  const model = faux.model;
   const hold = deferred();
   const summaryArrived = deferred();
   const mainRequests: Context[] = [];
@@ -355,7 +357,7 @@ function harness(
           model,
           retryable: () => false,
           stream: (streamModel, context, streamOptions) =>
-            faux.provider.streamSimple(streamModel, context, streamOptions),
+            faux.stream(streamModel, context, streamOptions),
           release: () => Promise.resolve(),
         }),
     },
@@ -1114,10 +1116,10 @@ it("an unclamped background threshold below zero is gated by keepRecentTokens, a
   // Only the cut (4000 kept tokens here) decides whether one starts.
   const fixture = createNativeSqliteOwnerFixture();
   const runtime = createCompatibilityRuntimeHost();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "small-1", contextWindow: 30_000, maxTokens: 100_000 }],
   });
-  const model = faux.getModel();
+  const model = faux.model;
   const summaryRequests: Context[] = [];
   const dispatch: FauxResponseFactory = (context) => {
     if (!isSummaryRequest(context)) return fauxAssistantMessage("ok");
@@ -1138,7 +1140,7 @@ it("an unclamped background threshold below zero is gated by keepRecentTokens, a
           model,
           retryable: () => false,
           stream: (streamModel, context, options) =>
-            faux.provider.streamSimple(streamModel, context, options),
+            faux.stream(streamModel, context, options),
           release: () => Promise.resolve(),
         }),
     },

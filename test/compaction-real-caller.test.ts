@@ -1,8 +1,6 @@
+import { fauxModel } from "@fungi.computer/mule/testing";
 import { getSystemMessageText, type Context } from "@earendil-works/pi-ai";
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-} from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 import { requestMessages } from "./fixtures/model-context.js";
@@ -34,7 +32,7 @@ import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
 
 function compactionOptions(
   fixture: ReturnType<typeof createNativeSqliteOwnerFixture>,
-  faux: ReturnType<typeof fauxProvider>,
+  faux: ReturnType<typeof fauxModel>,
   runtime: ReturnType<typeof createCompatibilityRuntimeHost>,
   extensions: readonly RosteredExtensionV0[] = [],
 ): ShiitakeOptions {
@@ -49,10 +47,10 @@ function compactionOptions(
     model: {
       acquire: () =>
         Promise.resolve({
-          model: faux.getModel(),
+          model: faux.model,
           retryable: () => false,
           stream: (model, context, options) =>
-            faux.provider.streamSimple(model, context, options),
+            faux.stream(model, context, options),
           release: () => Promise.resolve(),
         }),
     },
@@ -96,7 +94,7 @@ function compactionExtension(
   });
 }
 
-function largeCompactionResponses(faux: ReturnType<typeof fauxProvider>) {
+function largeCompactionResponses(faux: ReturnType<typeof fauxModel>) {
   faux.setResponses([
     fauxAssistantMessage("x".repeat(100_000)),
     fauxAssistantMessage("durable summary"),
@@ -105,7 +103,7 @@ function largeCompactionResponses(faux: ReturnType<typeof fauxProvider>) {
 
 function createRealCompactionScenario() {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 100_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -141,14 +139,14 @@ function createRealCompactionScenario() {
     },
     model: {
       acquire: () => {
-        const model = faux.getModel();
+        const model = faux.model;
         model.contextWindow = contextWindow;
         return Promise.resolve({
           model,
           retryable: () => false,
           stream: (model, context, options) => {
             if (capture) requests.push(structuredClone(context));
-            return faux.provider.streamSimple(model, context, options);
+            return faux.stream(model, context, options);
           },
           release: () => Promise.resolve(),
         });
@@ -460,7 +458,7 @@ it("excludes stale usage through the persisted Session caller", async () => {
 
 it("compacts without an installed handoff consumer", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 10_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -490,7 +488,7 @@ it("compacts without an installed handoff consumer", async () => {
 
 it("recovers one length result without retrying compaction", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 100_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -513,7 +511,7 @@ it("recovers one length result without retrying compaction", async () => {
     model: {
       acquire: () =>
         Promise.resolve({
-          model: faux.getModel(),
+          model: faux.model,
           retryable: () => false,
           stream: (model, context, options) => {
             const target = (context.messages[0]?.role === "system"
@@ -523,7 +521,7 @@ it("recovers one length result without retrying compaction", async () => {
               ? summaryContexts
               : modelContexts;
             target.push(structuredClone(context));
-            return faux.provider.streamSimple(model, context, options);
+            return faux.stream(model, context, options);
           },
           release: () => Promise.resolve(),
         }),
@@ -585,7 +583,7 @@ it("recovers one length result without retrying compaction", async () => {
 
 it("keeps the completed outcome when the handoff rejects", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 10_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -637,7 +635,7 @@ it("keeps the completed outcome when the handoff rejects", async () => {
 
 it("cancels a blocked post-terminal handoff through Watchdog", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 10_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -772,7 +770,7 @@ function manualCompactionScenario(
   extensions: readonly RosteredExtensionV0[] = [],
 ) {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -817,7 +815,7 @@ function compactionsIn(
   );
 }
 
-function summaryResponses(faux: ReturnType<typeof fauxProvider>) {
+function summaryResponses(faux: ReturnType<typeof fauxModel>) {
   faux.setResponses([
     fauxAssistantMessage("manual summary"),
     fauxAssistantMessage("manual turn summary"),

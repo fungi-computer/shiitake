@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@fungi.computer/mule/effect";
 import * as Schema from "effect/Schema";
 
 import { ShiitakeError } from "../../errors.js";

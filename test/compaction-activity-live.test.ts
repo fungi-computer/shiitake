@@ -1,12 +1,10 @@
+import { fauxModel } from "@fungi.computer/mule/testing";
 // Confirms the live `SessionActivity.compaction` fact is set for the
 // durable commit's whole window and cleared once it settles, whichever way
 // it ends: Pi's faux provider plus a compaction handoff that reads the fact
 // mid-commit, following the manual-compaction scenario in
 // compaction-real-caller.test.ts.
-import {
-  fauxAssistantMessage,
-  fauxProvider,
-} from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { expect, it } from "vitest";
 
 import { defineExtension, ExtensionId } from "../src/extensions.js";
@@ -32,7 +30,7 @@ function compactionExtension(
 
 it("shows a running manual compaction live and clears it once committed", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "faux-1", contextWindow: 1_000_000, maxTokens: 100_000 }],
     tokenSize: { min: 100, max: 100 },
   });
@@ -58,12 +56,12 @@ it("shows a running manual compaction live and clears it once committed", async 
     },
     model: {
       acquire: () => {
-        const model = faux.getModel();
+        const model = faux.model;
         return Promise.resolve({
           model,
           retryable: () => false,
           stream: (model, context, options) =>
-            faux.provider.streamSimple(model, context, options),
+            faux.stream(model, context, options),
           release: () => Promise.resolve(),
         });
       },

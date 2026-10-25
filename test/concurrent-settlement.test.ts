@@ -1,7 +1,5 @@
-import {
-  fauxProvider,
-  fauxAssistantMessage,
-} from "@earendil-works/pi-ai/providers/faux";
+import { fauxModel } from "@fungi.computer/mule/testing";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 import {
@@ -164,7 +162,7 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
   const releaseAgent = gate();
   const hostStarted = gate();
   const releaseHost = gate();
-  const faux = fauxProvider();
+  const faux = fauxModel([]);
   faux.setResponses([
     async () => {
       agentStarted.resolve();
@@ -186,9 +184,10 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
       model: {
         acquire: () =>
           Promise.resolve({
-            model: faux.getModel(),
+            model: faux.model,
             retryable: () => false,
-            stream: faux.provider.streamSimple.bind(faux.provider),
+            stream: (model, context, options) =>
+              faux.stream(model, context, options),
             release: () => Promise.resolve(),
           }),
       },

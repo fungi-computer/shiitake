@@ -7,7 +7,7 @@ import type {
   AssistantMessage,
   Message,
   UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@fungi.computer/mule/effect";
 import * as Schema from "effect/Schema";
 
 const isString = Schema.is(Schema.String);

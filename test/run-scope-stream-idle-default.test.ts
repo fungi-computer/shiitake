@@ -1,5 +1,5 @@
+import { fauxModel } from "@fungi.computer/mule/testing";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { expect, it } from "vitest";
@@ -20,7 +20,7 @@ import {
 // `packages/mule/test/live-controls.test.ts`.
 it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxProvider();
+  const faux = fauxModel([]);
   let reconcile: Effect.Effect<void, ShiitakeError> | undefined;
   const runtime: RuntimeHostEffect = {
     bind: (input) =>
@@ -48,7 +48,7 @@ it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
           model: {
             acquire: () =>
               Effect.succeed({
-                model: faux.getModel(),
+                model: faux.model,
                 retryable: () => false,
                 // Never emits and never ends: only the idle deadline settles it.
                 stream: () => createAssistantMessageEventStream(),

@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
 import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
-import { fauxModel } from "@fungi.computer/mule/testing";
+import { fauxModel, type FauxResponseStep } from "@fungi.computer/mule/testing";
 import { rejectingSandbox } from "@fungi.computer/mycelium/testing";
 import type {
   ExtensionRosterV0,
@@ -12,7 +12,6 @@ import * as z from "zod";
 import {
   fauxAssistantMessage,
   fauxToolCall,
-  type FauxResponseStep,
 } from "@earendil-works/pi-ai/providers/faux";
 import { GuestThrew, type Sandbox } from "@fungi.computer/mycelium";
 import {

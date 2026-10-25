@@ -1,3 +1,4 @@
+import { fauxModel } from "@fungi.computer/mule/testing";
 // The footer and the compaction threshold both read pi-ai's own context
 // estimate. A provider's usage figure measures the context it read, so once a
 // compaction lands, a kept reply's older usage prices the pre-compaction
@@ -10,7 +11,6 @@ import {
   estimateContextTokens,
   estimateMessageTokens,
 } from "@earendil-works/pi-ai/utils/estimate";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
 import { openCompactionSettings } from "../src/internal/compaction/settings.js";
@@ -87,7 +87,7 @@ it("estimates every message fresh before any compaction has run", () => {
 });
 
 describe("background compaction threshold (tokens only)", () => {
-  const model = fauxProvider({ models: [{ id: "bg-1" }] }).getModel();
+  const model = fauxModel([], { models: [{ id: "bg-1" }] }).model;
   const window = 100_000;
   const options = { reserveTokens: 10_000, backgroundTokens: 20_000 };
   const settings = openCompactionSettings(options)(model);

@@ -52,7 +52,7 @@ const parseModelPreference: (
 ) => {
   providerId: string;
   modelId: string;
-  reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  reasoning?: "high" | "low" | "max" | "medium" | "minimal" | "xhigh";
 } | null;
 ```
 
@@ -67,8 +67,8 @@ Decode the bounded client preference; availability remains model-owner policy.
 
 #### Returns
 
-\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"minimal"` \|
-`"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`; \} \| `null`
+\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"high"` \|
+`"low"` \| `"max"` \| `"medium"` \| `"minimal"` \| `"xhigh"`; \} \| `null`
 
 ---
 
@@ -81,7 +81,7 @@ const parseModelPreferenceJson: (
 ) => {
   providerId: string;
   modelId: string;
-  reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  reasoning?: "high" | "low" | "max" | "medium" | "minimal" | "xhigh";
 } | null;
 ```
 
@@ -96,8 +96,8 @@ Decode the serialized preference with the same maintained schema.
 
 #### Returns
 
-\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"minimal"` \|
-`"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`; \} \| `null`
+\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"high"` \|
+`"low"` \| `"max"` \| `"medium"` \| `"minimal"` \| `"xhigh"`; \} \| `null`
 
 ---
 
@@ -133,7 +133,7 @@ Parse the footer's provider/model spelling; model ids may contain slashes.
 | ------------ | ------------------------------------------------------------------------ | ------------- |
 | `providerId` | `string`                                                                 | `identifier`  |
 | `modelId`    | `string`                                                                 | `identifier`  |
-| `reasoning?` | `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"` | -             |
+| `reasoning?` | `"high"` \| `"low"` \| `"max"` \| `"medium"` \| `"minimal"` \| `"xhigh"` | -             |
 
 ---
 
@@ -143,7 +143,7 @@ Parse the footer's provider/model spelling; model ids may contain slashes.
 function resolveModelPreference(layers): {
   providerId: string;
   modelId: string;
-  reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  reasoning?: "high" | "low" | "max" | "medium" | "minimal" | "xhigh";
 } | null;
 ```
 
@@ -158,8 +158,8 @@ availability; an explicit choice never silently falls through on auth failure.
 
 #### Returns
 
-\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"minimal"` \|
-`"low"` \| `"medium"` \| `"high"` \| `"xhigh"` \| `"max"`; \} \| `null`
+\| \{ `providerId`: `string`; `modelId`: `string`; `reasoning?`: `"high"` \|
+`"low"` \| `"max"` \| `"medium"` \| `"minimal"` \| `"xhigh"`; \} \| `null`
 
 ## References
 

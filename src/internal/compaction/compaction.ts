@@ -1,3 +1,5 @@
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import { streamModel } from "@fungi.computer/mule/effect";
 /**
  * Pi v0.84.4 semantic compaction, adapted only at Woodstock's entry boundary.
  * The retained preparation/result vocabulary is intentionally visible here;
@@ -13,7 +15,7 @@ import type {
   RetryPolicy,
   SimpleStreamOptions,
   Usage,
-} from "@earendil-works/pi-ai";
+} from "@fungi.computer/mule/effect";
 // Leaf helpers, not Pi's root entry, which also evaluates its validators.
 import {
   estimateContextTokens,
@@ -21,7 +23,6 @@ import {
 } from "@earendil-works/pi-ai/utils/estimate";
 import { retryAssistantCall } from "@earendil-works/pi-ai/utils/retry";
 import { contentText } from "@earendil-works/pi-ai/utils/text";
-import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { uuidv7 } from "@earendil-works/pi-ai/utils/uuid";
 import type { MuleStreamFunction } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
@@ -47,7 +48,7 @@ export type CompactionSourceEntry =
   | Readonly<{
       id: string;
       kind: "message";
-      message: import("@earendil-works/pi-ai").Message;
+      message: import("@fungi.computer/mule/effect").Message;
     }>
   | Readonly<{
       id: string;
@@ -55,7 +56,7 @@ export type CompactionSourceEntry =
       /** Pi's entry head: the first entry the summary keeps. */
       head: string;
       /** Pi's entry model message: the summary the model reads. */
-      model: import("@earendil-works/pi-ai").UserMessage;
+      model: import("@fungi.computer/mule/effect").UserMessage;
       usage: Usage;
       details?: Readonly<{
         readFiles: readonly string[];
@@ -65,8 +66,8 @@ export type CompactionSourceEntry =
 
 export type CompactionPreparation = Readonly<{
   firstKeptEntryId: string;
-  messagesToSummarize: readonly import("@earendil-works/pi-ai").Message[];
-  turnPrefixMessages: readonly import("@earendil-works/pi-ai").Message[];
+  messagesToSummarize: readonly import("@fungi.computer/mule/effect").Message[];
+  turnPrefixMessages: readonly import("@fungi.computer/mule/effect").Message[];
   isSplitTurn: boolean;
   tokensBefore: number;
   previousSummary?: string;
@@ -134,7 +135,7 @@ function contextMessages(entries: readonly CompactionSourceEntry[]) {
 }
 
 function extractFileOperations(
-  messages: readonly import("@earendil-works/pi-ai").Message[],
+  messages: readonly import("@fungi.computer/mule/effect").Message[],
   entries: readonly CompactionSourceEntry[],
   previousIndex: number,
 ) {
@@ -361,13 +362,13 @@ function completeSummarization(
   };
   return retryAssistantCall(
     () =>
-      streamFn
-        ? Promise.resolve(
-            streamFn(model, normalizeContext(context), requestOptions),
-          ).then((stream) => stream.result())
-        : import("@earendil-works/pi-ai/compat").then(({ completeSimple }) =>
-            completeSimple(model, context, requestOptions),
-          ),
+      Promise.resolve(
+        (streamFn ?? streamModel)(
+          model,
+          normalizeContext(context),
+          requestOptions,
+        ),
+      ).then((stream) => stream.result()),
     RETRY_POLICY,
     requestOptions.signal,
   );

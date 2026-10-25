@@ -1,9 +1,11 @@
 import { directSandbox } from "@fungi.computer/mycelium/testing";
-import { fauxModel } from "@fungi.computer/mule/testing";
+import {
+  fauxModel,
+  type FauxResponseFactory,
+} from "@fungi.computer/mule/testing";
 import {
   fauxAssistantMessage,
   fauxToolCall,
-  type FauxResponseFactory,
 } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, expect, it, vi } from "vitest";
 import { Shiitake } from "../src/index.js";

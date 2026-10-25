@@ -1,3 +1,4 @@
+import { fauxModel, type FauxResponseStep } from "@fungi.computer/mule/testing";
 // Runtime for every law here: Node 24, `node:sqlite`, Pi's faux provider.
 import { directSandbox } from "@fungi.computer/mycelium/testing";
 import {
@@ -8,9 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
-  fauxProvider,
   fauxToolCall,
-  type FauxResponseStep,
 } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
 
@@ -56,7 +55,7 @@ function isSummaryRequest(request: Context): boolean {
 type Scenario = Readonly<{
   fixture: ReturnType<typeof createNativeSqliteOwnerFixture>;
   runtime: ReturnType<typeof createCompatibilityRuntimeHost>;
-  faux: ReturnType<typeof fauxProvider>;
+  faux: ReturnType<typeof fauxModel>;
   requests: Context[];
   /** Most summary calls in flight at once. */
   peakSummaryCalls: () => number;
@@ -67,13 +66,13 @@ type Scenario = Readonly<{
 function scenario(contextWindow = 30_000): Scenario {
   const fixture = createNativeSqliteOwnerFixture();
   const runtime = createCompatibilityRuntimeHost();
-  const faux = fauxProvider({
+  const faux = fauxModel([], {
     models: [{ id: "parity-1", contextWindow, maxTokens: 100_000 }],
   });
   const requests: Context[] = [];
   let active = 0;
   let peak = 0;
-  const model = faux.getModel();
+  const model = faux.model;
   return {
     fixture,
     runtime,
@@ -91,15 +90,11 @@ function scenario(contextWindow = 30_000): Scenario {
       model: {
         acquire: () =>
           Promise.resolve({
-            model: faux.getModel(),
+            model: faux.model,
             retryable: () => false,
             stream: (streamModel, context, options) => {
               requests.push(structuredClone(context));
-              const stream = faux.provider.streamSimple(
-                streamModel,
-                context,
-                options,
-              );
+              const stream = faux.stream(streamModel, context, options);
               if (isSummaryRequest(context)) {
                 active += 1;
                 peak = Math.max(peak, active);
@@ -434,12 +429,12 @@ describe("split-turn summaries (Node, faux)", () => {
   }
 
   it("keeps the previous summary when a split turn has no new history", async () => {
-    const faux = fauxProvider({ models: [{ id: "split-1" }] });
+    const faux = fauxModel([], { models: [{ id: "split-1" }] });
     const answer: AssistantMessage = fauxAssistantMessage("prefix checkpoint");
     faux.setResponses([{ ...answer, usage }]);
     const result = await Effect.runPromise(
-      compact(preparation("earlier summary"), faux.getModel(), (m, c, o) =>
-        faux.provider.streamSimple(m, c, o),
+      compact(preparation("earlier summary"), faux.model, (m, c, o) =>
+        faux.stream(m, c, o),
       ),
     );
     expect(result.summary).toMatch(/^earlier summary\n\n---\n\n/u);
@@ -447,7 +442,7 @@ describe("split-turn summaries (Node, faux)", () => {
   });
 
   it("refuses a summary that tries to call a tool", async () => {
-    const faux = fauxProvider({ models: [{ id: "split-2" }] });
+    const faux = fauxModel([], { models: [{ id: "split-2" }] });
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("execute", { code: "x" }), {
         stopReason: "toolUse",
@@ -455,8 +450,8 @@ describe("split-turn summaries (Node, faux)", () => {
     ]);
     await expect(
       Effect.runPromise(
-        compact(preparation(undefined), faux.getModel(), (m, c, o) =>
-          faux.provider.streamSimple(m, c, o),
+        compact(preparation(undefined), faux.model, (m, c, o) =>
+          faux.stream(m, c, o),
         ),
       ),
     ).rejects.toThrow(/attempted to call a tool/u);
