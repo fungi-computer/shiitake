@@ -186,6 +186,7 @@ it("delegation polls one durable BirdDog receipt and preserves a cancelled termi
     },
     {
       fanOut: () => Effect.void,
+      postMail: () => Effect.void,
       drainOutbox: () => Effect.void,
       nextWakeAt: () => Effect.succeed(undefined),
     },
@@ -230,6 +231,8 @@ it("delegation polls one durable BirdDog receipt and preserves a cancelled termi
     });
     expect(mail).toHaveLength(1);
     const accepted = await reopened.start(grant, task);
+    if (accepted.status !== "accepted")
+      throw new Error("recipient was expected to accept mail");
     const meta = { author: { id: "ada", name: "Ada" } };
     await host.agent
       .withMeta(meta)
@@ -329,6 +332,7 @@ it("resolves an old settled delegation after its terminal leaves the page and th
     },
     {
       fanOut: () => Effect.void,
+      postMail: () => Effect.void,
       drainOutbox: () => Effect.void,
       nextWakeAt: () => Effect.succeed(undefined),
     },
@@ -418,7 +422,11 @@ it("admits an authorized ancestor as a peer while refusing self-delegation", asy
         sessionId: "new-a-session",
         text: "Return work to a peer",
       }),
-    ).resolves.toEqual({ status: "accepted", commandId: "child-work" });
+    ).resolves.toEqual({
+      status: "accepted",
+      commandId: "child-work",
+      sessionId: "new-a-session",
+    });
     expect(delivered).toEqual(["a"]);
     await expect(
       fleet.start(grant, {
@@ -435,7 +443,11 @@ it("admits an authorized ancestor as a peer while refusing self-delegation", asy
         sessionId: "c-session",
         text: "Continue",
       }),
-    ).resolves.toEqual({ status: "accepted", commandId: "child-work" });
+    ).resolves.toEqual({
+      status: "accepted",
+      commandId: "child-work",
+      sessionId: "c-session",
+    });
     expect(delivered).toEqual(["a", "c"]);
   } finally {
     store.close();
@@ -551,8 +563,16 @@ it("inherits the delegation depth cap across handoffs and refuses work at the li
     if (!admitted) throw new Error("Missing admitted mail");
     const reply: import("@fungi.computer/bird-dog").BirdDogMail = {
       key: `${admitted.key}:reply:0`,
-      from: admitted.to,
-      to: admitted.from,
+      from: {
+        kind: "agent",
+        agentId: "c",
+        sessionId: "c-session",
+      },
+      to: {
+        kind: "agent",
+        agentId: "b",
+        sessionId: "b-session",
+      },
       replyTo: [],
       content: "Work cancelled by Ada.",
       createdAt: Date.now(),
@@ -578,6 +598,39 @@ it("inherits the delegation depth cap across handoffs and refuses work at the li
         outcome: "cancelled",
       },
     });
+    const undeliverable: import("@fungi.computer/bird-dog").BirdDogMail = {
+      key: `${admitted.key}:reply:0`,
+      from: {
+        kind: "agent",
+        agentId: "c",
+        sessionId: "c-session",
+      },
+      to: {
+        kind: "agent",
+        agentId: "b",
+        sessionId: "b-session",
+      },
+      replyTo: [],
+      content: "Not delivered: recipient offline.",
+      createdAt: Date.now(),
+      reply: { outcome: "undeliverable", reason: "recipient_offline" },
+    };
+    expect(reopened.authenticateReply(undeliverable)).toEqual({
+      ancestors: ["a"],
+      maxDepth: 2,
+      reply: {
+        agentId: "c",
+        sessionId: "c-session",
+        outcome: "undeliverable",
+        reason: "recipient_offline",
+      },
+    });
+    expect(
+      reopened.authenticateReply({
+        ...undeliverable,
+        key: `${admitted.key}:reply:1`,
+      }),
+    ).toBeUndefined();
     const withoutFacts: import("@fungi.computer/bird-dog").BirdDogMail = {
       key: reply.key,
       from: reply.from,
@@ -691,11 +744,14 @@ it("reads the existing correspondence receipt by request ID across reopen withou
     // Reading an unknown key is read-only: it neither reserves nor fences it.
     expect(correspondence.receipt(task.requestId)).toBeUndefined();
     const accepted = await correspondence.start(grant, task);
+    if (accepted.status !== "accepted")
+      throw new Error("recipient was expected to accept mail");
     expect(correspondence.receipt(task.requestId)).toEqual(accepted);
     const reopened = createFleetCorrespondence(options);
     expect(reopened.receipt(task.requestId)).toEqual({
       status: "accepted",
       commandId: "owner-issued-work",
+      sessionId: "child-main",
     });
     expect(reopened.receipt("other-request")).toBeUndefined();
     expect(await reopened.start(grant, task)).toEqual(accepted);

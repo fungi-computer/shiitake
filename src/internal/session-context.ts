@@ -10,6 +10,17 @@ import {
   readSessionModelPreference,
 } from "./woodstock/index.js";
 
+type CachedContext = Readonly<{
+  cursor: string | null | undefined;
+  preference: string;
+  value: SessionContext | undefined;
+}>;
+
+const contextByOwner = new WeakMap<
+  ShiitakeEffectOptions,
+  Map<string, CachedContext>
+>();
+
 /**
  * The context size compaction measures against the model's window, for the
  * Session's settled context: the next run starts from it. Null before the
@@ -33,26 +44,104 @@ function settledContextTokens(
 export function readSessionContext(
   options: ShiitakeEffectOptions,
   sessionId: string,
+  cursor: string | null,
+  cache = true,
 ): Effect.Effect<SessionContext | undefined> {
   return Effect.gen(function* () {
-    // A context too large to read safely has no footer figure.
-    const read = yield* Effect.result(
+    const savedPreference = yield* Effect.result(
       Effect.try({
-        try: () => ({
-          tokens: settledContextTokens(options.store, sessionId),
-          preference: readSessionModelPreference(options.store, sessionId),
-        }),
+        try: () => readSessionModelPreference(options.store, sessionId),
         catch: (error) => error,
       }),
     );
-    if (read._tag === "Failure" || read.success.tokens === null)
+    if (savedPreference._tag === "Failure") {
+      reportCatchFailure("session-context.preference", savedPreference.failure);
       return undefined;
-    const { tokens, preference } = read.success;
+    }
+    const preference = savedPreference.success;
+    const preferenceKey = JSON.stringify(preference);
+    const ownerCache =
+      contextByOwner.get(options) ?? new Map<string, CachedContext>();
+    contextByOwner.set(options, ownerCache);
+    const previous = cache ? ownerCache.get(sessionId) : undefined;
     const describe = options.model.describe;
-    if (describe === undefined) return Object.freeze({ tokens, window: null });
+    if (previous?.cursor === cursor && previous.preference === preferenceKey) {
+      if (previous.value === undefined || describe === undefined)
+        return previous.value;
+      const previousValue = previous.value;
+      // A null Session override follows a mutable Agent default. Check the
+      // selected window without decoding history again; a changed window is
+      // a distinct effective preference for this cursor.
+      return yield* describe({ sessionId, preference }).pipe(
+        Effect.map(({ contextWindow }) => {
+          if (previousValue.window === contextWindow) return previousValue;
+          const value = Object.freeze({
+            tokens: previousValue.tokens,
+            window: contextWindow,
+          });
+          if (cache && ownerCache.get(sessionId)?.cursor === cursor)
+            ownerCache.set(sessionId, {
+              cursor,
+              preference: preferenceKey,
+              value,
+            });
+          return value;
+        }),
+        Effect.catch((error) =>
+          Effect.sync(() => {
+            reportCatchFailure("session-context.describe", error);
+            return previousValue;
+          }),
+        ),
+      );
+    }
+
+    // At most one cached whole-window read per Session, cursor, and
+    // preference: a late describe may publish only while this cursor still
+    // owns the cache entry. Reads before the tip bypass the cache and each read
+    // the whole window. A cold-cache connection also reads the whole kept
+    // window.
+    const contextRead = yield* Effect.result(
+      Effect.try({
+        try: () => settledContextTokens(options.store, sessionId),
+        catch: (error) => error,
+      }),
+    );
+    if (contextRead._tag === "Failure") {
+      reportCatchFailure("session-context.figure", contextRead.failure);
+      return undefined;
+    }
+    const tokens = contextRead.success;
+    if (tokens === null) {
+      if (cache)
+        ownerCache.set(sessionId, {
+          cursor,
+          preference: preferenceKey,
+          value: undefined,
+        });
+      return undefined;
+    }
+    if (describe === undefined) {
+      const value = Object.freeze({ tokens, window: null });
+      if (cache)
+        ownerCache.set(sessionId, { cursor, preference: preferenceKey, value });
+      return value;
+    }
+    // Publish the decoded figure before yielding to the host's model
+    // description. Concurrent watchers then reuse these tokens rather than
+    // decoding the same Session window while `describe` is in flight.
+    if (cache)
+      ownerCache.set(sessionId, {
+        cursor,
+        preference: preferenceKey,
+        value: Object.freeze({ tokens, window: null }),
+      });
     // A null Session override follows a mutable Agent default. Resolve through
     // the host's turn-model selector on every read, without acquiring a turn.
-    const window = yield* describe({ sessionId, preference }).pipe(
+    const window = yield* describe({
+      sessionId,
+      preference,
+    }).pipe(
       Effect.map(({ contextWindow }) => contextWindow),
       Effect.catch((error) =>
         Effect.sync(() => {
@@ -61,6 +150,9 @@ export function readSessionContext(
         }),
       ),
     );
-    return Object.freeze({ tokens, window });
+    const value = Object.freeze({ tokens, window });
+    if (cache && ownerCache.get(sessionId)?.cursor === cursor)
+      ownerCache.set(sessionId, { cursor, preference: preferenceKey, value });
+    return value;
   });
 }

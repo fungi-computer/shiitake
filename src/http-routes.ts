@@ -26,6 +26,7 @@ import {
   decodeClientIdentity,
   decodeClientEventsQuery,
   decodeClientReadQuery,
+  decodeClientSettlementQuery,
   decodeClientSessionCommandRequest,
   decodeClientSessionCreationRequest,
   decodeClientPageCursor,
@@ -404,6 +405,32 @@ export function createShiitakeHttpRoutes(
           return context.body(null, 204);
         }
         return context.json(await session.command(command), 200);
+      },
+    )
+    .get(
+      "/sessions/:sessionId/settlement",
+      validator("query", (value, context) => {
+        const decoded = decodeClientSettlementQuery(value);
+        if (decoded._tag === "Failure")
+          return context.json(
+            toShiitakeErrorWire(
+              invalidRequest("Settlement request is invalid"),
+            ),
+            400,
+          );
+        return decoded.success;
+      }),
+      async (context) => {
+        const session = await resolveSession(
+          decodeClientSessionId(context.req.param("sessionId")),
+          context.get("shiitakeMeta"),
+        );
+        const { commandId, timeoutMs } = context.req.valid("query");
+        const settled = await session.readSettlement(commandId, {
+          timeoutMs,
+          signal: context.req.raw.signal,
+        });
+        return context.json(settled ?? null, 200);
       },
     )
     .get(

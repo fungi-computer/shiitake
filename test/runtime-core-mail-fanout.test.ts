@@ -374,6 +374,7 @@ it("hands BirdDog a cancelled settlement with the cancellation's metadata", asyn
       Effect.sync(() => {
         settlements.push(settlement);
       }),
+    postMail: () => Effect.void,
     drainOutbox: () => Effect.void,
     nextWakeAt: () => Effect.succeed(undefined),
   };
@@ -834,7 +835,10 @@ it("hands BirdDog the first canceller's opaque metadata across a store restart, 
 function verifiedReply(
   key: string,
   content: string,
-  reply: Omit<VerifiedAgentReply, "agentId" | "sessionId">,
+  reply: Omit<
+    Extract<VerifiedAgentReply, { commandId: string }>,
+    "agentId" | "sessionId"
+  >,
 ) {
   const mail: BirdDogMail = {
     key,

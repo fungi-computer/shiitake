@@ -14,6 +14,7 @@ import * as Stream from "effect/Stream";
 
 import {
   parseAccepted,
+  parseCommandSettlement,
   parseWithdrawResult,
   parseCancelResult,
   parseLatestPendingPrompt,
@@ -525,6 +526,23 @@ function makeRemoteEffectAgent(
               "Session read",
             );
           }),
+        ),
+      readSettlement: (commandId, timeoutMs = 0) =>
+        ensureOpen.pipe(
+          Effect.andThen(
+            request(
+              (signal) =>
+                fetch(
+                  `${addressedUrl}/settlement?${new URLSearchParams({
+                    commandId,
+                    timeoutMs: String(timeoutMs),
+                  }).toString()}`,
+                  { signal },
+                ),
+              parseCommandSettlement,
+              "Command settlement",
+            ),
+          ),
         ),
       subscribe: (input) =>
         Stream.unwrap(

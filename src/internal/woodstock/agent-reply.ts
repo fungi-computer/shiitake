@@ -1,4 +1,7 @@
-import { BirdDogReplySchema } from "@fungi.computer/bird-dog/effect";
+import {
+  SettledBirdDogReplySchema,
+  UndeliverableBirdDogReplySchema,
+} from "@fungi.computer/bird-dog/effect";
 import type { UserMessage } from "@fungi.computer/mule/effect";
 import * as Schema from "effect/Schema";
 
@@ -12,11 +15,18 @@ const Identifier = Schema.String.check(
  * the mail it sent: the replying Agent and Session plus BirdDog's settlement
  * facts. Only `acceptMail` stores it, and only the host passes it.
  */
-export const VerifiedAgentReplySchema = Schema.Struct({
-  agentId: Identifier,
-  sessionId: Identifier,
-  ...BirdDogReplySchema.fields,
-});
+export const VerifiedAgentReplySchema = Schema.Union([
+  Schema.Struct({
+    agentId: Identifier,
+    sessionId: Identifier,
+    ...SettledBirdDogReplySchema.fields,
+  }),
+  Schema.Struct({
+    agentId: Identifier,
+    sessionId: Schema.optionalKey(Identifier),
+    ...UndeliverableBirdDogReplySchema.fields,
+  }),
+]);
 /** A delegated Agent's reply after the admitting host authenticated it. */
 export type VerifiedAgentReply = typeof VerifiedAgentReplySchema.Type;
 
@@ -40,14 +50,16 @@ function attribute(value: string): string {
 }
 
 function opening(reply: VerifiedAgentReply): string {
-  const attributes: [string, string][] = [
-    ["agent_id", reply.agentId],
-    ["session_id", reply.sessionId],
-    ["command_id", reply.commandId],
-    ["outcome", reply.outcome],
-  ];
-  if (reply.diagnostic !== undefined)
+  const attributes: [string, string][] = [["agent_id", reply.agentId]];
+  if (reply.sessionId !== undefined)
+    attributes.push(["session_id", reply.sessionId]);
+  if (reply.outcome !== "undeliverable")
+    attributes.push(["command_id", reply.commandId]);
+  attributes.push(["outcome", reply.outcome]);
+  if (reply.outcome !== "undeliverable" && reply.diagnostic !== undefined)
     attributes.push(["diagnostic", reply.diagnostic]);
+  if (reply.outcome === "undeliverable")
+    attributes.push(["reason", reply.reason]);
   const rendered = attributes
     .map(([name, value]) => `${name}="${attribute(value)}"`)
     .join(" ");

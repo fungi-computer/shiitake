@@ -39,7 +39,7 @@ function asEffectAcquisition(
   });
   let shared: Pick<
     ModelAcquisitionEffect,
-    "model" | "release" | "failureReason" | "retryable"
+    "model" | "release" | "failureReason" | "providerError" | "retryable"
   > = {
     model: acquisition.model,
     release,
@@ -47,6 +47,8 @@ function asEffectAcquisition(
   };
   if (acquisition.failureReason !== undefined)
     shared = { ...shared, failureReason: acquisition.failureReason };
+  if (acquisition.providerError !== undefined)
+    shared = { ...shared, providerError: acquisition.providerError };
   if (acquisition.stream === undefined)
     return acquisition.retryAfterMs === undefined
       ? Object.freeze(shared)

@@ -18,6 +18,14 @@ import {
   sessionSnapshot,
 } from "./fixtures/client.fixture.js";
 
+it("decodes an activity-only Session frame", () => {
+  const frame = { kind: "activity", activity: runningActivity };
+  expect(parseSessionFrame(JSON.stringify(frame))).toEqual(frame);
+  expect(() =>
+    parseSessionFrame(JSON.stringify({ ...frame, extra: true })),
+  ).toThrow();
+});
+
 it("decodes bounded tool output and rejects excess wire keys", () => {
   const frame = {
     kind: "tool_output",

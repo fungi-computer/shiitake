@@ -1,4 +1,6 @@
 import type { SessionAttention } from "./session-attention.js";
+import type { CommandSettlement } from "./internal/contracts.js";
+export type { CommandSettlement } from "./internal/contracts.js";
 export { type SessionAttention } from "./session-attention.js";
 import type { SandboxFailureEvent } from "@fungi.computer/mycelium";
 import type { ModelPreference } from "./internal/model-preference.js";
@@ -34,7 +36,10 @@ export {
 
 export {
   AcceptedSchema,
+  DelegationReceiptSchema,
+  HeldSchema,
   parseAccepted,
+  parseDelegationReceipt,
   parseCancelResult,
   parseLatestPendingPrompt,
   parseWithdrawResult,
@@ -64,7 +69,19 @@ export type Accepted = Readonly<{
   status: "accepted";
   /** Owner-issued durable identity for the accepted work. */
   commandId: string;
+  /** The recipient's Session, when this is delegated mail acceptance. */
+  sessionId?: string;
 }>;
+
+/** Durable relay custody, not acceptance of a command by the recipient. */
+export type Held = Readonly<{
+  status: "held";
+  reason: "recipient_offline";
+  message: "waiting: recipient offline";
+}>;
+
+/** A delegation send can be accepted by the Agent or held by its relay. */
+export type DelegationReceipt = Accepted | Held;
 
 /**
  * Cancelling found nothing left to cancel: the command is unknown to this
@@ -373,12 +390,18 @@ export type SessionSnapshot = Readonly<{
   extensions: SessionExtensionSlots;
   /** Open requests for human attention from extensions. */
   attention: readonly SessionAttention[];
-  /** Context use at the cursor; absent until the Session has context. */
+  /** Context use at the tip; before reads carry this tip figure too, and it
+   * is absent before the Session has context. */
   context?: SessionContext;
 }>;
 
 /** One bounded replay or live frame. */
 export type SessionFrame =
+  | Readonly<{
+      /** Process-local activity change for the Session's current queue head. */
+      kind: "activity";
+      activity: SessionActivity;
+    }>
   | Readonly<{
       kind: "tool_output";
       toolOutput: readonly SessionToolOutput[];
@@ -409,7 +432,12 @@ export type SessionFrame =
       extensions: SessionExtensionSlots;
       /** Open requests for human attention from extensions. */
       attention: readonly SessionAttention[];
-      /** Context use at this cursor; absent until the Session has context. */
+      /**
+       * Context use at the Session tip when the update moved history and is
+       * the final page; live pages with more to come and non-final replay pages
+       * carry no figure. Absent before the Session has context; absent figures
+       * leave the last one in place.
+       */
       context?: SessionContext;
     }>
   | Readonly<{
@@ -496,6 +524,15 @@ export type ShiitakeSession = Readonly<{
   }>;
   /** Read a bounded durable baseline. */
   read: (input?: ReadOptions) => Promise<SessionSnapshot>;
+  /**
+   * Read one exact command's settlement, independent of the selected lineage.
+   * Wait at most timeoutMs (0–30000, default 0) for a settlement hint.
+   * Timeout returns undefined; abort releases only the read, never the work.
+   */
+  readSettlement: (
+    commandId: string,
+    options?: Readonly<{ timeoutMs?: number; signal?: AbortSignal }>,
+  ) => Promise<CommandSettlement | undefined>;
   /** Subscribe to strict-after replay and live frames. */
   subscribe: (input: SubscribeOptions) => AsyncIterable<SessionFrame>;
   /** Open a race-safe baseline plus live changes resource. */

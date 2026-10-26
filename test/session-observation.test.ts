@@ -3,10 +3,11 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 
-import { Shiitake } from "../src/index.js";
+import { Shiitake, type SessionFrame } from "../src/index.js";
 import {
   mergeObservationSignals,
   openObservationKernel,
+  publishAgentExecutionChange,
   publishOwnerObservation,
 } from "../src/internal/observation-kernel.js";
 import {
@@ -41,6 +42,28 @@ it("coalesces progress wakes without hiding a durable observation", async () => 
     expect(await Effect.runPromise(first.pollSignal)).toBe("closed");
   } finally {
     second.close();
+    await Effect.runPromise(kernel.close);
+    fixture.close();
+  }
+});
+
+it("keeps settlement-only observations isolated from S3 activity wakes", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const kernel = openObservationKernel(fixture.owner);
+  const registration = await Effect.runPromise(
+    kernel.register("settlement-only", "settlement"),
+  );
+  try {
+    publishAgentExecutionChange(fixture.owner);
+    expect(await Effect.runPromise(registration.pollSignal)).toBeUndefined();
+
+    publishOwnerObservation(fixture.owner, "settlement-only", "activity");
+    expect(await Effect.runPromise(registration.pollSignal)).toBeUndefined();
+
+    publishOwnerObservation(fixture.owner, "settlement-only", "settlement");
+    expect(await Effect.runPromise(registration.pollSignal)).toBe("durable");
+  } finally {
+    registration.close();
     await Effect.runPromise(kernel.close);
     fixture.close();
   }
@@ -207,21 +230,152 @@ it("observes admissions across the watch baseline race without a conversation cu
   }
 });
 
-it("wakes queued Session observers when Agent-wide execution changes", async () => {
+it("wakes only queued Session observers when Agent-wide execution changes", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const kernel = openObservationKernel(fixture.owner);
   const a = await Effect.runPromise(kernel.register("a"));
   const b = await Effect.runPromise(kernel.register("b"));
   try {
+    a.setQueued(true);
+    b.setQueued(false);
     publishOwnerObservation(fixture.owner, "a");
     expect(await Effect.runPromise(a.pollSignal)).toBe("durable");
     expect(await Effect.runPromise(b.pollSignal)).toBeUndefined();
-    publishOwnerObservation(fixture.owner, null);
-    expect(await Effect.runPromise(a.pollSignal)).toBe("durable");
-    expect(await Effect.runPromise(b.pollSignal)).toBe("durable");
+    publishAgentExecutionChange(fixture.owner);
+    expect(await Effect.runPromise(a.pollSignal)).toBe("activity");
+    expect(await Effect.runPromise(b.pollSignal)).toBeUndefined();
   } finally {
     a.close();
     b.close();
+    await Effect.runPromise(kernel.close);
+    fixture.close();
+  }
+});
+
+it("keeps a wake received during replay paging from stalling the queued Session", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = createCompatibilityRuntimeHost();
+  const faux = fauxModel([]);
+  const agent = await Shiitake.make({
+    store: fixture.owner,
+    extensions: noExtensions,
+    runtime: runtime.runtime,
+    instructions: {
+      load: () =>
+        Promise.resolve({ revision: "replay-stall-v1", text: "Answer." }),
+    },
+    model: {
+      acquire: () =>
+        Promise.resolve({
+          model: faux.model,
+          retryable: () => false,
+          stream: faux.stream,
+          release: () => Promise.resolve(),
+        }),
+    },
+  });
+  const history = agent.session("replay-history");
+  const blocker = agent.session("replay-blocker");
+  let releaseBlocker: () => void = () => undefined;
+  let markBlockerStarted: () => void = () => undefined;
+  const blockerGate = new Promise<void>((resolve) => {
+    releaseBlocker = resolve;
+  });
+  const blockerStarted = new Promise<void>((resolve) => {
+    markBlockerStarted = resolve;
+  });
+  let execution: Promise<void> | undefined;
+  let changes: AsyncIterator<SessionFrame> | undefined;
+
+  try {
+    faux.setResponses([fauxAssistantMessage("history reply 0")]);
+    await history.command({
+      delivery: "followUp",
+      type: "prompt",
+      requestId: "history-0",
+      text: "History turn 0",
+    });
+    await runtime.runNext();
+    const earlyCursor = (await history.read()).cursor;
+    expect(earlyCursor).not.toBeNull();
+    if (earlyCursor === null) throw new Error("History cursor was not created");
+
+    for (let turn = 1; turn < 70; turn += 1) {
+      faux.setResponses([
+        fauxAssistantMessage(`history reply ${String(turn)}`),
+      ]);
+      await history.command({
+        delivery: "followUp",
+        type: "prompt",
+        requestId: `history-${String(turn)}`,
+        text: `History turn ${String(turn)}`,
+      });
+      await runtime.runNext();
+    }
+
+    faux.setResponses([
+      async () => {
+        markBlockerStarted();
+        await blockerGate;
+        return fauxAssistantMessage("blocker released");
+      },
+    ]);
+    await blocker.command({
+      delivery: "followUp",
+      type: "prompt",
+      requestId: "blocker",
+      text: "Hold the Agent slot.",
+    });
+    execution = runtime.runNext();
+    await blockerStarted;
+
+    await history.command({
+      delivery: "followUp",
+      type: "prompt",
+      requestId: "queued-history",
+      text: "Wait behind the blocker.",
+    });
+    expect((await history.read()).activity.queue.state).toBe("queued");
+
+    const subscription = history.subscribe({ after: earlyCursor });
+    changes = subscription[Symbol.asyncIterator]();
+    const firstReplay = await changes.next();
+    expect(firstReplay.done).toBe(false);
+    if (firstReplay.done) throw new Error("Replay ended before the first page");
+    expect(firstReplay.value.kind).toBe("update");
+    if (firstReplay.value.kind !== "update")
+      throw new Error("Expected a replay update");
+    expect(firstReplay.value.delivery).toBe("replay");
+    expect(firstReplay.value.messages.length).toBeGreaterThan(0);
+
+    releaseBlocker();
+    await execution;
+    const nextReplay = await changes.next();
+    expect(nextReplay.done).toBe(false);
+    if (nextReplay.done) throw new Error("Replay ended after the wake");
+    expect(nextReplay.value.kind).toBe("update");
+    if (nextReplay.value.kind !== "update")
+      throw new Error("Expected replay paging to continue after the wake");
+    expect(nextReplay.value.delivery).toBe("replay");
+    expect(nextReplay.value.messages.length).toBeGreaterThan(0);
+  } finally {
+    releaseBlocker();
+    if (execution !== undefined) await execution;
+    await changes?.return?.();
+    await agent.close();
+    fixture.close();
+  }
+}, 20_000);
+
+it("retains execution-change wakes during the registration window", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const kernel = openObservationKernel(fixture.owner);
+  const registration = await Effect.runPromise(kernel.register("registering"));
+  try {
+    publishAgentExecutionChange(fixture.owner);
+    expect(await Effect.runPromise(registration.pollSignal)).toBe("activity");
+  } finally {
+    registration.close();
     await Effect.runPromise(kernel.close);
     fixture.close();
   }

@@ -14,6 +14,7 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["test/**/*.test.ts"],
+    exclude: ["test/load/**", "**/node_modules/**"],
     // compaction-background.test.ts collects garbage to prove the summarized
     // prefix is unreachable before placement reads the context again.
     execArgv: ["--expose-gc"],

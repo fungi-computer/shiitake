@@ -36,6 +36,7 @@ type ModelAcquisitionEffect = Readonly<{
   retryAfterMs?: (message) => number | undefined;
   retryable: (message) => boolean;
   failureReason?: (message) => string | undefined;
+  providerError?: (message) => string | undefined;
   release: Effect.Effect<void, ShiitakeError>;
 }>;
 ```
@@ -322,6 +323,10 @@ type ShiitakeEffectSession = Readonly<{
     set: (preference) => Effect.Effect<void, ShiitakeError>;
   }>;
   read: (input?) => Effect.Effect<SessionSnapshot, ShiitakeError>;
+  readSettlement: (
+    commandId,
+    timeoutMs?,
+  ) => Effect.Effect<CommandSettlement | undefined, ShiitakeError>;
   subscribe: (input) => Stream.Stream<SessionFrame, ShiitakeError>;
   watch: (input?) => Effect.Effect<ShiitakeEffectWatch, ShiitakeError>;
 }>;

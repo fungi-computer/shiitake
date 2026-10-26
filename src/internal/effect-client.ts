@@ -57,8 +57,9 @@ export function liftTools(
 /** Run one Shiitake Effect through its sole Promise error adaptation. */
 export function runShiitakePromise<A, E>(
   effect: Effect.Effect<A, E>,
+  options?: Readonly<{ signal?: AbortSignal }>,
 ): Promise<A> {
-  return Effect.runPromiseExit(effect).then((exit) => {
+  return Effect.runPromiseExit(effect, options).then((exit) => {
     if (Exit.isSuccess(exit)) return exit.value;
 
     const failure = Option.getOrUndefined(Cause.findErrorOption(exit.cause));
@@ -138,6 +139,11 @@ function sessionFacade(
       });
     },
     read: (input) => runShiitakePromise(session.read(input)),
+    readSettlement: (commandId, options) =>
+      runShiitakePromise(
+        session.readSettlement(commandId, options?.timeoutMs),
+        options,
+      ),
     subscribe: (input) => observationAsyncIterable(session.subscribe(input)),
     watch: (input) =>
       runShiitakePromise(session.watch(input)).then((watch): SessionWatch =>

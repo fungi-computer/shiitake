@@ -551,6 +551,9 @@ export type CloudflareShiitake = ShiitakeOwnerAgent &
       mail: BirdDogMail,
       meta?: Json,
       reply?: VerifiedAgentReply,
+      stageAcceptedNotice?: (mail: BirdDogMail) => void,
+      /** Grants for a new Session, written in the acceptance transaction. */
+      sessionGrantDelivery?: (sessionId: string) => GrantsDelivery,
     ) => Promise<Accepted>;
     /** Deliver the native owner alarm to the bound runtime. */
     alarm: () => Promise<void>;
@@ -622,12 +625,22 @@ export function makeCloudflareShiitake(
             mail: BirdDogMail,
             meta?: Json,
             reply?: VerifiedAgentReply,
+            stageAcceptedNotice?: (mail: BirdDogMail) => void,
+            sessionGrantDelivery?: (sessionId: string) => GrantsDelivery,
           ) => {
             if (options.mailRoom === undefined)
               return Promise.reject(
                 runtimeFailure("unavailable", "Addressed mail is unavailable"),
               );
-            return runShiitakePromise(acceptMail(mail, meta, reply));
+            return runShiitakePromise(
+              acceptMail(
+                mail,
+                meta,
+                reply,
+                stageAcceptedNotice,
+                sessionGrantDelivery,
+              ),
+            );
           },
           alarm: host.alarm,
           activeSessions: () => runShiitakePromise(activeSessions),

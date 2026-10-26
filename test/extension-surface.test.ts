@@ -178,6 +178,7 @@ it("shares the earliest wake between extension timers and reply retries", async 
     grantAll([recorderExtension()]),
     {
       fanOut: () => Effect.void,
+      postMail: () => Effect.void,
       drainOutbox: () => Effect.void,
       nextWakeAt: () => Effect.sync(() => mailAt),
     },

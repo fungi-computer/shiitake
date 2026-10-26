@@ -282,15 +282,16 @@ function harness(
       } finally {
         active -= 1;
       }
-      return input.summaryFails === true
-        ? fauxAssistantMessage("", {
-            stopReason: "error",
-            errorMessage: "summarizer refused the request",
-          })
-        : fauxAssistantMessage(
-            input.summaryText?.(summaryRequests.length) ??
-              `background summary ${String(summaryRequests.length)}`,
-          );
+      if (input.summaryFails === true) {
+        return fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "summarizer refused the request",
+        });
+      }
+      return fauxAssistantMessage(
+        input.summaryText?.(summaryRequests.length) ??
+          "background summary " + String(summaryRequests.length),
+      );
     }
     mainRequests.push(context);
     if (mainRequests.length === 1)

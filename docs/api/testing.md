@@ -84,7 +84,7 @@ Optional canonical Agent inputs and a borrowed owner; defaults are in-memory.
 type MemoryHost = Readonly<{
   agent: ShiitakeOwnerAgent;
   reconcile: () => Promise<void>;
-  settle: (sessionId, maxTicks?) => Promise<SessionSnapshot>;
+  settle: (sessionId, maxTicks?, beforeRead?) => Promise<SessionSnapshot>;
   close: () => Promise<void>;
 }>;
 ```
@@ -154,7 +154,7 @@ Script one model turn that replies with the system prompt it received.
 function memoryHost(options?): Promise<Readonly<{
   agent: ShiitakeOwnerAgent;
   reconcile: () => Promise<void>;
-  settle: (sessionId, maxTicks?) => Promise<Readonly<{
+  settle: (sessionId, maxTicks?, beforeRead?) => Promise<Readonly<{
      sessionId: string;
      cursor: string | null;
      hasMore: boolean;
@@ -237,7 +237,7 @@ privileges. No submitted JavaScript is evaluated by this helper.
 
 `Promise`\<`Readonly`\<\{ `agent`:
 [`ShiitakeOwnerAgent`](index.md#shiitakeowneragent); `reconcile`: () =>
-`Promise`\<`void`\>; `settle`: (`sessionId`, `maxTicks?`) =>
+`Promise`\<`void`\>; `settle`: (`sessionId`, `maxTicks?`, `beforeRead?`) =>
 `Promise`\<`Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`;
 `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly
 `Readonly`\<\{ `requestId?`: ... \| ...; `meta?`: ... \| ...; `data?`: ... \|

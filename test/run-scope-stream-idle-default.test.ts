@@ -1,5 +1,6 @@
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { expect, it } from "vitest";
@@ -11,16 +12,14 @@ import {
   noExtensions,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
-// `run-scope.ts` defaults the live stream idle timeout to Mule's
-// `piHttpIdleTimeoutMs` (300 000 ms, pinned by `packages/mule/test/
-// retry-policy.test.ts`) when the host does not configure
-// `modelStreamIdleTimeoutMs`, and honors an explicit override. This proves
-// the override path directly with a short real deadline; the mechanism
-// itself (`withModelStreamDeadline`) is Mule's, already covered in
-// `packages/mule/test/live-controls.test.ts`.
-it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
+// Mule owns the live stream deadlines and honors a tighter host
+// `modelStreamIdleTimeoutMs` override. This proves the override and Session
+// continuation through Shiitake; Mule tests the four deadline modes directly.
+it("bounds four attempts then continues the same Session without replaying failed assistant turns", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const faux = fauxModel([]);
+  const faux = fauxModel([fauxAssistantMessage("recovered")]);
+  let attempts = 0;
+  const followUpAssistantTurns: unknown[] = [];
   let reconcile: Effect.Effect<void, ShiitakeError> | undefined;
   const runtime: RuntimeHostEffect = {
     bind: (input) =>
@@ -35,13 +34,19 @@ it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
   };
   try {
     const startedAt = Date.now();
-    const snapshot = await Effect.runPromise(
+    const [failed, recovered] = await Effect.runPromise(
       Effect.gen(function* () {
         const agent = yield* makeShiitake({
           store: fixture.owner,
           extensions: noExtensions,
           runtime,
           modelStreamIdleTimeoutMs: 20,
+          retry: {
+            enabled: true,
+            maxRetries: 3,
+            baseDelayMs: 1,
+            maxAgentDelayMs: 1,
+          },
           instructions: {
             load: () => Effect.succeed({ revision: "v1", text: "Answer." }),
           },
@@ -50,8 +55,19 @@ it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
               Effect.succeed({
                 model: faux.model,
                 retryable: () => false,
-                // Never emits and never ends: only the idle deadline settles it.
-                stream: () => createAssistantMessageEventStream(),
+                stream: (model, context, options) => {
+                  attempts++;
+                  if (attempts > 4) {
+                    followUpAssistantTurns.push(
+                      ...context.messages.filter(
+                        (message) => message.role === "assistant",
+                      ),
+                    );
+                    return faux.stream(model, context, options);
+                  }
+                  // Never emits or ends: Mule's first-event deadline settles it.
+                  return createAssistantMessageEventStream();
+                },
                 release: Effect.void,
               }),
           },
@@ -67,21 +83,41 @@ it("honors an explicit modelStreamIdleTimeoutMs host override", async () => {
         if (operation === undefined) return yield* Effect.die("no reconciler");
         const fiber = yield* Effect.forkChild(operation);
         yield* Fiber.join(fiber);
-        const result = yield* session.read();
+        const first = yield* session.read();
+        yield* session.command({
+          requestId: "stream-idle-override-follow-up",
+          delivery: "followUp",
+          type: "prompt",
+          text: "Continue.",
+        });
+        const followUp = yield* Effect.forkChild(operation);
+        yield* Fiber.join(followUp);
+        const second = yield* session.read();
         yield* agent.close;
-        return result;
+        return [first, second] as const;
       }),
     );
 
-    // The override (20 ms) settles the run almost immediately; Mule's
-    // undefaulted idle timeout would otherwise never fire on this stream,
-    // so the short wall-clock bound itself proves the override reached
-    // Mule, not the default.
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
-    expect(snapshot.activity.queue).toEqual({ state: "idle" });
-    expect(snapshot.terminals.at(-1)?.outcome).toMatch(
-      /^(failed|interrupted)$/u,
+    // The override (20 ms) settles four attempts well before Mule's default
+    // first-event deadline (60 s), proving the host's override reached Mule.
+    expect(Date.now() - startedAt).toBeLessThan(8_000);
+    expect(attempts).toBe(5);
+    expect(failed.activity.queue).toEqual({ state: "idle" });
+    expect(failed.terminals.at(-1)?.outcome).toBe("failed");
+    expect(failed.terminals.at(-1)?.diagnostic).toMatch(
+      /failed 4 times on this conversation: Model first event timed out after \d+ ms/u,
     );
+    expect(followUpAssistantTurns).toEqual([]);
+    expect(recovered.terminals.at(-1)?.outcome).toBe("completed");
+    expect(
+      recovered.messages.some(
+        (message) =>
+          message.value.role === "assistant" &&
+          message.value.content.some(
+            (part) => part.type === "text" && part.text === "recovered",
+          ),
+      ),
+    ).toBe(true);
   } finally {
     fixture.close();
   }

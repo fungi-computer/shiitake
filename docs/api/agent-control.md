@@ -219,7 +219,12 @@ Host-only identity and admitted command metadata for one delegated send.
 ```ts
 type AgentControlDirectory = Readonly<{
   list: (signal, options?) => Promise<readonly AgentControlAgent[]>;
-  send?: (input, sourceSessionId, signal, invocation?) => Promise<Accepted>;
+  send?: (
+    input,
+    sourceSessionId,
+    signal,
+    invocation?,
+  ) => Promise<Accepted | Held>;
   recall?: (input, sourceSessionId, signal) => Promise<CancelResult>;
   create?: (input, signal) => Promise<AgentControlAgent>;
   setModel?: (input, signal) => Promise<void>;
@@ -262,10 +267,10 @@ report back, its store predates the current schema, or the Agent is archived.
 
 ## Functions
 
-### waitForAgentTerminal()
+### waitForAgentSettlement()
 
 ```ts
-function waitForAgentTerminal(
+function waitForAgentSettlement(
   session,
   commandId,
   timeoutMs,
@@ -273,16 +278,16 @@ function waitForAgentTerminal(
   startedAt?,
 ): Promise<
   Readonly<{
-    commandId: string;
-    outcome: "completed" | "failed" | "cancelled" | "interrupted";
-    sequence: number;
-    diagnostic: string | null;
-    meta?: Json;
+    acceptedSender: string | null;
+    terminal: SessionTerminal;
+    content: string;
+    usage: readonly Pick<AssistantMessage, "model" | "provider" | "usage">[];
+    toolCalls: number;
   }>
 >;
 ```
 
-Observe one durable terminal; timeout or abort closes observation, not the work.
+Await one exact durable terminal without opening a transcript observation.
 
 #### Parameters
 
@@ -296,9 +301,10 @@ Observe one durable terminal; timeout or abort closes observation, not the work.
 
 #### Returns
 
-`Promise`\<`Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \|
-`"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`;
-`diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>\>
+`Promise`\<`Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
+[`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
+readonly `Pick`\<`AssistantMessage`, `"model"` \| `"provider"` \| `"usage"`\>[];
+`toolCalls`: `number`; \}\>\>
 
 ---
 

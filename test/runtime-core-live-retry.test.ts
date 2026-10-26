@@ -1,6 +1,7 @@
 import { fauxModel } from "@fungi.computer/mule/testing";
 import type { Context } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { inspect } from "node:util";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -54,10 +55,11 @@ it("keeps retained Pi retry inside one Watchdog execution and records it", async
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
   const requests: Context[] = [];
+  const privateText = "503 Service Unavailable; sk-live-private";
   faux.setResponses([
     fauxAssistantMessage("", {
       stopReason: "error",
-      errorMessage: "503 Service Unavailable",
+      errorMessage: privateText,
     }),
     fauxAssistantMessage("recovered answer", {
       responseId: "recovered-provider-response",
@@ -138,9 +140,17 @@ it("keeps retained Pi retry inside one Watchdog execution and records it", async
         attempt: 1,
         maxAttempts: 3,
         delayMs: 2_000,
-        errorMessage: "503 Service Unavailable",
       },
     });
+    expect(result.retrySnapshot.activity.retry?.errorMessage).toContain(
+      "reason_unavailable: run=",
+    );
+    expect(result.retrySnapshot.activity.retry?.errorMessage).toContain(
+      "Model request failed. Retry the request.",
+    );
+    expect(result.retrySnapshot.activity.retry?.errorMessage).toContain(
+      "provider=faux; model=" + faux.model.id,
+    );
     expect(requestMessages(requests[1])).toEqual([
       expect.objectContaining({
         role: "user",
@@ -199,9 +209,21 @@ it("keeps retained Pi retry inside one Watchdog execution and records it", async
         attempt: 1,
         maxAttempts: 3,
         delayMs: 2_000,
-        errorMessage: "503 Service Unavailable",
       },
     });
+    expect(JSON.stringify(retryEntries[0]?.entry)).toContain(
+      "reason_unavailable: run=",
+    );
+    expect(
+      result.snapshot.messages.find(({ value }) => value.role === "assistant")
+        ?.value,
+    ).toMatchObject({
+      errorMessage: privateText,
+    });
+    expect(JSON.stringify(retryEntries)).not.toContain("sk-live-private");
+    expect(JSON.stringify(result.retrySnapshot.activity)).not.toContain(
+      "sk-live-private",
+    );
     expect(retryEntries[1]?.entry).toMatchObject({
       workId,
       event: { type: "auto_retry_attempt", attempt: 1 },
@@ -226,13 +248,15 @@ it("keeps retained Pi retry inside one Watchdog execution and records it", async
 it("settles exhausted provider retries as a typed stopped cause", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
+  const privateText = "503 Service Unavailable; sk-live-private-exhausted";
+  const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
   // Pi coding-agent's default policy (`piCodingAgentRetryDefaults`): 3
   // retries, 4 attempts total.
   faux.setResponses(
     Array.from({ length: 4 }, () =>
       fauxAssistantMessage("", {
         stopReason: "error",
-        errorMessage: "503 Service Unavailable",
+        errorMessage: privateText,
       }),
     ),
   );
@@ -316,10 +340,30 @@ it("settles exhausted provider retries as a typed stopped cause", async () => {
     expect(snapshot.terminals[0]?.diagnostic).toContain(
       `model=${faux.model.id}`,
     );
-    expect(snapshot.terminals[0]?.diagnostic).not.toContain(
-      "503 Service Unavailable",
+    expect(snapshot.terminals[0]?.diagnostic).not.toContain(privateText);
+    expect(snapshot.terminals[0]?.diagnostic?.length).toBeLessThanOrEqual(200);
+    expect(
+      snapshot.messages.filter(({ value }) => value.role === "assistant"),
+    ).toHaveLength(4);
+    expect(
+      snapshot.messages.filter(({ value }) => value.role === "assistant").at(-1)
+        ?.value,
+    ).toMatchObject({ errorMessage: privateText });
+    expect(JSON.stringify(snapshot.activity)).not.toContain(privateText);
+    expect(JSON.stringify(logs.mock.calls)).not.toContain(privateText);
+    expect(inspect(logs.mock.calls, { depth: null })).not.toContain(
+      privateText,
     );
+    const entries = readSelectedPath(fixture.owner, {
+      sessionId: "exhausted-retry-session",
+    });
+    expect(
+      JSON.stringify(
+        entries.filter(({ entry }) => entry.kind === "live_retry"),
+      ),
+    ).not.toContain(privateText);
   } finally {
+    logs.mockRestore();
     fixture.close();
   }
 }, 30_000);
@@ -433,9 +477,11 @@ it("finishes the owned typed retry before the cancelled run settles", async () =
         success: false,
         // The owned retry reports the failed attempt that opened its backoff,
         // not a cancellation phrase or a fabricated second provider attempt.
-        finalError: "503 Service Unavailable",
       },
     });
+    expect(JSON.stringify(retryEntries.at(-1)?.entry)).toContain(
+      "reason_unavailable: run=",
+    );
     expect(
       fixture.owner.sql
         .exec(

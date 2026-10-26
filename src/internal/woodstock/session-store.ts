@@ -1383,31 +1383,41 @@ export function createStoredSession(
   /** Refuses a new Session under storage pressure; replays skip it. */
   admitNew: () => void,
 ): string {
-  return owner.transactionSync(() => {
-    const existing = owner.sql
-      .exec(
-        "SELECT session_id FROM session_creation_receipts WHERE request_id = ?",
-        requestId,
-      )
-      .toArray();
-    const first = existing[0];
-    if (first !== undefined) {
-      const decoded = decodeSessionCreationReceiptRow(first);
-      if (decoded._tag === "Failure")
-        throw unavailable("Session creation receipt is invalid");
-      return decoded.success.session_id;
-    }
+  return owner.transactionSync(() =>
+    createStoredSessionWithinTransaction(owner, requestId, admitNew),
+  );
+}
 
-    admitNew();
-    const sessionId = sessionIds.session.generate();
-    ensureSession(owner, sessionId);
-    owner.sql.exec(
-      "INSERT INTO session_creation_receipts (request_id, session_id) VALUES (?, ?)",
+/** Reserve a Session while the caller owns the enclosing SQLite transaction. */
+export function createStoredSessionWithinTransaction(
+  owner: SqliteOwner,
+  requestId: string,
+  /** Refuses a new Session under storage pressure; replays skip it. */
+  admitNew: () => void,
+): string {
+  const existing = owner.sql
+    .exec(
+      "SELECT session_id FROM session_creation_receipts WHERE request_id = ?",
       requestId,
-      sessionId,
-    );
-    return sessionId;
-  });
+    )
+    .toArray();
+  const first = existing[0];
+  if (first !== undefined) {
+    const decoded = decodeSessionCreationReceiptRow(first);
+    if (decoded._tag === "Failure")
+      throw unavailable("Session creation receipt is invalid");
+    return decoded.success.session_id;
+  }
+
+  admitNew();
+  const sessionId = sessionIds.session.generate();
+  ensureSession(owner, sessionId);
+  owner.sql.exec(
+    "INSERT INTO session_creation_receipts (request_id, session_id) VALUES (?, ?)",
+    requestId,
+    sessionId,
+  );
+  return sessionId;
 }
 
 /**
@@ -3556,9 +3566,12 @@ function sameReply(
   return (
     left?.agentId === right?.agentId &&
     left?.sessionId === right?.sessionId &&
-    left?.commandId === right?.commandId &&
     left?.outcome === right?.outcome &&
-    left?.diagnostic === right?.diagnostic
+    (left?.outcome === "undeliverable"
+      ? right?.outcome === "undeliverable" && left.reason === right.reason
+      : right?.outcome !== "undeliverable" &&
+        left?.commandId === right?.commandId &&
+        left?.diagnostic === right?.diagnostic)
   );
 }
 

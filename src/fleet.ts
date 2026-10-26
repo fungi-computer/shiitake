@@ -1,6 +1,5 @@
-import { SessionTerminalSchema } from "./client-wire.js";
+export { commandSettlementSchema } from "./client-wire.js";
 import {
-  usage,
   createFleetDirectoryStore,
   createFleetDelegationStore,
   type VerifiedAgentReply,
@@ -10,17 +9,56 @@ import { pending, type Pending } from "@fungi.computer/agar";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import { BirdDogMailSchema } from "@fungi.computer/bird-dog/effect";
 import * as Schema from "effect/Schema";
-import { parseAccepted, type Accepted, type ShiitakeAgent } from "./client.js";
+import {
+  parseAccepted,
+  parseDelegationReceipt,
+  type Accepted,
+  type DelegationReceipt,
+  type Held,
+  type ShiitakeAgent,
+} from "./client.js";
 import type { Json } from "./extensions.js";
 import { checkHostMeta } from "./internal/host-meta.js";
 import type { WatchdogSqliteOwner } from "@fungi.computer/watchdog";
 import { defineIdFamily, type CairnId } from "@fungi.computer/cairn/id";
+import { deterministicReplayKey } from "@fungi.computer/cairn";
 import { z } from "zod";
 import {
   authorMeta,
   type AuthorMeta,
   FungiMessageMetaSchema,
 } from "@fungi.computer/agar/agents";
+
+/** Inputs shared by Local and hosted delegation request identity. */
+export type AgentDelegationRequestKeyInput = Readonly<{
+  owner:
+    | Readonly<{ kind: "local"; agentId: string }>
+    | Readonly<{ kind: "hosted"; scopeId: string; agentId: string }>;
+  sourceSessionId: string;
+  targetAgentId: string;
+  requestId: string;
+}>;
+
+/**
+ * One idempotency identity for a caller-owned delegation request.
+ * The target Session is deliberately excluded: a sessionless send learns it
+ * only after acceptance, when recall must still resolve the original receipt.
+ */
+export async function agentDelegationRequestKey(
+  input: AgentDelegationRequestKeyInput,
+): Promise<string> {
+  const ownerIdentity =
+    input.owner.kind === "hosted"
+      ? [input.owner.scopeId, input.owner.agentId]
+      : [input.owner.agentId];
+  return deterministicReplayKey("agent-delegation-request", [
+    input.owner.kind,
+    ...ownerIdentity,
+    input.sourceSessionId,
+    input.targetAgentId,
+    input.requestId,
+  ]);
+}
 
 const identity = z.string().min(1).max(256);
 /** Operations explicitly admitted by the host. */
@@ -360,17 +398,6 @@ export const agentDelegationTaskSchema = z.lazy(() =>
 );
 /** A caller reuses this task unchanged while polling Pending. */
 export type AgentDelegationTask = z.infer<typeof agentDelegationTaskSchema>;
-/** Exact host facts encoded over internal transports, without transcript content. */
-export const commandSettlementSchema: Schema.Codec<CommandSettlement> =
-  Schema.Struct({
-    acceptedSender: Schema.NullOr(Schema.String),
-    terminal: SessionTerminalSchema,
-    content: Schema.String,
-    usage: Schema.Array(
-      Schema.Struct({ provider: Schema.String, model: Schema.String, usage }),
-    ),
-    toolCalls: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  });
 /** Exact settled Session facts, including Pi usage and tool-call records. */
 export type AgentDelegationOutcome = Readonly<{
   kind: "settled";
@@ -382,7 +409,7 @@ export type AgentDelegationOutcome = Readonly<{
 export type FleetDelegationOptions = Readonly<{
   storage: WatchdogSqliteOwner;
   /** Admit the frozen addressed mail through the destination owner. */
-  deliver: (mail: BirdDogMail) => Promise<Accepted>;
+  deliver: (mail: BirdDogMail) => Promise<DelegationReceipt>;
   /** Read exact work facts at the target owner, independent of transcript selection. */
   readSettlement: (
     agentId: string,
@@ -507,12 +534,27 @@ const delegationRowSchema = z.lazy(() =>
   z.strictObject({
     input: z.string(),
     mail: z.string(),
+    state: z.enum(["pending", "held", "accepted"]),
     receipt: z.string().nullable(),
   }),
 );
+const heldRecipientOffline: Held = {
+  status: "held",
+  reason: "recipient_offline",
+  message: "waiting: recipient offline",
+};
 const decodeMail = Schema.decodeUnknownSync(
   Schema.fromJsonString(BirdDogMailSchema),
 );
+
+function bindRecipientSession(mail: BirdDogMail, sessionId: string) {
+  if (mail.from.sessionId === undefined)
+    throw new DirectoryError(503, "partial_init");
+  return {
+    ...mail,
+    to: { ...mail.to, sessionId },
+  } satisfies BirdDogMail;
+}
 
 /**
  * Delegated work an owner still waits on; `unreadable` says why its state
@@ -541,7 +583,7 @@ export function createFleetCorrespondence(
   async function start(
     grant: AgentGrant,
     raw: AgentDelegationTask,
-  ): Promise<Accepted> {
+  ): Promise<DelegationReceipt> {
     const task = agentDelegationTaskSchema.parse(raw);
     assertAgentGrant(grant, "delegate", task.agentId);
     const parent = grant.provenance.session;
@@ -580,20 +622,21 @@ export function createFleetCorrespondence(
     });
     let row = read(task.requestId);
     if (row === undefined) {
-      let sessionId = task.sessionId;
-      if (sessionId === undefined) {
-        const opened = await options.open(task.agentId);
-        try {
-          sessionId = await opened.agent.createSession(task.requestId);
-        } finally {
-          await opened.release();
-        }
-      }
       const from = { kind: "agent" as const, ...parent };
       let mail: BirdDogMail = {
         key: task.requestId,
         from,
-        to: { kind: "agent", agentId: task.agentId, sessionId },
+        to:
+          task.sessionId === undefined
+            ? {
+                kind: "agent",
+                agentId: task.agentId,
+              }
+            : {
+                kind: "agent",
+                agentId: task.agentId,
+                sessionId: task.sessionId,
+              },
         replyTo: [from],
         content: task.text,
         createdAt: Date.now(),
@@ -604,12 +647,30 @@ export function createFleetCorrespondence(
     }
     if (row === undefined) throw new DirectoryError(503, "partial_init");
     if (row.input !== input) throw new DirectoryError(409, "request_conflict");
-    if (row.receipt !== null) return parseAccepted(row.receipt);
+    if (row.state === "held") return heldRecipientOffline;
+    if (row.state === "accepted") {
+      if (row.receipt === null) throw new DirectoryError(503, "partial_init");
+      return parseAccepted(row.receipt);
+    }
     assertAgentGrant(grant, "delegate", task.agentId);
-    const receipt = parseAccepted(
+    const receipt = parseDelegationReceipt(
       JSON.stringify(await options.deliver(decodeMail(row.mail))),
     );
-    store.recordReceipt(task.requestId, JSON.stringify(receipt));
+    if (receipt.status === "held") store.recordHeld(task.requestId);
+    else {
+      const sent = decodeMail(row.mail);
+      const sessionId = receipt.sessionId ?? sent.to.sessionId;
+      if (sessionId === undefined)
+        throw new DirectoryError(503, "partial_init");
+      const accepted: Accepted = { ...receipt, sessionId };
+      store.recordReceipt(
+        task.requestId,
+        JSON.stringify(accepted),
+        row.mail,
+        JSON.stringify(bindRecipientSession(sent, sessionId)),
+      );
+      return accepted;
+    }
     return receipt;
   }
   /**
@@ -628,12 +689,18 @@ export function createFleetCorrespondence(
     if (
       mail.replyTo.length !== 0 ||
       mail.reply === undefined ||
+      mail.reply.outcome === "accepted" ||
       !mail.key.endsWith(suffix)
     )
       return undefined;
     const row = read(mail.key.slice(0, -suffix.length));
     if (row === undefined) return undefined;
     const sent = decodeMail(row.mail);
+    if (
+      mail.reply.outcome !== "undeliverable" &&
+      mail.from.sessionId === undefined
+    )
+      return undefined;
     if (
       mail.from.agentId !== sent.to.agentId ||
       mail.from.sessionId !== sent.to.sessionId ||
@@ -642,17 +709,27 @@ export function createFleetCorrespondence(
     )
       return undefined;
     if (
-      row.receipt !== null &&
-      parseAccepted(row.receipt).commandId !== mail.reply.commandId
-    )
-      return undefined;
+      mail.reply.outcome !== "undeliverable" &&
+      row.state === "accepted" &&
+      row.receipt !== null
+    ) {
+      const sentResult = parseAccepted(row.receipt);
+      if (sentResult.commandId !== mail.reply.commandId) return undefined;
+    }
     const path = delegationMetadata.parse(sent.meta).delegation;
     if (path === undefined) return undefined;
-    const reply: VerifiedAgentReply = {
-      agentId: mail.from.agentId,
-      sessionId: mail.from.sessionId,
-      ...mail.reply,
-    };
+    let reply: VerifiedAgentReply;
+    if (mail.reply.outcome === "undeliverable") {
+      const undeliverable = { agentId: mail.from.agentId, ...mail.reply };
+      reply =
+        mail.from.sessionId === undefined
+          ? undeliverable
+          : { ...undeliverable, sessionId: mail.from.sessionId };
+    } else {
+      const sessionId = mail.from.sessionId;
+      if (sessionId === undefined) return undefined;
+      reply = { agentId: mail.from.agentId, sessionId, ...mail.reply };
+    }
     return {
       ancestors: path.ancestors.slice(0, -1),
       maxDepth: path.maxDepth,
@@ -661,10 +738,58 @@ export function createFleetCorrespondence(
   }
   /** Read only the existing acceptance receipt; do not reserve or deliver mail. */
   function receipt(requestId: string): Accepted | undefined {
-    const encoded = read(requestId)?.receipt;
-    return encoded === undefined || encoded === null
+    const row = read(requestId);
+    return row?.state !== "accepted" || row.receipt === null
       ? undefined
-      : parseAccepted(encoded);
+      : parseAccepted(row.receipt);
+  }
+  /** Atomically bind the recipient Session carried by a late acceptance notice. */
+  function recordAcceptedNotice(mail: BirdDogMail): Accepted | undefined {
+    const suffix = ":accepted";
+    if (
+      mail.replyTo.length !== 0 ||
+      mail.reply?.outcome !== "accepted" ||
+      mail.from.sessionId === undefined ||
+      !mail.key.endsWith(suffix)
+    )
+      return undefined;
+    const requestId = mail.key.slice(0, -suffix.length);
+    const row = read(requestId);
+    if (row === undefined) return undefined;
+    const sent = decodeMail(row.mail);
+    const path = delegationMetadata.safeParse(sent.meta);
+    if (
+      sent.from.sessionId === undefined ||
+      !path.success ||
+      path.data.delegation === undefined ||
+      mail.key !== `${sent.key}:accepted` ||
+      mail.from.agentId !== sent.to.agentId ||
+      (sent.to.sessionId !== undefined &&
+        sent.to.sessionId !== mail.from.sessionId) ||
+      mail.to.agentId !== sent.from.agentId ||
+      mail.to.sessionId !== sent.from.sessionId
+    )
+      return undefined;
+    if (row.state === "accepted" && row.receipt !== null) {
+      const current = parseAccepted(row.receipt);
+      if (
+        current.commandId !== mail.reply.commandId ||
+        current.sessionId !== mail.from.sessionId
+      )
+        return undefined;
+    }
+    const accepted: Accepted = {
+      status: "accepted",
+      commandId: mail.reply.commandId,
+      sessionId: mail.from.sessionId,
+    };
+    store.recordReceipt(
+      requestId,
+      JSON.stringify(accepted),
+      row.mail,
+      JSON.stringify(bindRecipientSession(sent, mail.from.sessionId)),
+    );
+    return accepted;
   }
   return {
     /** Submit frozen mail or reuse its recorded Session admission receipt. */
@@ -673,6 +798,8 @@ export function createFleetCorrespondence(
     authenticateReply,
     /** Read an existing acceptance receipt without reserving or delivering mail. */
     receipt,
+    /** Consume a recipient's stable `<mailKey>:accepted` notice. */
+    recordAcceptedNotice,
   };
 }
 
@@ -688,9 +815,12 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
     const raw = store.read(task.requestId);
     if (raw === undefined) throw new DirectoryError(503, "partial_init");
     const mail = decodeMail(delegationRowSchema.parse(raw).mail);
+    if (accepted.status === "held") return pending(1000);
+    const sessionId = mail.to.sessionId ?? accepted.sessionId;
+    if (sessionId === undefined) throw new DirectoryError(503, "partial_init");
     const settlement = await options.readSettlement(
       mail.to.agentId,
-      mail.to.sessionId,
+      sessionId,
       accepted.commandId,
     );
     return settlement === undefined
@@ -698,7 +828,7 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       : {
           kind: "settled",
           agentId: mail.to.agentId,
-          sessionId: mail.to.sessionId,
+          sessionId,
           ...settlement,
         };
   }
@@ -710,8 +840,11 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
     for (const raw of store.sent()) {
       const row = delegationRowSchema.parse(raw);
       if (row.receipt === null) continue;
+      if (row.state !== "accepted") continue;
       const { to } = decodeMail(row.mail);
       const { commandId } = parseAccepted(row.receipt);
+      if (to.sessionId === undefined)
+        throw new DirectoryError(503, "partial_init");
       const target = {
         agentId: to.agentId,
         sessionId: to.sessionId,

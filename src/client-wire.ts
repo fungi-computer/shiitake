@@ -1,10 +1,13 @@
 import { SessionAttentionListSchema } from "./session-attention.js";
+import type { CommandSettlement } from "./internal/contracts.js";
 import { PromptImageSchema } from "./internal/client-boundary.js";
 import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
 import * as Schema from "effect/Schema";
 
 import type {
   Accepted,
+  DelegationReceipt,
+  Held,
   CancelResult,
   WithdrawResult,
   ForkedSession,
@@ -26,6 +29,7 @@ import { JsonValueSchema } from "./internal/json-value.js";
 import { HostMetaSchema } from "./internal/host-meta.js";
 import {
   StoredPiMessageSchema,
+  usage,
   ExtensionAdmissionOriginSchema,
 } from "./internal/woodstock/index.js";
 
@@ -118,19 +122,13 @@ const ExtensionStatusSchema: Schema.Codec<ExtensionStatusV0> = Schema.Struct({
 });
 
 /** Existing terminal wire grammar, shared by exact host settlement facts. */
-export const SessionTerminalSchema: Schema.Codec<SessionTerminal> =
-  Schema.Struct({
-    commandId: Schema.String,
-    outcome: Schema.Literals([
-      "completed",
-      "cancelled",
-      "failed",
-      "interrupted",
-    ]),
-    sequence: Schema.Int.check(Schema.isGreaterThan(0)),
-    diagnostic: Schema.NullOr(Schema.String),
-    meta: Schema.optionalKey(HostMetaSchema),
-  });
+const SessionTerminalSchema: Schema.Codec<SessionTerminal> = Schema.Struct({
+  commandId: Schema.String,
+  outcome: Schema.Literals(["completed", "cancelled", "failed", "interrupted"]),
+  sequence: Schema.Int.check(Schema.isGreaterThan(0)),
+  diagnostic: Schema.NullOr(Schema.String),
+  meta: Schema.optionalKey(HostMetaSchema),
+});
 
 const SessionCompactionMarkerSchema: Schema.Codec<SessionCompactionMarker> =
   Schema.Struct({
@@ -228,6 +226,10 @@ export const SessionSnapshotSchema = Schema.Struct({
 
 export const SessionFrameSchema: Schema.Codec<SessionFrame> = Schema.Union([
   Schema.Struct({
+    kind: Schema.Literal("activity"),
+    activity: SessionActivitySchema,
+  }),
+  Schema.Struct({
     kind: Schema.Literal("tool_output"),
     toolOutput: ToolOutputSchema,
     activity: SessionActivitySchema,
@@ -270,7 +272,25 @@ export const SessionFrameSchema: Schema.Codec<SessionFrame> = Schema.Union([
 export const AcceptedSchema: Schema.Codec<Accepted> = Schema.Struct({
   status: Schema.Literal("accepted"),
   commandId: Schema.String,
+  sessionId: Schema.optionalKey(Schema.String),
 });
+/** Parse the relay's custody acknowledgment without implying Agent acceptance. */
+export const HeldSchema: Schema.Codec<Held> = Schema.Struct({
+  status: Schema.Literal("held"),
+  reason: Schema.Literal("recipient_offline"),
+  message: Schema.Literal("waiting: recipient offline"),
+});
+/** A delegated send is accepted by its owner or held in durable mail custody. */
+export const DelegationReceiptSchema: Schema.Codec<DelegationReceipt> =
+  Schema.Union([AcceptedSchema, HeldSchema]);
+const decodeDelegationReceipt = Schema.decodeUnknownSync(
+  Schema.fromJsonString(DelegationReceiptSchema),
+  { onExcessProperty: "error" },
+);
+/** Decode one delegated send's acceptance or durable-custody result. */
+export function parseDelegationReceipt(value: string): DelegationReceipt {
+  return decodeDelegationReceipt(value);
+}
 const UnknownRequestSchema = Schema.Struct({
   status: Schema.Literal("unknown"),
 });
@@ -367,6 +387,29 @@ export function parseLatestPendingPrompt(
 /** Parse one serialized fork result using Shiitake's public client grammar. */
 export function parseForkedSession(value: string): ForkedSession {
   return decodeForkedSession(value);
+}
+
+/** Exact command facts shared by Session clients and host fleet transports. */
+export const commandSettlementSchema: Schema.Codec<CommandSettlement> =
+  Schema.Struct({
+    acceptedSender: Schema.NullOr(Schema.String),
+    terminal: SessionTerminalSchema,
+    content: Schema.String,
+    usage: Schema.Array(
+      Schema.Struct({ provider: Schema.String, model: Schema.String, usage }),
+    ),
+    toolCalls: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  });
+
+/** A timeout is null on the JSON wire and undefined at the client boundary. */
+export function parseCommandSettlement(
+  value: string,
+): CommandSettlement | undefined {
+  return (
+    Schema.decodeUnknownSync(
+      Schema.fromJsonString(Schema.NullOr(commandSettlementSchema)),
+    )(value) ?? undefined
+  );
 }
 
 /** Parse one serialized snapshot using Shiitake's public client grammar. */

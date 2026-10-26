@@ -18,7 +18,7 @@ RPC value; `parseAccepted` decodes its serialized JSON form.
 | [Testing](./testing/)             | Run a credential-free canonical host                    | `memoryHost`, `callTool`, `echoSystemPrompt`, `fauxModelSource`, `MemoryHostOptions`           |
 | [HTTP](./http/)                   | Bind authorized Session routes to an existing host      | `createShiitakeHttpRoutes`, `ShiitakeSessionResolver`, `ShiitakeHttpEnv`                       |
 | [Client entries](./client-entry/) | Turn a shared projection into bounded UI contributions  | `defineClientEntry`, `clientContributionSchemaV1`                                              |
-| [Agent control](./agent-control/) | Give admitted tools a directory of existing Agents      | `createAgentControlSource`, `waitForAgentTerminal`, `AgentControlDirectory`                    |
+| [Agent control](./agent-control/) | Give admitted tools a directory of existing Agents      | `createAgentControlSource`, `waitForAgentSettlement`, `AgentControlDirectory`                  |
 
 The testing host is explicitly driven and uses trusted callbacks. It is not a
 production isolation boundary. Start with [Your first Session](../quickstart/),

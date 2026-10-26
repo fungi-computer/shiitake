@@ -1600,8 +1600,7 @@ it("settles a pre-Mule acquisition failure and publishes idle status", async () 
     await expect(activeFrame).resolves.toMatchObject({
       done: false,
       value: {
-        kind: "update",
-        messages: [],
+        kind: "activity",
         activity: { queue: { state: "running" } },
       },
     });

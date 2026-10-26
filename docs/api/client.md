@@ -23,6 +23,30 @@ Semantic acknowledgement returned after one durable acceptance commit.
 
 ---
 
+### Held
+
+```ts
+type Held = Readonly<{
+  status: "held";
+  reason: "recipient_offline";
+  message: "waiting: recipient offline";
+}>;
+```
+
+Durable relay custody, not acceptance of a command by the recipient.
+
+---
+
+### DelegationReceipt
+
+```ts
+type DelegationReceipt = Accepted | Held;
+```
+
+A delegation send can be accepted by the Agent or held by its relay.
+
+---
+
 ### TooLate
 
 ```ts
@@ -582,6 +606,10 @@ Bounded Session baseline at one opaque owner cursor.
 ```ts
 type SessionFrame =
   | Readonly<{
+      kind: "activity";
+      activity: SessionActivity;
+    }>
+  | Readonly<{
       kind: "tool_output";
       toolOutput: readonly SessionToolOutput[];
       activity: SessionActivity;
@@ -686,6 +714,10 @@ type ShiitakeSession = Readonly<{
     set: (preference) => Promise<void>;
   }>;
   read: (input?) => Promise<SessionSnapshot>;
+  readSettlement: (
+    commandId,
+    options?,
+  ) => Promise<CommandSettlement | undefined>;
   subscribe: (input) => AsyncIterable<SessionFrame>;
   watch: (input?) => Promise<SessionWatch>;
 }>;
@@ -924,7 +956,47 @@ const AcceptedSchema: Schema.Codec<Accepted>;
 
 Decode a durable command acceptance value at an RPC boundary.
 
+---
+
+### HeldSchema
+
+```ts
+const HeldSchema: Schema.Codec<Held>;
+```
+
+Parse the relay's custody acknowledgment without implying Agent acceptance.
+
+---
+
+### DelegationReceiptSchema
+
+```ts
+const DelegationReceiptSchema: Schema.Codec<DelegationReceipt>;
+```
+
+A delegated send is accepted by its owner or held in durable mail custody.
+
 ## Functions
+
+### parseDelegationReceipt()
+
+```ts
+function parseDelegationReceipt(value): DelegationReceipt;
+```
+
+Decode one delegated send's acceptance or durable-custody result.
+
+#### Parameters
+
+| Parameter | Type     |
+| --------- | -------- |
+| `value`   | `string` |
+
+#### Returns
+
+[`DelegationReceipt`](#delegationreceipt)
+
+---
 
 ### parseWithdrawResult()
 
@@ -1144,6 +1216,12 @@ Connect to a remotely hosted Shiitake agent.
 [`ShiitakeAgent`](#shiitakeagent)
 
 ## References
+
+### CommandSettlement
+
+Re-exports [CommandSettlement](index.md#commandsettlement)
+
+---
 
 ### parseForkedSession
 

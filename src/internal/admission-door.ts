@@ -57,6 +57,8 @@ export type AdmitRequest = Readonly<{
    * host passes it, after checking the reply against the mail it sent.
    */
   reply?: VerifiedAgentReply;
+  /** Synchronous owner-local side effect committed with a mail admission. */
+  onAccepted?: (sessionId: string, commandId: string) => void;
 }>;
 
 /** Outcome of one door admission. */
@@ -109,6 +111,7 @@ type DecodedRequest = Readonly<{
   mail: BirdDogMail | undefined;
   meta: Json | undefined;
   reply: VerifiedAgentReply | undefined;
+  onAccepted: ((sessionId: string, commandId: string) => void) | undefined;
 }>;
 
 const decodeOrigin = Schema.decodeUnknownResult(AdmissionOriginSchema, {
@@ -187,6 +190,7 @@ export function openAdmissionDoor(
     when: request.when,
     mail: request.mail,
     reply: decodeReply(request),
+    onAccepted: request.onAccepted,
     meta:
       request.meta === undefined
         ? undefined
@@ -255,6 +259,7 @@ export function openAdmissionDoor(
       targetWorkId,
       request.reply,
     );
+    request.onAccepted?.(sessionId, accepted.accepted.commandId);
     touched.set(
       sessionId,
       (touched.get(sessionId) ?? false) || accepted.delivery === "new",

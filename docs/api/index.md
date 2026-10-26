@@ -415,6 +415,7 @@ type ModelAcquisition = Readonly<{
   retryable: (message) => boolean;
   retryAfterMs?: (message) => number | undefined;
   failureReason?: (message) => string | undefined;
+  providerError?: (message) => string | undefined;
   release: () => Promise<void>;
 }>;
 ```
@@ -975,6 +976,18 @@ Re-exports [CancelResult](client.md#cancelresult)
 ### Accepted
 
 Re-exports [Accepted](client.md#accepted)
+
+---
+
+### DelegationReceipt
+
+Re-exports [DelegationReceipt](client.md#delegationreceipt)
+
+---
+
+### Held
+
+Re-exports [Held](client.md#held)
 
 ---
 

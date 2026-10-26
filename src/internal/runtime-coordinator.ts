@@ -12,7 +12,8 @@ import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
 
 import type { AgentRunningWork } from "../client.js";
-import { publishOwnerObservation } from "./observation-kernel.js";
+import type { GrantsDelivery } from "./contracts.js";
+import { publishAgentExecutionChange } from "./observation-kernel.js";
 import { ShiitakeError } from "../errors.js";
 import {
   agentTurnRecovery,
@@ -33,6 +34,8 @@ import {
 import { reconcileRuntime } from "./runtime-reconciliation.js";
 import {
   advanceCursor,
+  createSessionWithinTransaction,
+  deliverSessionGrants,
   prepareExtensionStore,
   projectSessionRun,
   openStorageAdmission,
@@ -55,6 +58,13 @@ export type RuntimeCoordinator = Readonly<{
   beginClose: Effect.Effect<void>;
   /** The one accepted-command door every prompt producer admits through. */
   door: AdmissionDoor;
+  /** Reserve a Session within the admission door's enclosing transaction. */
+  createSessionWithinTransaction: (requestId: string) => string;
+  /** Write new-Session grants through the enclosing admission transaction. */
+  stageSessionGrantsWithinTransaction: (
+    sessionId: string,
+    delivery: GrantsDelivery,
+  ) => void;
   /** Storage-pressure check for new Sessions and new prompts. */
   storage: StorageAdmission;
   recordAcceptedCancellation: RecordAcceptedCancellation;
@@ -164,7 +174,7 @@ export function openRuntimeCoordinator(
               );
               if (runningWork.kind === "session") activeSessions.add(job.queue);
               // A different Session's wait changes when this executor changes.
-              publishOwnerObservation(options.store, null);
+              publishAgentExecutionChange(options.store);
             }),
             () =>
               job.lane === options.hostJobs?.lane
@@ -200,7 +210,7 @@ export function openRuntimeCoordinator(
                 runningSlots.delete(
                   job.lane === options.hostJobs?.lane ? "host" : "serial",
                 );
-                publishOwnerObservation(options.store, null);
+                publishAgentExecutionChange(options.store);
               }),
           ),
       },
@@ -452,6 +462,15 @@ export function openRuntimeCoordinator(
       ),
       beginClose,
       door,
+      createSessionWithinTransaction: (requestId) =>
+        createSessionWithinTransaction(
+          options.store,
+          requestId,
+          storage.admitNew,
+        ),
+      stageSessionGrantsWithinTransaction: (sessionId, delivery) => {
+        deliverSessionGrants(options.store, sessionId, delivery);
+      },
       storage,
       recordAcceptedCancellation: ({ jobId, cancellationId, onlyIfPending }) =>
         watchdog.transactional.recordCancellationIntent({

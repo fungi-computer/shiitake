@@ -201,6 +201,7 @@ const assistantMessage: Schema.Codec<AssistantMessage> = Schema.Struct({
     }),
   ),
   errorMessage: Schema.optionalKey(Schema.String),
+  providerError: Schema.optionalKey(Schema.String),
   rawStopReason: Schema.optionalKey(Schema.String),
   providerThinkingLevel: Schema.optionalKey(Schema.String),
   endTurn: Schema.optionalKey(Schema.Boolean),

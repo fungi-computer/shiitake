@@ -1,6 +1,7 @@
 import { nanoid } from "@fungi.computer/cairn";
 import { parseModelPreference } from "./model-preference.js";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
+import { acceptedNotice } from "@fungi.computer/bird-dog/effect";
 import type { VerifiedAgentReply } from "./woodstock/index.js";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -30,6 +31,8 @@ import type { Json } from "../extensions.js";
 import type { ModelPreference } from "./model-preference.js";
 import {
   decodeClientReadOptions,
+  decodeClientSettlementRequest,
+  requireDecoded,
   decodeClientSessionCommand,
   decodeClientSessionId,
   decodeClientSubscribeOptions,
@@ -63,6 +66,7 @@ import {
   recordOperatorLine,
   forkSession,
   readSession,
+  readCommandSettlement,
   readSessionModelPreference,
   readSessionReplayPage,
   readSessionInbox,
@@ -145,9 +149,12 @@ function readSessionWithContext(
       ),
     ),
     Effect.flatMap((snapshot) =>
-      readSessionContext(options, sessionId).pipe(
-        Effect.map((context) => withContext(snapshot, context)),
-      ),
+      readSessionContext(
+        options,
+        sessionId,
+        snapshot.cursor,
+        input?.before === undefined,
+      ).pipe(Effect.map((context) => withContext(snapshot, context))),
     ),
   );
 }
@@ -326,6 +333,12 @@ function subscriptionFrames(
                 currentSessionActivity(options, runtime, sessionId),
               ),
               Effect.flatMap((activity) => {
+                registration.setQueued(activity.facts.queue.state === "queued");
+                if (signal === "activity" && state.delivery === "live")
+                  return Effect.succeed<SubscriptionStep>([
+                    [{ kind: "activity", activity: activity.facts }],
+                    Option.some({ ...state, awaitSignal: true }),
+                  ]);
                 if (signal === "progress" && state.delivery === "live") {
                   return Effect.succeed<SubscriptionStep>([
                     [
@@ -369,6 +382,7 @@ function subscriptionFrames(
                       const latestCursor = page.frames
                         .flatMap((frame) =>
                           frame.kind === "progress" ||
+                          frame.kind === "activity" ||
                           frame.kind === "tool_output"
                             ? []
                             : [frame.cursor],
@@ -379,17 +393,29 @@ function subscriptionFrames(
                         delivery: page.hasMore ? state.delivery : "live",
                         awaitSignal: !page.hasMore,
                       };
-                      // Every update carries the context use it settles on.
+                      // Only a final update that moves the cursor gets a
+                      // figure. A wake that moved nothing never re-reads the
+                      // whole kept window.
+                      const movedHistory = page.frames.some(
+                        (frame) =>
+                          frame.kind === "update" &&
+                          frame.cursor !== state.after,
+                      );
                       return (
-                        page.frames.some((frame) => frame.kind === "update")
-                          ? readSessionContext(options, sessionId)
+                        movedHistory && !page.hasMore
+                          ? readSessionContext(
+                              options,
+                              sessionId,
+                              latestCursor ?? null,
+                            )
                           : Effect.succeed(undefined)
                       ).pipe(
                         Effect.map((context): SubscriptionStep => [
                           context === undefined
                             ? page.frames
                             : page.frames.map((frame) =>
-                                frame.kind === "update"
+                                frame.kind === "update" &&
+                                frame.cursor === latestCursor
                                   ? Object.freeze({ ...frame, context })
                                   : frame,
                               ),
@@ -482,8 +508,11 @@ function watchSession(
                   decoded.options,
                 ),
               ),
-              Effect.map((snapshot): ShiitakeEffectWatch =>
-                Object.freeze({
+              Effect.map((snapshot): ShiitakeEffectWatch => {
+                registration.setQueued(
+                  snapshot.activity.queue.state === "queued",
+                );
+                return Object.freeze({
                   snapshot,
                   changes: subscriptionFrames(
                     options,
@@ -495,8 +524,8 @@ function watchSession(
                     decoded.options.includeSandboxFailures === true,
                   ).pipe(Stream.ensuring(Effect.sync(registration.close))),
                   close: Effect.sync(registration.close),
-                }),
-              ),
+                });
+              }),
             ),
           ).pipe(Effect.onError(() => Effect.sync(registration.close)));
         }),
@@ -942,6 +971,61 @@ export function openCoordinator(
             readSessionWithContext(options, runtime, sessionId, input),
           ),
         ),
+      readSettlement: (commandId, timeoutMs = 0) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* runtime.assertOpen;
+            const decoded = yield* Effect.try({
+              try: () => ({
+                sessionId: decodeClientSessionId(sessionId),
+                ...requireDecoded(
+                  decodeClientSettlementRequest({ commandId, timeoutMs }),
+                  "Settlement request is invalid",
+                ),
+              }),
+              catch: (cause) =>
+                cause instanceof ShiitakeError
+                  ? cause
+                  : new ShiitakeError(
+                      "contract",
+                      "invalid",
+                      "Settlement request is invalid",
+                    ),
+            });
+            // Subscribe before reading: a commit racing the first read cannot
+            // be missed. Only settlement hints reach this registration.
+            const registration = yield* Effect.acquireRelease(
+              observation.register(decoded.sessionId, "settlement"),
+              (value) => Effect.sync(value.close),
+            );
+            const read = readCommandSettlement(
+              options.store,
+              decoded.sessionId,
+              decoded.commandId,
+            );
+            const initial = yield* read;
+            if (initial !== undefined || decoded.timeoutMs === 0)
+              return initial;
+            return yield* Effect.gen(function* () {
+              for (;;) {
+                const hint = yield* registration.awaitSignal;
+                if (hint === "closed")
+                  return yield* Effect.fail(
+                    new ShiitakeError(
+                      "runtime",
+                      "closed",
+                      "Shiitake is closed",
+                    ),
+                  );
+                const settled = yield* read;
+                if (settled !== undefined) return settled;
+              }
+            }).pipe(
+              Effect.timeoutOption(decoded.timeoutMs),
+              Effect.map(Option.getOrUndefined),
+            );
+          }),
+        ),
       subscribe: (input) =>
         subscribeSession(options, runtime, observation, sessionId, input),
       watch: (input) =>
@@ -1008,7 +1092,49 @@ export function acceptAddressedMail(
   mail: BirdDogMail,
   meta?: Json,
   reply?: VerifiedAgentReply,
+  stageMail?: (mail: BirdDogMail) => void,
+  sessionGrantDelivery?: (sessionId: string) => GrantsDelivery,
 ) {
+  if (mail.to.sessionId === undefined) {
+    if (reply !== undefined || mail.replyTo.length === 0)
+      throw new Error("Only delegated work can create a recipient Session");
+    return runtime.door.transact((admit) => {
+      const sessionId = runtime.createSessionWithinTransaction(mail.key);
+      const grants = sessionGrantDelivery?.(sessionId);
+      if (grants !== undefined)
+        runtime.stageSessionGrantsWithinTransaction(sessionId, grants);
+      const addressed = {
+        ...mail,
+        to: { ...mail.to, sessionId },
+      };
+      const request: Omit<AdmitRequest, "meta"> = {
+        sessionId,
+        requireExistingSession: true,
+        command: {
+          requestId: mail.key,
+          delivery: "followUp",
+          type: "prompt",
+          text: mail.content,
+        },
+        when: "now",
+        origin: { kind: "user" },
+        mail: addressed,
+        onAccepted: (_acceptedSessionId, commandId) => {
+          if (stageMail === undefined)
+            throw new Error("Recipient Agent mail outbox is unavailable");
+          stageMail(acceptedNotice(mail, sessionId, commandId, Date.now()));
+        },
+      };
+      const result = admit(meta === undefined ? request : { ...request, meta });
+      if (result.status !== "accepted")
+        throw new Error("Sessionless addressed mail was not admitted");
+      return {
+        status: "accepted" as const,
+        commandId: result.commandId,
+        sessionId,
+      };
+    });
+  }
   return admitUserWork(
     runtime,
     mail.to.sessionId,

@@ -143,21 +143,38 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
 /** Durable correspondence is frozen before delivery; retries reuse the same row. */
 export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
   storage.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_delegations (
-    request_id TEXT PRIMARY KEY, input TEXT NOT NULL, mail TEXT NOT NULL, receipt TEXT
+    request_id TEXT PRIMARY KEY, input TEXT NOT NULL, mail TEXT NOT NULL,
+    receipt TEXT
+  ) STRICT`);
+  storage.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_held_delegations (
+    request_id TEXT PRIMARY KEY
   ) STRICT`);
   return {
     read: (requestId: string) =>
       storage.sql
         .exec(
-          "SELECT input, mail, receipt FROM shiitake_fleet_delegations WHERE request_id = ?",
+          `SELECT delegation.input, delegation.mail,
+            CASE
+              WHEN held.request_id IS NOT NULL THEN 'held'
+              WHEN delegation.receipt IS NOT NULL THEN 'accepted'
+              ELSE 'pending'
+            END AS state,
+            delegation.receipt
+          FROM shiitake_fleet_delegations AS delegation
+          LEFT JOIN shiitake_fleet_held_delegations AS held
+            ON held.request_id = delegation.request_id
+          WHERE delegation.request_id = ?`,
           requestId,
         )
         .toArray()[0],
-    /** Every delegation this owner has sent and had accepted, newest first. */
+    /** Every recipient-accepted delegation, newest first. */
     sent: () =>
       storage.sql
         .exec(
-          "SELECT input, mail, receipt FROM shiitake_fleet_delegations WHERE receipt IS NOT NULL ORDER BY rowid DESC",
+          `SELECT input, mail, 'accepted' AS state, receipt
+          FROM shiitake_fleet_delegations
+          WHERE receipt IS NOT NULL
+          ORDER BY rowid DESC`,
         )
         .toArray(),
     reserve(requestId: string, input: string, mail: string) {
@@ -170,11 +187,51 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
         );
       });
     },
-    recordReceipt(requestId: string, receipt: string) {
+    recordReceipt(
+      requestId: string,
+      receipt: string,
+      expectedMail: string,
+      acceptedMail: string,
+    ) {
+      storage.transactionSync(() => {
+        const row = storage.sql
+          .exec(
+            "SELECT mail, receipt FROM shiitake_fleet_delegations WHERE request_id = ?",
+            requestId,
+          )
+          .toArray()[0];
+        if (row === undefined)
+          throw new Error(
+            "Cannot record acceptance without frozen delegation mail",
+          );
+        if (row.receipt !== null) {
+          if (row.receipt === receipt && row.mail === acceptedMail) return;
+          throw new Error(
+            "Delegation acceptance conflicts with its recorded receipt",
+          );
+        }
+        if (row.mail !== expectedMail)
+          throw new Error(
+            "Delegation mail changed before acceptance was recorded",
+          );
+        storage.sql.exec(
+          "UPDATE shiitake_fleet_delegations SET mail = ?, receipt = ? WHERE request_id = ? AND receipt IS NULL",
+          acceptedMail,
+          receipt,
+          requestId,
+        );
+        storage.sql.exec(
+          "DELETE FROM shiitake_fleet_held_delegations WHERE request_id = ?",
+          requestId,
+        );
+      });
+    },
+    recordHeld(requestId: string) {
       storage.transactionSync(() => {
         storage.sql.exec(
-          "UPDATE shiitake_fleet_delegations SET receipt = ? WHERE request_id = ?",
-          receipt,
+          `INSERT OR IGNORE INTO shiitake_fleet_held_delegations (request_id)
+          SELECT request_id FROM shiitake_fleet_delegations
+          WHERE request_id = ? AND receipt IS NULL`,
           requestId,
         );
       });

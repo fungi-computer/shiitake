@@ -7,13 +7,13 @@ import {
   commandSettlementSchema,
   createAgentDirectory,
   createFleetCorrespondence,
+  agentDelegationRequestKey,
   delegationProvenance,
   delegationReplyMeta,
   delegationSendMeta,
   type AgentGrant,
 } from "./fleet.js";
 import type { WatchdogSqliteOwner } from "@fungi.computer/watchdog";
-import { deterministicReplayKey } from "@fungi.computer/cairn";
 import * as Schema from "effect/Schema";
 import { agentMailAddressSchema } from "@fungi.computer/seam/machine-link-protocol";
 import {
@@ -33,7 +33,12 @@ import {
   type PostEnvelope,
   type PostDeliveryResult,
 } from "@fungi.computer/carrier/post";
-import { parseAccepted, type Accepted, type CancelResult } from "./client.js";
+import {
+  type Accepted,
+  parseDelegationReceipt,
+  type DelegationReceipt,
+  type CancelResult,
+} from "./client.js";
 import { decodeClientSessionCreationRequest } from "./internal/client-boundary.js";
 import type {
   CommandSettlement,
@@ -50,6 +55,17 @@ import type {
 /** Shiitake host-pack identity; core consumes OysterAgents, never this engine. */
 export type DelegationIdentity = Readonly<{ scopeId: string; agentId: string }>;
 
+type AdmittedAgentMail = Readonly<{
+  mail: BirdDogMail;
+  reply: VerifiedAgentReply | undefined;
+}>;
+
+type AddressedAgentMail = Readonly<{
+  envelope: PostEnvelope;
+  address: Readonly<{ scopeId: string; agentId: string }>;
+  mail: BirdDogMail;
+}>;
+
 /** Host-owned identity and admission around BirdDog's ordinary envelope. */
 export class AgentDelegation {
   constructor(
@@ -59,12 +75,18 @@ export class AgentDelegation {
       identity: () =>
         DelegationIdentity | null | Promise<DelegationIdentity | null>;
       directory: () => AgentControlDirectory;
-      deliver: (mail: BirdDogMail) => Promise<Accepted>;
+      deliver: (mail: BirdDogMail) => Promise<DelegationReceipt>;
       prepare: (mail: BirdDogMail) => Promise<void>;
+      /**
+       * Synchronously stage the accepted notice in this recipient's durable
+       * outbox, in the same transaction as acceptance.
+       */
+      stageAcceptedNotice: (mail: BirdDogMail, scopeId: string) => void;
       /** Admit mail; `reply` is present only for an authenticated reply. */
       accept: (
         mail: BirdDogMail,
-        reply?: VerifiedAgentReply,
+        reply: VerifiedAgentReply | undefined,
+        stageAcceptedNotice: (mail: BirdDogMail) => void,
       ) => Promise<Accepted>;
     }>,
   ) {}
@@ -86,21 +108,6 @@ export class AgentDelegation {
     const source = agents.find(({ agentId }) => agentId === identity.agentId);
     if (source === undefined) throw new Error("Agent is outside this scope");
     return { ...identity, agents, source };
-  }
-
-  private requestKey(
-    scope: DelegationIdentity,
-    input: AgentRecallInput,
-    sourceSessionId: string,
-  ) {
-    return deterministicReplayKey("oyster-agent-delegation", [
-      scope.scopeId,
-      scope.agentId,
-      sourceSessionId,
-      input.agentId,
-      input.sessionId,
-      input.requestId,
-    ]);
   }
 
   /** Recipient-local disclosure through the public host, never another Agent's RPC. */
@@ -128,13 +135,22 @@ export class AgentDelegation {
     sourceSessionId: string,
     signal: AbortSignal,
     invocation?: AgentDelegationInvocation,
-  ): Promise<Accepted> {
+  ): Promise<DelegationReceipt> {
     if (invocation === undefined)
       throw new Error("Delegation requires a tool invocation");
     const scope = await this.scope(signal);
     if (!scope.agents.some(({ agentId }) => agentId === input.agentId))
       throw new Error("Agent is outside this scope");
-    const requestId = await this.requestKey(scope, input, sourceSessionId);
+    const requestId = await agentDelegationRequestKey({
+      owner: {
+        kind: "hosted",
+        scopeId: scope.scopeId,
+        agentId: scope.agentId,
+      },
+      sourceSessionId,
+      targetAgentId: input.agentId,
+      requestId: input.requestId,
+    });
     signal.throwIfAborted();
     if (input.delivery === "steer") {
       const opened = await this.deps.directory().open(input.agentId, signal);
@@ -183,13 +199,29 @@ export class AgentDelegation {
     const scope = await this.scope(signal);
     if (!scope.agents.some(({ agentId }) => agentId === input.agentId))
       throw new Error("Agent is outside this scope");
-    const requestId = await this.requestKey(scope, input, sourceSessionId);
+    const requestId = await agentDelegationRequestKey({
+      owner: {
+        kind: "hosted",
+        scopeId: scope.scopeId,
+        agentId: scope.agentId,
+      },
+      sourceSessionId,
+      targetAgentId: input.agentId,
+      requestId: input.requestId,
+    });
     signal.throwIfAborted();
     const opened = await this.deps.directory().open(input.agentId, signal);
     try {
-      const session = opened.agent.session(input.sessionId);
-      const admitted =
-        this.fleet().receipt(requestId) ?? (await session.withdraw(requestId));
+      const receipt = this.fleet().receipt(requestId);
+      if (
+        receipt?.sessionId !== undefined &&
+        receipt.sessionId !== input.sessionId
+      )
+        return { status: "unknown" };
+      const session = opened.agent.session(
+        receipt?.sessionId ?? input.sessionId,
+      );
+      const admitted = receipt ?? (await session.withdraw(requestId));
       return admitted.status === "accepted"
         ? await session.cancel({
             commandId: admitted.commandId,
@@ -214,33 +246,55 @@ export class AgentDelegation {
     const replier = scope.agents.find(
       ({ agentId }) => agentId === delegation.reply.agentId,
     );
-    if (replier === undefined) return undefined;
-    const meta = delegationReplyMeta(delegation, replier.name);
+    const undeliverable = delegation.reply.outcome === "undeliverable";
+    if (replier === undefined && !undeliverable) return undefined;
+    const meta = delegationReplyMeta(
+      delegation,
+      replier?.name ?? delegation.reply.agentId,
+    );
     return { mail: { ...mail, meta }, reply: delegation.reply };
+  }
+
+  private parseAddressedMail(
+    raw: PostEnvelope,
+  ): AddressedAgentMail | undefined {
+    const envelope = Schema.decodeUnknownOption(PostEnvelopeSchema)(raw);
+    if (envelope._tag === "None" || envelope.value.kind !== "agentMail")
+      return undefined;
+    const address = Schema.decodeUnknownOption(agentMailAddressSchema)(
+      envelope.value.address,
+    );
+    const mail = Schema.decodeUnknownOption(BirdDogMailSchema)(
+      envelope.value.event,
+    );
+    if (address._tag === "None" || mail._tag === "None") return undefined;
+    return {
+      envelope: envelope.value,
+      address: address.value,
+      mail: mail.value,
+    };
   }
 
   /** Admit one addressed Agent mail for this Agent, or refuse it. */
   async receive(raw: PostEnvelope): Promise<PostDeliveryResult> {
-    const envelope = Schema.decodeUnknownOption(PostEnvelopeSchema)(raw);
-    if (envelope._tag === "None" || envelope.value.kind !== "agentMail")
-      return "refused";
-    const address = Schema.decodeUnknownOption(agentMailAddressSchema)(
-      envelope.value.address,
-    );
-    const parsed = Schema.decodeUnknownOption(BirdDogMailSchema)(
-      envelope.value.event,
-    );
-    if (address._tag === "None" || parsed._tag === "None") return "refused";
-    const mail = parsed.value;
+    const addressed = this.parseAddressedMail(raw);
+    if (addressed === undefined) return "refused";
+    const { envelope, address, mail } = addressed;
+    let authenticated: Awaited<ReturnType<typeof this.authenticatedReply>>;
     const valid = async () => {
       const scope = await this.scope(new AbortController().signal);
+      const frozenUndeliverable =
+        authenticated?.reply.outcome === "undeliverable" &&
+        authenticated.reply.agentId === mail.from.agentId;
       return (
-        address.value.scopeId === scope.scopeId &&
-        address.value.agentId === scope.agentId &&
+        address.scopeId === scope.scopeId &&
+        address.agentId === scope.agentId &&
         mail.to.agentId === scope.agentId &&
-        envelope.value.key === mail.key &&
-        [mail.from, ...mail.replyTo].every((ref) =>
-          scope.agents.some(({ agentId }) => agentId === ref.agentId),
+        envelope.key === mail.key &&
+        (frozenUndeliverable ||
+          scope.agents.some(({ agentId }) => agentId === mail.from.agentId)) &&
+        mail.replyTo.every(({ agentId }) =>
+          scope.agents.some((agent) => agent.agentId === agentId),
         ) &&
         (mail.replyTo.length === 0 ||
           (mail.replyTo.length === 1 &&
@@ -248,17 +302,47 @@ export class AgentDelegation {
             mail.replyTo[0].sessionId === mail.from.sessionId))
       );
     };
+    if (mail.replyTo.length === 0)
+      authenticated = await this.authenticatedReply(mail);
     if (!(await valid())) return "refused";
+    if (mail.reply?.outcome === "accepted")
+      return this.recordAcceptedNotice(mail, valid);
     const admitted =
-      mail.replyTo.length > 0
-        ? { mail, reply: undefined }
-        : await this.authenticatedReply(mail);
+      mail.replyTo.length > 0 ? { mail, reply: undefined } : authenticated;
     if (admitted === undefined) return "refused";
+    return this.acceptAdmitted(admitted, address.scopeId, valid);
+  }
+
+  private async recordAcceptedNotice(
+    mail: BirdDogMail,
+    valid: () => Promise<boolean>,
+  ): Promise<PostDeliveryResult> {
+    if (mail.to.sessionId === undefined) return "refused";
+    await this.deps.prepare(mail);
+    if (!(await valid())) return "refused";
+    const receipt = this.fleet().recordAcceptedNotice(mail);
+    return receipt === undefined ? "refused" : { status: "accepted", receipt };
+  }
+
+  private async acceptAdmitted(
+    admitted: AdmittedAgentMail,
+    scopeId: string,
+    valid: () => Promise<boolean>,
+  ): Promise<PostDeliveryResult> {
     await this.deps.prepare(admitted.mail);
     if (!(await valid())) return "refused";
+    const stageAcceptedNotice = (notice: BirdDogMail) => {
+      this.deps.stageAcceptedNotice(notice, scopeId);
+    };
+    const receipt = await this.deps.accept(
+      admitted.mail,
+      admitted.reply,
+      stageAcceptedNotice,
+    );
+    const sessionId = admitted.mail.to.sessionId ?? receipt.sessionId;
     return {
       status: "accepted",
-      receipt: await this.deps.accept(admitted.mail, admitted.reply),
+      receipt: sessionId === undefined ? receipt : { ...receipt, sessionId },
     };
   }
 }
@@ -293,6 +377,15 @@ export function agentMailRoute(
           );
           if (
             mail.reply !== undefined &&
+            mail.reply.outcome !== "accepted" &&
+            mail.reply.outcome !== "undeliverable" &&
+            mail.to.sessionId === undefined
+          )
+            return "refused";
+          if (
+            mail.reply !== undefined &&
+            mail.reply.outcome !== "undeliverable" &&
+            mail.reply.outcome !== "accepted" &&
             (await replySettlement(mail)) === undefined
           )
             return "refused";
@@ -335,20 +428,32 @@ export class AgentMail {
     };
   }
 
-  /** Submit one mail and return the recipient's Accepted receipt. */
-  async send(mail: BirdDogMail): Promise<Accepted> {
+  /** Submit one mail and return recipient acceptance or relay-held custody. */
+  async send(mail: BirdDogMail): Promise<DelegationReceipt> {
     this.deps.post().send(await this.envelope(mail));
     // Borrow the existing Post lane once, not a new waiter, loop or supervisor.
     await this.deps.drain();
     const row = this.deps.post().read(mail.key);
     if (row?.state === "delivered" && row.receipt !== undefined)
-      return parseAccepted(JSON.stringify(row.receipt));
+      return parseDelegationReceipt(JSON.stringify(row.receipt));
     if (row?.state === "dead") throw new Error(`Agent delivery ${row.reason}`);
     throw new Error("Agent did not return a delegated work receipt");
   }
 
+  /** Stage the acceptance reply through this Post owner without leaving the transaction. */
+  stageAcceptedNotice(mail: BirdDogMail, scopeId: string): void {
+    this.deps.post().send({
+      key: mail.key,
+      kind: "agentMail",
+      address: { scopeId, agentId: mail.to.agentId },
+      event: mail,
+    });
+  }
+
   /** BirdDog's mail room: disclosed settlement replies fan out over Post. */
-  mailRoom(): BirdDogEffect {
+  mailRoom(): BirdDogEffect & {
+    stageAcceptedNotice: (mail: BirdDogMail, scopeId: string) => void;
+  } {
     return {
       fanOut: (settlement) =>
         Effect.tryPromise({
@@ -391,6 +496,18 @@ export class AgentMail {
           catch: (cause) =>
             new BirdDogError("Agent reply fan-out is unavailable", { cause }),
         }),
+      postMail: (mail) =>
+        Effect.tryPromise({
+          try: async () => {
+            this.deps.post().send(await this.envelope(mail));
+            await this.deps.wake();
+          },
+          catch: (cause) =>
+            new BirdDogError("Agent mail staging is unavailable", { cause }),
+        }),
+      stageAcceptedNotice: (mail, scopeId) => {
+        this.stageAcceptedNotice(mail, scopeId);
+      },
       drainOutbox: () => Effect.void,
       nextWakeAt: () =>
         Effect.try({
@@ -418,9 +535,9 @@ export const machineAgentCodecs = {
       Schema.fromJsonString(commandSettlementSchema),
     )(encoded);
   },
-  /** Throws unless an acknowledgment carries a well-formed Accepted receipt. */
+  /** Throws unless an acknowledgment carries a valid acceptance or Held result. */
   accepted(receipt: Schema.Json): void {
-    parseAccepted(JSON.stringify(receipt));
+    parseDelegationReceipt(JSON.stringify(receipt));
   },
 } as const;
 

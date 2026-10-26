@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Effect-native durable Session acceptance and bounded run orchestration",
   "type": "module",
@@ -88,6 +88,7 @@
     "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
     "test": "pnpm run test:unit && pnpm run test:merge",
     "test:unit": "vitest run",
+    "test:load": "vitest run --config vitest.load.config.ts",
     "test:merge": "node test/cloudflare-durable-wake.native.mjs && node test/woodstock-storage-conformance.native.mjs && pnpm run test:docs",
     "test:docs": "node --import tsx --test examples/bookmarks/checks.ts",
     "docs": "tsx ../../tooling/repository/src/docs/cli.ts check --root ../..",

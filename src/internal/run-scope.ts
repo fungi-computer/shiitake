@@ -2,7 +2,6 @@ import type { FileTool } from "@fungi.computer/knapsack";
 import {
   muleEffect,
   piCodingAgentRetryDefaults,
-  piHttpIdleTimeoutMs,
   type MuleEvent,
   type MuleError,
   type MuleListener,
@@ -77,13 +76,26 @@ export class ToolSetupError extends ShiitakeError {
  * Map Mule's retry transitions onto Woodstock's retained `live_retry` facts.
  * A started attempt ends the backoff countdown before streaming resumes.
  */
-function toLiveRetryEvent(event: MuleRetryObservation): LiveRetryEvent {
+function toLiveRetryEvent(
+  event: MuleRetryObservation,
+  model: Readonly<{ provider: string; id: string }>,
+): LiveRetryEvent {
   if (event.type === "retry_attempt_started")
     return {
       type: "auto_retry_attempt",
       run: event.run,
       attempt: event.attempt,
     };
+  // Mule's retry text is Pi's private error body. Woodstock's retry journal
+  // feeds status and recovery, not the owner's failed-turn conversation.
+  const safeReason = (
+    "Model request failed. Retry the request. " +
+    unavailableRunReason({
+      runId: event.run.value,
+      provider: model.provider,
+      model: model.id,
+    })
+  ).slice(0, 200);
   return event.type === "retry_scheduled"
     ? {
         type: "auto_retry_start",
@@ -91,7 +103,7 @@ function toLiveRetryEvent(event: MuleRetryObservation): LiveRetryEvent {
         attempt: event.attempt,
         maxAttempts: event.maxAttempts,
         delayMs: event.delayMs,
-        errorMessage: event.errorMessage,
+        errorMessage: safeReason,
       }
     : event.finalError === undefined
       ? {
@@ -105,7 +117,7 @@ function toLiveRetryEvent(event: MuleRetryObservation): LiveRetryEvent {
           run: event.run,
           attempt: event.attempt,
           success: event.success,
-          finalError: event.finalError,
+          finalError: safeReason,
         };
 }
 
@@ -240,6 +252,7 @@ export function runAcceptedCommand(
         acquired.model,
       );
       let failureReason: string | undefined;
+      let failedModelAttempts = 0;
       const run = yield* runWithCompaction({
         store: options.store,
         sessionId: prepared.command.sessionId,
@@ -252,6 +265,7 @@ export function runAcceptedCommand(
         messages: prepared.messages,
         resuming: resume !== undefined,
         run: (workingMessages, betweenTurns) => {
+          failedModelAttempts = 0;
           const continuation = resume;
           resume = undefined;
           // A failed lifecycle notification precedes Mule's returned outcome
@@ -263,12 +277,23 @@ export function runAcceptedCommand(
               failedEnd = event;
               return Effect.void;
             }
+            if (
+              event.type === "message_end" &&
+              event.value.role === "assistant" &&
+              event.value.stopReason === "error"
+            ) {
+              const providerError = acquired.providerError?.(event.value);
+              if (providerError !== undefined)
+                return recorder({
+                  ...event,
+                  value: { ...event.value, providerError },
+                });
+            }
             return recorder(event);
           };
           const input: MuleRunInput = {
             model: acquired.model,
-            modelStreamIdleTimeoutMs:
-              options.modelStreamIdleTimeoutMs ?? piHttpIdleTimeoutMs,
+            modelStreamIdleTimeoutMs: options.modelStreamIdleTimeoutMs,
             retry: options.retry ?? piCodingAgentRetryDefaults,
             retryAfterMs: acquired.retryAfterMs,
             retryable: acquired.retryable,
@@ -306,13 +331,16 @@ export function runAcceptedCommand(
                   message: error.message,
                 })),
               ),
-            onRetry: (event) =>
-              recordLiveRetryEvent(
+            onRetry: (event) => {
+              if (event.type === "retry_finished" && !event.success)
+                failedModelAttempts = event.attempt + 1;
+              return recordLiveRetryEvent(
                 options.store,
                 accepted,
-                toLiveRetryEvent(event),
+                toLiveRetryEvent(event, acquired.model),
                 event.turn,
-              ),
+              );
+            },
           };
           return muleEffect
             .run(
@@ -325,9 +353,15 @@ export function runAcceptedCommand(
               Effect.onExit((exit) => {
                 if (failedEnd === undefined) return Effect.void;
                 if (Exit.isSuccess(exit)) {
-                  failureReason = (
+                  const cause =
+                    exit.value.modelLimitReason ??
                     acquired.failureReason?.(exit.value.message) ??
-                    returnedFailureReason(exit.value)
+                    returnedFailureReason(exit.value);
+                  failureReason = (
+                    failedModelAttempts > 1 &&
+                    exit.value.modelLimitReason === undefined
+                      ? `The model failed ${String(failedModelAttempts)} times on this conversation: ${cause}`
+                      : cause
                   ).slice(0, 200);
                   return recorder(failedEnd, failureReason);
                 }

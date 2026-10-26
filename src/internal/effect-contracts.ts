@@ -13,6 +13,7 @@ import type {
   ModuleRegistration,
 } from "@fungi.computer/mycelium";
 import type {
+  CommandSettlement,
   GrantsDelivery,
   GrantsDeliveryResult,
   ToolAccess,
@@ -75,6 +76,8 @@ export type ModelAcquisitionEffect = Readonly<{
   retryable: (message: AssistantMessage) => boolean;
   /** Owner-authored reason for this door's failure message, never SDK prose. */
   failureReason?: (message: AssistantMessage) => string | undefined;
+  /** Provider prose for this door's exact failed turn; never a diagnostic. */
+  providerError?: (message: AssistantMessage) => string | undefined;
   /** Effect finalizer for acquired model resources. */
   release: Effect.Effect<void, ShiitakeError>;
 }>;
@@ -188,7 +191,7 @@ export type ShiitakeEffectOptions = Readonly<{
   retry?: RetryPolicy;
   /**
    * Maximum silence between live provider stream events, in milliseconds.
-   * Omitted means `piHttpIdleTimeoutMs` (Pi coding-agent's own default).
+   * Omitted uses Mule's model stream limits.
    */
   modelStreamIdleTimeoutMs?: number;
 }>;
@@ -269,6 +272,11 @@ export type ShiitakeEffectSession = Readonly<{
   }>;
   /** Read a bounded durable baseline. */
   read: (input?: ReadOptions) => Effect.Effect<SessionSnapshot, ShiitakeError>;
+  /** Exact command facts; timeout releases observation without cancelling work. */
+  readSettlement: (
+    commandId: string,
+    timeoutMs?: number,
+  ) => Effect.Effect<CommandSettlement | undefined, ShiitakeError>;
   /** Subscribe to strict-after replay and live frames. */
   subscribe: (
     input: SubscribeOptions,

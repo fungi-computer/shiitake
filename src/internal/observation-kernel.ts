@@ -8,19 +8,28 @@ const MAX_OBSERVATIONS = 64;
 const MAX_PENDING_HINTS = 256;
 
 /** Finite process-local signal; durable owner state remains authoritative. */
-export type ObservationSignal = "closed" | "reset" | "durable" | "progress";
+export type ObservationSignal =
+  "closed" | "reset" | "durable" | "activity" | "progress";
 
 type Wake = (signal: ObservationSignal) => void;
-export type ObservationReason = "durable" | "progress";
-type OwnerPublisher = (
-  sessionId: string | null,
-  reason: ObservationReason,
-) => void;
+export type ObservationReason =
+  "durable" | "activity" | "progress" | "settlement";
+type ObservationHint = Exclude<ObservationReason, "settlement">;
+type OwnerPublication =
+  | Readonly<{
+      kind: "session";
+      sessionId: string | null;
+      reason: ObservationReason;
+    }>
+  | Readonly<{ kind: "agent-execution" }>;
+type OwnerPublisher = (publication: OwnerPublication) => void;
 type Listener = {
   readonly sessionId: string;
+  readonly settlementOnly: boolean;
   closed: boolean;
   pendingCount: number;
-  pendingReason: ObservationReason | undefined;
+  pendingReason: ObservationHint | undefined;
+  queued: boolean;
   reset: boolean;
   wake: Wake | undefined;
 };
@@ -35,6 +44,8 @@ export type ObservationRegistration = Readonly<{
   awaitSignal: Effect.Effect<ObservationSignal>;
   /** Release this registration without affecting durable work. */
   close: () => void;
+  /** Track whether this Session's current queue head is waiting on the Agent. */
+  setQueued: (queued: boolean) => void;
 }>;
 
 /** Process-local wake coordination; durable facts remain authoritative. */
@@ -42,6 +53,7 @@ export type ObservationKernel = Readonly<{
   /** Register before the caller's first durable read. */
   register: (
     sessionId: string,
+    interest?: "settlement",
   ) => Effect.Effect<ObservationRegistration, ShiitakeError>;
   /** Close every registration and release this agent's owner publisher. */
   close: Effect.Effect<void>;
@@ -55,10 +67,11 @@ export function mergeObservationSignals(
   if (first === "closed" || second === "closed") return "closed";
   if (first === "reset" || second === "reset") return "reset";
   if (first === "durable" || second === "durable") return "durable";
+  if (first === "activity" || second === "activity") return "activity";
   return "progress";
 }
 
-function queueObservation(listener: Listener, reason: ObservationReason): void {
+function queueObservation(listener: Listener, reason: ObservationHint): void {
   if (listener.pendingCount >= MAX_PENDING_HINTS) {
     listener.pendingCount = 0;
     listener.pendingReason = undefined;
@@ -69,13 +82,12 @@ function queueObservation(listener: Listener, reason: ObservationReason): void {
   listener.pendingReason =
     listener.pendingReason === "durable" || reason === "durable"
       ? "durable"
-      : "progress";
+      : listener.pendingReason === "activity" || reason === "activity"
+        ? "activity"
+        : "progress";
 }
 
-function deliverObservation(
-  listener: Listener,
-  reason: ObservationReason,
-): void {
+function deliverObservation(listener: Listener, reason: ObservationHint): void {
   if (listener.closed || listener.reset) return;
   const wake = listener.wake;
   if (wake === undefined) {
@@ -93,7 +105,7 @@ function deliverObservation(
   }
 }
 
-/** Notify owner observers; null identifies an Agent-wide execution change. */
+/** Notify observers of one Session's durable or process-local change. */
 export function publishOwnerObservation(
   store: SqliteOwner,
   sessionId: string | null,
@@ -103,10 +115,23 @@ export function publishOwnerObservation(
   if (publishers === undefined) return;
   for (const publish of publishers) {
     try {
-      publish(sessionId, reason);
+      publish({ kind: "session", sessionId, reason });
     } catch (cause) {
       reportCatchFailure("owner-observation-publish", cause);
       continue;
+    }
+  }
+}
+
+/** Wake queued Sessions when this Agent's execution slot changes. */
+export function publishAgentExecutionChange(store: SqliteOwner): void {
+  const publishers = ownerPublishers.get(store);
+  if (publishers === undefined) return;
+  for (const publish of publishers) {
+    try {
+      publish({ kind: "agent-execution" });
+    } catch (cause) {
+      reportCatchFailure("owner-execution-change-publish", cause);
     }
   }
 }
@@ -128,7 +153,7 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
     listener.pendingCount = 0;
     const reason = listener.pendingReason;
     listener.pendingReason = undefined;
-    return reason === "durable" ? "durable" : "progress";
+    return reason ?? "progress";
   };
 
   const closeListener = (listener: Listener): void => {
@@ -152,19 +177,32 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
     }
   };
 
-  const publish = (
-    sessionId: string | null,
-    reason: ObservationReason,
-  ): void => {
-    const listeners = sessionId === null ? active : sessions.get(sessionId);
+  const publish = (publication: OwnerPublication): void => {
+    if (publication.kind === "agent-execution") {
+      for (const listener of active)
+        if (listener.queued && !listener.settlementOnly)
+          deliverObservation(listener, "activity");
+      return;
+    }
+    const listeners =
+      publication.sessionId === null
+        ? active
+        : sessions.get(publication.sessionId);
     if (listeners === undefined) return;
-    for (const listener of listeners) deliverObservation(listener, reason);
+    for (const listener of listeners) {
+      if (listener.settlementOnly && publication.reason !== "settlement")
+        continue;
+      deliverObservation(
+        listener,
+        publication.reason === "settlement" ? "durable" : publication.reason,
+      );
+    }
   };
   publishers.add(publish);
   ownerPublishers.set(store, publishers);
 
   return Object.freeze({
-    register: (sessionId) =>
+    register: (sessionId, interest) =>
       Effect.suspend(() => {
         if (released)
           return Effect.fail(
@@ -181,9 +219,11 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
 
         const listener: Listener = {
           sessionId,
+          settlementOnly: interest === "settlement",
           closed: false,
           pendingCount: 0,
           pendingReason: undefined,
+          queued: true,
           reset: false,
           wake: undefined,
         };
@@ -214,6 +254,9 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
             awaitSignal,
             close: () => {
               closeListener(listener);
+            },
+            setQueued: (queued) => {
+              if (!listener.closed) listener.queued = queued;
             },
           }),
         );

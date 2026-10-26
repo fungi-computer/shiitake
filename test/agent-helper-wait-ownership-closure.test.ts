@@ -93,7 +93,7 @@ it("aborts only the public wait observation and cancels only the explicitly addr
   let observationSettled = false;
   let opens = 0;
   let releases = 0;
-  let watchCloses = 0;
+  let settlementReadsClosed = 0;
   try {
     const agent = await opening;
     const session = agent.session("addressed-work");
@@ -115,16 +115,14 @@ it("aborts only the public wait observation and cancels only the explicitly addr
         const addressed = agent.session(id);
         return {
           ...addressed,
-          watch: async () => {
-            const watch = await addressed.watch();
+          readSettlement: async (commandId, options) => {
+            const pending = addressed.readSettlement(commandId, options);
             await Effect.runPromise(Deferred.succeed(watching, undefined));
-            return {
-              ...watch,
-              close: async () => {
-                await watch.close();
-                watchCloses += 1;
-              },
-            };
+            try {
+              return await pending;
+            } finally {
+              settlementReadsClosed += 1;
+            }
           },
         };
       },
@@ -196,7 +194,7 @@ it("aborts only the public wait observation and cancels only the explicitly addr
     expect(Exit.isFailure(stopped)).toBe(true);
     if (Exit.isFailure(stopped))
       expect(Cause.hasInterrupts(stopped.cause)).toBe(true);
-    expect(watchCloses).toBe(1);
+    expect(settlementReadsClosed).toBe(1);
     expect(releases).toBe(opens);
     expect(modelSignal).toBeDefined();
     expect(modelSignal?.aborted).toBe(false);

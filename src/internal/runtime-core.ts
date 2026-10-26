@@ -6,6 +6,7 @@ import type { BirdDogEffect } from "@fungi.computer/bird-dog/effect";
 import * as Effect from "effect/Effect";
 
 import type { Accepted } from "../client.js";
+import type { GrantsDelivery } from "./contracts.js";
 import { ShiitakeError } from "../errors.js";
 import { composeAgentClose } from "./agent-close.js";
 import { acceptAddressedMail, openCoordinator } from "./coordinator.js";
@@ -37,6 +38,8 @@ export type RuntimeCore = Readonly<{
     mail: BirdDogMail,
     meta?: Json,
     reply?: VerifiedAgentReply,
+    stageAcceptedNotice?: (mail: BirdDogMail) => void,
+    sessionGrantDelivery?: (sessionId: string) => GrantsDelivery,
   ) => Effect.Effect<Accepted, ShiitakeError>;
 }>;
 
@@ -83,8 +86,26 @@ export function openRuntimeCore(
           ),
         ),
       activeSessions: runtime.activeSessions,
-      acceptMail: (mail, meta, reply) =>
-        acceptAddressedMail(runtime, mail, meta, reply),
+      acceptMail: (
+        mail,
+        meta,
+        reply,
+        stageAcceptedNotice,
+        sessionGrantDelivery,
+      ) =>
+        acceptAddressedMail(
+          runtime,
+          mail,
+          meta,
+          reply,
+          stageAcceptedNotice ??
+            ((notice) => {
+              if (mailRoom?.postMail === undefined)
+                throw new Error("Recipient Agent mail outbox is unavailable");
+              Effect.runSync(mailRoom.postMail(notice));
+            }),
+          sessionGrantDelivery,
+        ),
     });
   });
 }

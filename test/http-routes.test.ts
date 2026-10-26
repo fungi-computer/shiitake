@@ -121,6 +121,8 @@ function makeSession(
       overrides.extension ??
       (() => ({ call: () => Promise.reject(new Error("extension unused")) })),
     read: overrides.read ?? (() => Promise.resolve(snapshot)),
+    readSettlement:
+      overrides.readSettlement ?? (() => Promise.resolve(undefined)),
     subscribe: overrides.subscribe ?? (() => frames([])),
     watch:
       overrides.watch ??

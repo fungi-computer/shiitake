@@ -79,6 +79,7 @@ it("reuses delegation admission and completed settlement across actual Agent and
       },
       {
         fanOut: () => Effect.void,
+        postMail: () => Effect.void,
         drainOutbox: () => Effect.void,
         nextWakeAt: () => Effect.succeed(undefined),
       },
@@ -121,6 +122,8 @@ it("reuses delegation admission and completed settlement across actual Agent and
   try {
     const accepted = await inRound(async ({ fleet, host }) => {
       const receipt = await fleet.start(grant, task);
+      if (receipt.status !== "accepted")
+        throw new Error("recipient was expected to accept mail");
       expect(await fleet.delegate(grant, task)).toMatchObject({
         kind: "pending",
       });

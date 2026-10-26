@@ -25,10 +25,7 @@ import type {
   ShiitakeAgent,
   ShiitakeSession,
 } from "../src/client.js";
-import {
-  createAgentControlSource,
-  waitForAgentTerminal,
-} from "../src/agent-control.js";
+import { createAgentControlSource } from "../src/agent-control.js";
 import { ShiitakeError } from "../src/errors.js";
 import { decodeClientReadOptions } from "../src/internal/client-boundary.js";
 import { readClientSnapshot } from "../src/internal/woodstock/client-projection.js";
@@ -52,7 +49,7 @@ const baseline: SessionSnapshot = {
 
 function testSession(
   onSend?: (text: string, options: SendOptions | undefined) => void,
-  watchOverride?: ShiitakeSession["watch"],
+  settlementOverride?: ShiitakeSession["readSettlement"],
 ): ShiitakeSession {
   async function command(
     input: PromptCommand | CompactCommand | CancelCommand,
@@ -110,41 +107,21 @@ function testSession(
         };
       },
     }),
-    watch:
-      watchOverride ??
+    watch: () => Promise.reject(new Error("agents.wait must not watch")),
+    readSettlement:
+      settlementOverride ??
       (() =>
         Promise.resolve({
-          snapshot: baseline,
-          changes: {
-            async *[Symbol.asyncIterator]() {
-              await Promise.resolve();
-              yield {
-                kind: "reset" as const,
-                reason: "history_unavailable" as const,
-                cursor: null,
-                baseline,
-              };
-              yield {
-                kind: "update" as const,
-                delivery: "live" as const,
-                cursor: "cursor-1",
-                pending: baseline.pending,
-                messages: [],
-                terminals: [
-                  {
-                    commandId: "target",
-                    outcome: "completed" as const,
-                    sequence: 1,
-                    diagnostic: null,
-                  },
-                ],
-                activity: idleActivity,
-                extensions: baseline.extensions,
-                attention: [],
-              };
-            },
+          acceptedSender: null,
+          terminal: {
+            commandId: "target",
+            outcome: "completed",
+            sequence: 1,
+            diagnostic: null,
           },
-          close: () => Promise.resolve(),
+          content: "",
+          usage: [],
+          toolCalls: 0,
         })),
   };
   return session;
@@ -382,56 +359,6 @@ it("omits Agent creation when the host does not authorize it", async () => {
   }
 });
 
-it("keeps a resolved watch open until delayed terminal observation", async () => {
-  let closed = false;
-  const session = testSession(undefined, () =>
-    Promise.resolve({
-      snapshot: baseline,
-      changes: {
-        async *[Symbol.asyncIterator]() {
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, 0);
-          });
-          if (closed)
-            throw new Error("Watch closed before terminal observation");
-          yield {
-            kind: "update" as const,
-            delivery: "live" as const,
-            cursor: "cursor-1",
-            pending: baseline.pending,
-            messages: [],
-            terminals: [
-              {
-                commandId: "target",
-                outcome: "completed" as const,
-                sequence: 1,
-                diagnostic: null,
-              },
-            ],
-            activity: idleActivity,
-            extensions: baseline.extensions,
-            attention: [],
-          };
-        },
-      },
-      close: () => {
-        closed = true;
-        return Promise.resolve();
-      },
-    }),
-  );
-
-  await expect(
-    waitForAgentTerminal(
-      session,
-      "target",
-      1_000,
-      new AbortController().signal,
-    ),
-  ).resolves.toMatchObject({ commandId: "target", outcome: "completed" });
-  expect(closed).toBe(true);
-});
-
 it.each([true, false])(
   "delegation uses only the host's invoking Session (present: %s)",
   async (hasSession) => {
@@ -521,6 +448,59 @@ it.each([true, false])(
   },
 );
 
+it("allows a follow-up send to an Agent whose Session is created on acceptance", async () => {
+  const sends: unknown[] = [];
+  const runtime = await Mycelium.make({
+    session: { sessionId: "parent-session" },
+    sources: [
+      createAgentControlSource({
+        list: () => Promise.resolve([]),
+        open: () => Promise.reject(new Error("No target Session is opened")),
+        send: (input) => {
+          sends.push(input);
+          return Promise.resolve({
+            status: "accepted",
+            commandId: "recipient-command",
+          });
+        },
+      }),
+    ],
+    sandbox: directSandbox(async (bindings) => {
+      const send = bindings.agents?.send;
+      if (send === undefined) throw new Error("Agent send absent");
+      return send({
+        agentId: "machine-child",
+        requestId: "mail-without-session",
+        text: "Work once",
+        delivery: "followUp",
+      });
+    }),
+  });
+  const lease = await runtime.acquire();
+  try {
+    const call = await Effect.runPromise(
+      lease.executeTool.prepare({
+        type: "toolCall",
+        id: "delegate",
+        name: "execute",
+        arguments: { code: "agents.send" },
+      }),
+    );
+    await Effect.runPromise(Stream.runCollect(call.execute()));
+    expect(sends).toEqual([
+      {
+        agentId: "machine-child",
+        requestId: "mail-without-session",
+        text: "Work once",
+        delivery: "followUp",
+      },
+    ]);
+  } finally {
+    await lease.release();
+    await runtime.close();
+  }
+});
+
 it("refuses a send before acceptance and carries a model diagnostic through wait", async () => {
   const diagnostic =
     "model:rejected: openai is not signed in. Run /login or choose another model with /model.";
@@ -531,29 +511,16 @@ it("refuses a send before acceptance and carries a model diagnostic through wait
     },
     () =>
       Promise.resolve({
-        snapshot: {
-          ...baseline,
-          terminals: [
-            {
-              commandId: "rejected",
-              outcome: "failed",
-              diagnostic,
-              sequence: 1,
-            },
-          ],
+        acceptedSender: null,
+        terminal: {
+          commandId: "rejected",
+          outcome: "failed",
+          diagnostic,
+          sequence: 1,
         },
-        changes: {
-          async *[Symbol.asyncIterator]() {
-            await Promise.resolve();
-            yield {
-              kind: "reset" as const,
-              reason: "history_unavailable" as const,
-              cursor: null,
-              baseline,
-            };
-          },
-        },
-        close: () => Promise.resolve(),
+        content: "",
+        usage: [],
+        toolCalls: 0,
       }),
   );
   const runtime = await Mycelium.make({
@@ -671,6 +638,35 @@ async function runAgentCode(
     await runtime.close();
   }
 }
+
+it("returns held custody to the delegated-work tool as waiting: recipient offline", async () => {
+  const held = {
+    status: "held" as const,
+    reason: "recipient_offline" as const,
+    message: "waiting: recipient offline" as const,
+  };
+  let result: unknown;
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([{ agentId: "child", name: "Child" }]),
+      send: () => Promise.resolve(held),
+      open: () => Promise.reject(new Error("unused")),
+    },
+    async (tools) => {
+      if (tools.send === undefined) throw new Error("Send operation missing");
+      result = await tools.send({
+        agentId: "child",
+        sessionId: "child-session",
+        requestId: "held-request",
+        text: "Work",
+        delivery: "followUp",
+      });
+      return null;
+    },
+    "parent-session",
+  );
+  expect(result).toEqual(held);
+});
 
 const unregistered = () =>
   Promise.reject(
@@ -858,13 +854,23 @@ async function waitWithHistory(
   const session: ShiitakeSession = {
     ...testSession(undefined, () =>
       Promise.resolve({
-        snapshot,
-        changes: {
-          async *[Symbol.asyncIterator]() {
-            // The terminal is already in the snapshot; no change follows.
-          },
-        },
-        close: () => Promise.resolve(),
+        acceptedSender: null,
+        terminal,
+        content:
+          messages
+            .flatMap((message) =>
+              message.commandId === "target" &&
+              message.value.role === "assistant"
+                ? [message.value]
+                : [],
+            )
+            .at(-1)
+            ?.content.flatMap((part) =>
+              part.type === "text" ? [part.text] : [],
+            )
+            .join("") ?? "",
+        usage: [],
+        toolCalls: 0,
       }),
     ),
     read: () => Promise.resolve(snapshot),

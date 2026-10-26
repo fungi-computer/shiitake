@@ -10,7 +10,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { make } from "../src/effect.js";
 import { ShiitakeError } from "../src/errors.js";
 import { Shiitake } from "../src/index.js";
-import { waitForAgentTerminal } from "../src/agent-control.js";
+import { waitForAgentSettlement } from "../src/agent-control.js";
 import { manualExtensionRuntime } from "./fixtures/extension-host.fixture.js";
 import {
   createNativeSqliteOwnerFixture,
@@ -74,12 +74,12 @@ it.each([
       const accepted = await session.send("fixture", {
         requestId: "returned-failure",
       });
-      const firstWait = waitForAgentTerminal(
+      const firstWait = waitForAgentSettlement(
         session,
         accepted.commandId,
         1000,
         new AbortController().signal,
-      );
+      ).then(({ terminal }) => terminal);
       running = current.runtime.runNext();
       // Hold actual acquired-model cleanup open: Mule has finished, but
       // Watchdog settlement cannot yet add or repair a terminal diagnostic.
@@ -123,12 +123,12 @@ it.each([
         diagnostic: terminal?.diagnostic,
       });
       expect(
-        await waitForAgentTerminal(
+        await waitForAgentSettlement(
           session,
           accepted.commandId,
           1000,
           new AbortController().signal,
-        ),
+        ).then(({ terminal }) => terminal),
       ).toMatchObject({ diagnostic: terminal?.diagnostic });
       await current.agent.close();
       current.fixture.close();
@@ -138,12 +138,12 @@ it.each([
           await current.agent.session("returned-failure").read()
         ).terminals.filter((value) => value.commandId === accepted.commandId),
       ).toEqual([terminal]);
-      const settled = await waitForAgentTerminal(
+      const settled = await waitForAgentSettlement(
         current.agent.session("returned-failure"),
         accepted.commandId,
         1000,
         new AbortController().signal,
-      );
+      ).then(({ terminal }) => terminal);
       expect(settled).toMatchObject({ diagnostic: terminal?.diagnostic });
     } finally {
       allowRelease?.();
@@ -184,19 +184,19 @@ it("keeps Mule's safe model-phase reason after its failed run terminal", async (
     const accepted = await session.send("fixture", {
       requestId: "stream-failure",
     });
-    const firstWait = waitForAgentTerminal(
+    const firstWait = waitForAgentSettlement(
       session,
       accepted.commandId,
       1000,
       new AbortController().signal,
-    );
+    ).then(({ terminal }) => terminal);
     await runtime.runNext();
-    const settled = await waitForAgentTerminal(
+    const settled = await waitForAgentSettlement(
       session,
       accepted.commandId,
       1000,
       new AbortController().signal,
-    );
+    ).then(({ terminal }) => terminal);
     expect(settled).toMatchObject({
       outcome: "failed",
       diagnostic: "model:rejected: Pi model stream could not start",

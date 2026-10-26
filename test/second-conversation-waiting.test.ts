@@ -114,6 +114,54 @@ it("the owner issues the queued command id while another conversation runs", asy
   }
 });
 
+it("delivers Agent execution changes to a queued Session as activity", async () => {
+  const first = gatedReply("first reply");
+  const host = await openAgent([
+    first.respond,
+    () => Promise.resolve(fauxAssistantMessage("second reply")),
+  ]);
+  let running: Promise<void> | undefined;
+  let watch:
+    | Awaited<ReturnType<ReturnType<typeof host.agent.session>["watch"]>>
+    | undefined;
+  let changes:
+    AsyncIterator<import("../src/client.js").SessionFrame> | undefined;
+  try {
+    await host.agent.session("conversation-a").send("first", {
+      delivery: "followUp",
+      requestId: "activity-a",
+    });
+    running = host.drain();
+    await first.started;
+    const waiting = host.agent.session("conversation-b");
+    await waiting.send("second", {
+      delivery: "followUp",
+      requestId: "activity-b",
+    });
+    watch = await waiting.watch();
+    expect(watch.snapshot.activity.queue.state).toBe("queued");
+    changes = watch.changes[Symbol.asyncIterator]();
+
+    first.release();
+    let activity: import("../src/client.js").SessionFrame | undefined;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const next = await changes.next();
+      if (next.done) break;
+      if (next.value.kind === "activity") {
+        activity = next.value;
+        break;
+      }
+    }
+    expect(activity).toMatchObject({ kind: "activity" });
+  } finally {
+    first.release();
+    await changes?.return?.();
+    await watch?.close();
+    await running;
+    await host.close();
+  }
+});
+
 it("cancels the waiting conversation by its queued id before it starts", async () => {
   const first = gatedReply("first reply");
   const models: string[] = [];
@@ -286,7 +334,7 @@ it("publishes the executor identity to a queued Session when another Session sta
     await first.started;
     await expect(changes.next()).resolves.toMatchObject({
       value: {
-        kind: "update",
+        kind: "activity",
         activity: {
           queue: {
             state: "queued",
@@ -304,7 +352,7 @@ it("publishes the executor identity to a queued Session when another Session sta
     running = undefined;
     await expect(changes.next()).resolves.toMatchObject({
       value: {
-        kind: "update",
+        kind: "activity",
         activity: { queue: { state: "queued", runningWork: null } },
       },
     });

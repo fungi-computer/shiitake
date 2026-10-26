@@ -71,6 +71,7 @@ import {
   readStoredSessionSummary as readSessionSummaryOwned,
   readStoredSessionFactPage,
   createStoredSession,
+  createStoredSessionWithinTransaction,
   deleteStoredSession,
   appendOperatorEntry,
 } from "./session-store.js";
@@ -186,7 +187,7 @@ export function cancelSession(
       meta,
     );
     if (cancellation?.delivery === "new")
-      publishOwnerObservation(owner, sessionId);
+      publishOwnerObservation(owner, sessionId, "settlement");
     return cancellation;
   });
 }
@@ -232,7 +233,7 @@ export function settleControls(
 ): Effect.Effect<void, ShiitakeError> {
   return storeEffect(() => {
     settleSessionControls(owner, input);
-    publishOwnerObservation(owner, input.sessionId);
+    publishOwnerObservation(owner, input.sessionId, "settlement");
   });
 }
 
@@ -252,7 +253,7 @@ export function abortSession(
       record,
       meta,
     );
-    publishOwnerObservation(owner, sessionId);
+    publishOwnerObservation(owner, sessionId, "settlement");
     return cancellation?.accepted;
   });
 }
@@ -469,6 +470,19 @@ export function createSession(
   );
 }
 
+/** Reserve or replay a Session inside an enclosing owner transaction. */
+export function createSessionWithinTransaction(
+  owner: SqliteOwner,
+  requestId: string,
+  admitNew: () => void,
+): string {
+  return createStoredSessionWithinTransaction(
+    owner,
+    decodeClientSessionCreationRequestId({ requestId }),
+    admitNew,
+  );
+}
+
 /** Permanently delete one idle Session; false when it does not exist. */
 export function deleteSession(
   owner: SqliteOwner,
@@ -608,7 +622,14 @@ function appendRecordedEntry(
     }
     throw rejected("Session fact identity allocation failed");
   });
-  if (delivery === "new") publishOwnerObservation(owner, accepted.sessionId);
+  if (delivery === "new")
+    publishOwnerObservation(
+      owner,
+      accepted.sessionId,
+      entry.kind === "run_terminal" || entry.kind === "work_terminal"
+        ? "settlement"
+        : "durable",
+    );
 }
 
 /** Persist an operator-only sandbox diagnostic beside its accepted Session work. */

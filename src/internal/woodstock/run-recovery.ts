@@ -94,7 +94,12 @@ export function contextMessageIds(
       if (entry.value.role === "assistant") {
         lastWorkAssistant.set(entry.workId, row.id);
       }
-      if (terminalWork.has(entry.workId) || entry.workId === activeWorkId)
+      if (
+        (terminalWork.has(entry.workId) || entry.workId === activeWorkId) &&
+        (entry.value.role !== "assistant" ||
+          (entry.value.stopReason !== "error" &&
+            entry.value.stopReason !== "aborted"))
+      )
         messages.add(row.id);
     }
     if (

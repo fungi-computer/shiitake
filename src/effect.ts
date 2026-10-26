@@ -114,6 +114,7 @@ export type ShiitakeEffectHost = Readonly<{
     mail: BirdDogMail,
     meta?: HostJson,
     reply?: VerifiedAgentReply,
+    stageAcceptedNotice?: (mail: BirdDogMail) => void,
   ) => Effect.Effect<Accepted, ShiitakeError>;
 }>;
 

@@ -293,6 +293,7 @@ export function openPromiseHost(
       mail: BirdDogMail,
       meta?: Json,
       reply?: VerifiedAgentReply,
+      stageAcceptedNotice?: (mail: BirdDogMail) => void,
     ) => Promise<Accepted>;
   }>
 > {
@@ -311,7 +312,9 @@ export function openPromiseHost(
         mail: BirdDogMail,
         meta?: Json,
         reply?: VerifiedAgentReply,
-      ) => runShiitakePromise(acceptMail(mail, meta, reply)),
+        stageAcceptedNotice?: (mail: BirdDogMail) => void,
+      ) =>
+        runShiitakePromise(acceptMail(mail, meta, reply, stageAcceptedNotice)),
     }),
   );
 }

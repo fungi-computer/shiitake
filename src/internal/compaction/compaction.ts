@@ -86,7 +86,7 @@ export type CompactionResult = Readonly<{
   }>;
 }>;
 
-/** A summary is a model call: its bounded provider message is shown. */
+/** A summary uses the stream failure diagnostic, never failed-turn provider prose. */
 function failure(message: string): ShiitakeError {
   return new ShiitakeError("model", "rejected", message);
 }

@@ -22,6 +22,8 @@ export type {
   CancelCommand,
   CancelResult,
   Accepted,
+  DelegationReceipt,
+  Held,
   ForkCommand,
   ForkedSession,
   OperatorCommand,
@@ -131,6 +133,7 @@ export type ShiitakeHost = Readonly<{
     mail: BirdDogMail,
     meta?: HostJson,
     reply?: VerifiedAgentReply,
+    stageAcceptedNotice?: (mail: BirdDogMail) => void,
   ) => Promise<Accepted>;
 }>;
 

@@ -180,8 +180,15 @@ export type MemoryHost = Readonly<{
   agent: ShiitakeOwnerAgent;
   /** Invoke one canonical reconciliation tick; no timer runs in the background. */
   reconcile: () => Promise<void>;
-  /** Drain pending Agent work with a 1–1,000 tick budget (default 1,000). */
-  settle: (sessionId: string, maxTicks?: number) => Promise<SessionSnapshot>;
+  /** Drain pending Agent work with a 1–1,000 tick budget (default 1,000).
+   * The optional test hook runs after pending work ends, before the snapshot
+   * context read, so load tests can end a timed turn at the terminal.
+   */
+  settle: (
+    sessionId: string,
+    maxTicks?: number,
+    beforeRead?: () => Promise<void>,
+  ) => Promise<SessionSnapshot>;
   /** Close the Agent and only the database owned by this helper. */
   close: () => Promise<void>;
 }>;
@@ -255,12 +262,14 @@ export async function memoryHost(
     return {
       agent,
       reconcile: async () => requireBound().reconcile(),
-      settle: async (sessionId, maxTicks) => {
+      settle: async (sessionId, maxTicks, beforeRead) => {
         const budget = settlementBudgetSchema.parse(maxTicks);
         for (let tick = 0; tick < budget; tick += 1) {
           const host = requireBound();
-          if (!(await host.pendingWork()).pending)
+          if (!(await host.pendingWork()).pending) {
+            await beforeRead?.();
             return agent.session(sessionId).read();
+          }
           await host.reconcile();
         }
         throw new Error(

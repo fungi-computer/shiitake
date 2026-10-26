@@ -1,5 +1,52 @@
 # @fungi.computer/shiitake
 
+## 0.4.0
+
+### Minor Changes
+
+- Changes since 0.3.1:
+
+  - fix(shiitake): restore generated API docs
+  - fix(live-updates): consume activity frames across clients
+  - fix(shiitake): prove in-flight settlement waits over HTTP
+  - fix(shiitake): target queued session activity wakes
+  - fix(shiitake): await exact command settlement without session watches
+  - fix(shiitake): guard context cache writes by cursor
+  - fix(shiitake): keep scrollback figures out of cursor cache
+  - fix: isolate provider prose to recorded failed turns
+  - fix: assert safe retry reasons without untyped matchers
+  - fix: distinguish absent provider text from safe diagnostics
+  - fix: retain provider error text on failed turns
+  - fix: bound hung model attempts and retain failed partials
+  - fix(mesh): stage sessionless Hub grants atomically
+  - fix(mesh): stage standalone acceptance notices
+  - fix(shiitake): read context use only when an update moves history
+  - fix(mesh): unify sessionless delegation acceptance
+  - fix(bird-dog): remove unreachable undeliverable builder
+  - fix(mesh): type atomic sessionless admission
+  - fix(mesh): checkpoint atomic local notice staging
+  - feat(mesh): wip sessionless acceptance checkpoint
+  - fix(mesh): preserve held custody separately
+  - feat(mesh): distinguish held delegation mail
+  - fix(mesh): clear lint failures in mail contract
+  - fix(mesh): accept frozen undeliverable replies after leave
+  - feat(mesh): report terminal undeliverable mail replies
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/bird-dog@0.2.0
+  - @fungi.computer/carrier@0.2.0
+  - @fungi.computer/knapsack@0.3.0
+  - @fungi.computer/mule@0.2.0
+  - @fungi.computer/seam@0.2.0
+  - @fungi.computer/agar@0.3.1
+  - @fungi.computer/mycelium@0.2.2
+
 ## 0.3.1
 
 ### Patch Changes

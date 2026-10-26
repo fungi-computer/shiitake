@@ -74,6 +74,8 @@ export type ModelAcquisition = Readonly<{
    * Unknown messages must return undefined.
    */
   failureReason?: (message: AssistantMessage) => string | undefined;
+  /** Provider prose for this door's exact failed turn; never a diagnostic. */
+  providerError?: (message: AssistantMessage) => string | undefined;
   /** Release the acquired model resources. */
   release: () => Promise<void>;
 }>;

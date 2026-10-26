@@ -52,6 +52,28 @@ const PromptImagesSchema = Schema.Array(PromptImageSchema).check(
 export type PromptDelivery = "steer" | "followUp";
 const PromptDeliverySchema = Schema.Literals(["steer", "followUp"]);
 const SessionIdSchema = boundedId;
+/** One bounded exact-command read, shared by the in-process and HTTP doors. */
+export const decodeClientSettlementRequest = Schema.decodeUnknownResult(
+  Schema.Struct({
+    commandId: boundedId,
+    timeoutMs: Schema.Int.check(
+      Schema.isGreaterThanOrEqualTo(0),
+      Schema.isLessThanOrEqualTo(30_000),
+    ),
+  }),
+  { onExcessProperty: "error" },
+);
+/** Query encoding of the same bounded exact-command read. */
+export const decodeClientSettlementQuery = Schema.decodeUnknownResult(
+  Schema.Struct({
+    commandId: boundedId,
+    timeoutMs: Schema.NumberFromString.check(
+      Schema.isInt(),
+      Schema.isBetween({ minimum: 0, maximum: 30_000 }),
+    ),
+  }),
+  { onExcessProperty: "error" },
+);
 const decodeSessionPageCursorValue = Schema.decodeUnknownResult(
   boundedText(512),
 );
