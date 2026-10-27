@@ -1,5 +1,26 @@
 # @fungi.computer/shiitake
 
+## 0.5.0
+
+### Minor Changes
+
+- Changes since 0.4.0:
+
+  - fix(local): bind create receipts to creator session
+  - fix(mesh): admit authenticated frozen offline replies
+  - fix(mesh): admit Hub offline dispositions
+  - fix(mesh): reply after carrier dead letters
+  - feat(oyster): reply to expired machine mail
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.4.0
+  - @fungi.computer/bird-dog@0.2.1
+  - @fungi.computer/knapsack@0.3.1
+
 ## 0.4.0
 
 ### Minor Changes

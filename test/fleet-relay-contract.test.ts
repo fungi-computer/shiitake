@@ -6,6 +6,7 @@ import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import { acceptedNotice } from "@fungi.computer/bird-dog/effect";
 import {
   createFleetCorrespondence,
+  delegationReplyMeta,
   type AgentDelegationTask,
   type AgentGrant,
 } from "../src/fleet.js";
@@ -169,6 +170,8 @@ it("freezes machine-home mail without a recipient Session when the Agent is offl
   });
   const original = deliveries[0];
   if (original === undefined) throw new Error("frozen mail was not delivered");
+  if (original.from.kind !== "agent")
+    throw new Error("frozen mail did not retain its Agent sender");
   const notice = acceptedNotice(original, "late-session", "command-1", 1);
   expect(sender.recordAcceptedNotice(notice)).toEqual({
     status: "accepted",
@@ -202,6 +205,145 @@ it("freezes machine-home mail without a recipient Session when the Agent is offl
     ),
   ).toBeUndefined();
   fixture.close();
+});
+
+it("admits only the frozen sender's typed undeliverable reply without a live child Session", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const deliveries: BirdDogMail[] = [];
+  const held: DelegationReceipt = {
+    status: "held",
+    reason: "recipient_offline",
+    message: "waiting: recipient offline",
+  };
+  const sender = createFleetCorrespondence({
+    storage: fixture.owner,
+    open: () => Promise.reject(new Error("unused")),
+    deliver: (mail) => {
+      deliveries.push(structuredClone(mail));
+      return Promise.resolve(held);
+    },
+  });
+  try {
+    expect(
+      await sender.start(grant(), { ...task, sessionId: "late-session" }),
+    ).toEqual(held);
+    const original = deliveries[0];
+    if (original === undefined)
+      throw new Error("frozen mail was not delivered");
+    if (original.from.kind !== "agent")
+      throw new Error("frozen mail did not retain its Agent sender");
+    const reply: BirdDogMail = {
+      key: `${original.key}:reply:0`,
+      from: { kind: "system", systemId: "hub" },
+      to: original.from,
+      replyTo: [],
+      content: "undeliverable",
+      createdAt: Date.now(),
+      reply: { outcome: "undeliverable", reason: "recipient_offline" },
+    };
+
+    const authenticated = sender.authenticateReply(reply);
+    expect(authenticated).toMatchObject({
+      reply: {
+        agentId: "child",
+        outcome: "undeliverable",
+        reason: "recipient_offline",
+      },
+    });
+    if (authenticated === undefined)
+      throw new Error("held mail's undeliverable reply was not authenticated");
+    const meta = delegationReplyMeta(authenticated, "Child");
+    expect(meta.author).toEqual({ id: "hub/system", name: "Hub/system" });
+    expect(meta.delegation.reply).toMatchObject({
+      agentId: "child",
+      outcome: "undeliverable",
+      reason: "recipient_offline",
+    });
+    const recipientLeft = {
+      ...reply,
+      from: {
+        kind: "agent" as const,
+        agentId: "child",
+        sessionId: "late-session",
+      },
+      reply: {
+        outcome: "undeliverable" as const,
+        reason: "recipient_left" as const,
+      },
+    };
+    const authenticatedLeft = sender.authenticateReply(recipientLeft);
+    expect(authenticatedLeft).toMatchObject({
+      reply: {
+        agentId: "child",
+        outcome: "undeliverable",
+        reason: "recipient_left",
+      },
+    });
+    if (authenticatedLeft === undefined)
+      throw new Error("recipient-left reply lost the existing Agent path");
+    expect(delegationReplyMeta(authenticatedLeft, "Child").author).toEqual({
+      id: "child",
+      name: "Child",
+      kind: "agent",
+    });
+    expect(sender.recordUndeliverableReply(original.key)).toBe(true);
+    expect(sender.authenticateReply(reply)).toBeUndefined();
+    expect(sender.recordUndeliverableReply(original.key)).toBe(false);
+    expect(
+      sender.authenticateReply({
+        ...reply,
+        key: "unknown-mail:reply:0",
+      }),
+    ).toBeUndefined();
+    expect(
+      sender.authenticateReply({
+        ...reply,
+        to: { ...original.from, agentId: "other-sender" },
+      }),
+    ).toBeUndefined();
+  } finally {
+    fixture.close();
+  }
+});
+
+it("refuses an undeliverable reply unless its exact original mail is still held", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const sent: BirdDogMail[] = [];
+  const sender = createFleetCorrespondence({
+    storage: fixture.owner,
+    open: () => Promise.reject(new Error("unused")),
+    deliver: (mail) => {
+      sent.push(structuredClone(mail));
+      return Promise.reject(new Error("transport failed before Held custody"));
+    },
+  });
+  try {
+    await expect(sender.start(grant(), task)).rejects.toThrow(
+      "transport failed before Held custody",
+    );
+    const original = sent[0];
+    if (original === undefined) throw new Error("original mail was not sent");
+    if (original.from.kind !== "agent")
+      throw new Error("frozen mail did not retain its Agent sender");
+    const reply: BirdDogMail = {
+      key: `${original.key}:reply:0`,
+      from: { kind: "system", systemId: "hub" },
+      to: original.from,
+      replyTo: [],
+      content: "undeliverable",
+      createdAt: Date.now(),
+      reply: { outcome: "undeliverable", reason: "recipient_offline" },
+    };
+    expect(sender.authenticateReply(reply)).toBeUndefined();
+    expect(
+      sender.authenticateReply({
+        ...reply,
+        key: "different-original:reply:0",
+      }),
+    ).toBeUndefined();
+  } finally {
+    fixture.close();
+  }
 });
 
 it("converges a sessionless acceptance receipt across a physical sender reopen", async () => {
@@ -238,6 +380,8 @@ it("converges a sessionless acceptance receipt across a physical sender reopen",
     const original = deliveries[0];
     if (original === undefined)
       throw new Error("frozen mail was not delivered");
+    if (original.from.kind !== "agent")
+      throw new Error("frozen mail did not retain its Agent sender");
     expect(original.to).toEqual({ kind: "agent", agentId: "child" });
     const notice = acceptedNotice(
       original,

@@ -505,19 +505,25 @@ export function delegationSendMeta(
 }
 
 /**
- * The host metadata for one authenticated reply line: the replying Agent is
- * its author, and the verified reply rides beside the caller's own path.
+ * The host metadata for one authenticated reply line. An ordinary reply is
+ * authored by its replying Agent; a delivery failure is a Hub/system fact,
+ * while the verified reply retains the failed recipient's identity.
  */
 export function delegationReplyMeta(
   delegation: AuthenticatedDelegationReply,
   replierName: string,
 ): DelegationReplyMeta {
+  const author =
+    delegation.reply.outcome === "undeliverable" &&
+    delegation.reply.reason === "recipient_offline"
+      ? authorMeta({ id: "hub/system", name: "Hub/system" })
+      : authorMeta({
+          id: delegation.reply.agentId,
+          name: replierName,
+          kind: "agent",
+        });
   return {
-    ...authorMeta({
-      id: delegation.reply.agentId,
-      name: replierName,
-      kind: "agent",
-    }),
+    ...author,
     delegation: {
       ancestors: [...delegation.ancestors],
       maxDepth: delegation.maxDepth,
@@ -534,7 +540,7 @@ const delegationRowSchema = z.lazy(() =>
   z.strictObject({
     input: z.string(),
     mail: z.string(),
-    state: z.enum(["pending", "held", "accepted"]),
+    state: z.enum(["pending", "held", "accepted", "undeliverable"]),
     receipt: z.string().nullable(),
   }),
 );
@@ -548,8 +554,7 @@ const decodeMail = Schema.decodeUnknownSync(
 );
 
 function bindRecipientSession(mail: BirdDogMail, sessionId: string) {
-  if (mail.from.sessionId === undefined)
-    throw new DirectoryError(503, "partial_init");
+  if (mail.from.kind !== "agent") throw new DirectoryError(503, "partial_init");
   return {
     ...mail,
     to: { ...mail.to, sessionId },
@@ -647,7 +652,8 @@ export function createFleetCorrespondence(
     }
     if (row === undefined) throw new DirectoryError(503, "partial_init");
     if (row.input !== input) throw new DirectoryError(409, "request_conflict");
-    if (row.state === "held") return heldRecipientOffline;
+    if (row.state === "held" || row.state === "undeliverable")
+      return heldRecipientOffline;
     if (row.state === "accepted") {
       if (row.receipt === null) throw new DirectoryError(503, "partial_init");
       return parseAccepted(row.receipt);
@@ -693,19 +699,39 @@ export function createFleetCorrespondence(
       !mail.key.endsWith(suffix)
     )
       return undefined;
-    const row = read(mail.key.slice(0, -suffix.length));
-    if (row === undefined) return undefined;
+    const mailKey = mail.key.slice(0, -suffix.length);
+    const row = read(mailKey);
+    if (row === undefined || row.state === "undeliverable") return undefined;
     const sent = decodeMail(row.mail);
+    if (sent.key !== mailKey) return undefined;
+    const systemUndeliverable =
+      mail.reply.outcome === "undeliverable" &&
+      mail.reply.reason === "recipient_offline" &&
+      mail.from.kind === "system";
+    if (systemUndeliverable) {
+      if (
+        row.state !== "held" ||
+        sent.from.kind !== "agent" ||
+        mail.key !== `${sent.key}:reply:0` ||
+        mail.to.agentId !== sent.from.agentId ||
+        mail.to.sessionId !== sent.from.sessionId
+      )
+        return undefined;
+    } else {
+      if (
+        sent.from.kind !== "agent" ||
+        mail.from.kind !== "agent" ||
+        mail.from.agentId !== sent.to.agentId ||
+        mail.from.sessionId !== sent.to.sessionId ||
+        mail.to.agentId !== sent.from.agentId ||
+        mail.to.sessionId !== sent.from.sessionId
+      )
+        return undefined;
+    }
     if (
-      mail.reply.outcome !== "undeliverable" &&
-      mail.from.sessionId === undefined
-    )
-      return undefined;
-    if (
-      mail.from.agentId !== sent.to.agentId ||
-      mail.from.sessionId !== sent.to.sessionId ||
-      mail.to.agentId !== sent.from.agentId ||
-      mail.to.sessionId !== sent.from.sessionId
+      mail.reply.outcome === "undeliverable" &&
+      mail.reply.reason === "recipient_offline" &&
+      !systemUndeliverable
     )
       return undefined;
     if (
@@ -720,14 +746,25 @@ export function createFleetCorrespondence(
     if (path === undefined) return undefined;
     let reply: VerifiedAgentReply;
     if (mail.reply.outcome === "undeliverable") {
-      const undeliverable = { agentId: mail.from.agentId, ...mail.reply };
+      const agentId = systemUndeliverable
+        ? sent.to.agentId
+        : mail.from.kind === "agent"
+          ? mail.from.agentId
+          : undefined;
+      if (agentId === undefined) return undefined;
+      const undeliverable = { agentId, ...mail.reply };
+      const sessionId = systemUndeliverable
+        ? sent.to.sessionId
+        : mail.from.kind === "agent"
+          ? mail.from.sessionId
+          : undefined;
       reply =
-        mail.from.sessionId === undefined
+        sessionId === undefined
           ? undeliverable
-          : { ...undeliverable, sessionId: mail.from.sessionId };
+          : { ...undeliverable, sessionId };
     } else {
+      if (mail.from.kind !== "agent") return undefined;
       const sessionId = mail.from.sessionId;
-      if (sessionId === undefined) return undefined;
       reply = { agentId: mail.from.agentId, sessionId, ...mail.reply };
     }
     return {
@@ -735,6 +772,34 @@ export function createFleetCorrespondence(
       maxDepth: path.maxDepth,
       reply,
     };
+  }
+  /** Bind an exhausted local Carrier row to its frozen sender correspondence. */
+  function recordLocalUndeliverable(
+    original: BirdDogMail,
+    reply: BirdDogMail,
+  ): boolean {
+    const row = read(original.key);
+    if (
+      row === undefined ||
+      (row.state !== "pending" && row.state !== "held") ||
+      original.from.kind !== "agent" ||
+      original.reply !== undefined ||
+      JSON.stringify(decodeMail(row.mail)) !== JSON.stringify(original) ||
+      reply.key !== `${original.key}:reply:0` ||
+      reply.from.kind !== "system" ||
+      reply.reply?.outcome !== "undeliverable" ||
+      reply.reply.reason !== "recipient_offline" ||
+      reply.to.agentId !== original.from.agentId ||
+      reply.to.sessionId !== original.from.sessionId ||
+      reply.replyTo.length !== 0
+    )
+      return false;
+    store.recordHeld(original.key);
+    return read(original.key)?.state === "held";
+  }
+  /** Make a successfully admitted system disposition replay-ineligible. */
+  function recordUndeliverableReply(mailKey: string): boolean {
+    return store.recordUndeliverable(mailKey);
   }
   /** Read only the existing acceptance receipt; do not reserve or deliver mail. */
   function receipt(requestId: string): Accepted | undefined {
@@ -746,10 +811,11 @@ export function createFleetCorrespondence(
   /** Atomically bind the recipient Session carried by a late acceptance notice. */
   function recordAcceptedNotice(mail: BirdDogMail): Accepted | undefined {
     const suffix = ":accepted";
+    if (mail.from.kind !== "agent") return undefined;
+    const sender = mail.from;
     if (
       mail.replyTo.length !== 0 ||
       mail.reply?.outcome !== "accepted" ||
-      mail.from.sessionId === undefined ||
       !mail.key.endsWith(suffix)
     )
       return undefined;
@@ -757,37 +823,38 @@ export function createFleetCorrespondence(
     const row = read(requestId);
     if (row === undefined) return undefined;
     const sent = decodeMail(row.mail);
+    if (sent.from.kind !== "agent") return undefined;
+    const sentSender = sent.from;
     const path = delegationMetadata.safeParse(sent.meta);
     if (
-      sent.from.sessionId === undefined ||
       !path.success ||
       path.data.delegation === undefined ||
       mail.key !== `${sent.key}:accepted` ||
-      mail.from.agentId !== sent.to.agentId ||
+      sender.agentId !== sent.to.agentId ||
       (sent.to.sessionId !== undefined &&
-        sent.to.sessionId !== mail.from.sessionId) ||
-      mail.to.agentId !== sent.from.agentId ||
-      mail.to.sessionId !== sent.from.sessionId
+        sent.to.sessionId !== sender.sessionId) ||
+      mail.to.agentId !== sentSender.agentId ||
+      mail.to.sessionId !== sentSender.sessionId
     )
       return undefined;
     if (row.state === "accepted" && row.receipt !== null) {
       const current = parseAccepted(row.receipt);
       if (
         current.commandId !== mail.reply.commandId ||
-        current.sessionId !== mail.from.sessionId
+        current.sessionId !== sender.sessionId
       )
         return undefined;
     }
     const accepted: Accepted = {
       status: "accepted",
       commandId: mail.reply.commandId,
-      sessionId: mail.from.sessionId,
+      sessionId: sender.sessionId,
     };
     store.recordReceipt(
       requestId,
       JSON.stringify(accepted),
       row.mail,
-      JSON.stringify(bindRecipientSession(sent, mail.from.sessionId)),
+      JSON.stringify(bindRecipientSession(sent, sender.sessionId)),
     );
     return accepted;
   }
@@ -796,6 +863,8 @@ export function createFleetCorrespondence(
     start,
     /** Match a reply to frozen mail and restore the caller's delegation path. */
     authenticateReply,
+    recordLocalUndeliverable,
+    recordUndeliverableReply,
     /** Read an existing acceptance receipt without reserving or delivering mail. */
     receipt,
     /** Consume a recipient's stable `<mailKey>:accepted` notice. */

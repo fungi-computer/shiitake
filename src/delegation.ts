@@ -24,7 +24,7 @@ import {
 } from "@fungi.computer/bird-dog/effect";
 import * as Effect from "effect/Effect";
 import { messageAuthor } from "@fungi.computer/agar/agents";
-import type { BirdDogMail } from "@fungi.computer/bird-dog";
+import { undeliverableReply, type BirdDogMail } from "@fungi.computer/bird-dog";
 import {
   PostEnvelopeSchema,
   definePostRoute,
@@ -236,8 +236,8 @@ export class AgentDelegation {
   /**
    * A reply-less envelope is only ever BirdDog's reply to work this Agent
    * sent. Admit it only after the fleet authenticates it against that frozen
-   * mail; the line is then authored by the replying Agent, never by whoever
-   * settled or cancelled the work, and its meta carries the verified reply.
+   * mail. A recipient-left reply remains Agent-authored; a recipient-offline
+   * reply is Hub-authored. Its meta carries only the authenticated reply.
    */
   private async authenticatedReply(mail: BirdDogMail) {
     const delegation = this.fleet().authenticateReply(mail);
@@ -283,23 +283,25 @@ export class AgentDelegation {
     let authenticated: Awaited<ReturnType<typeof this.authenticatedReply>>;
     const valid = async () => {
       const scope = await this.scope(new AbortController().signal);
-      const frozenUndeliverable =
-        authenticated?.reply.outcome === "undeliverable" &&
-        authenticated.reply.agentId === mail.from.agentId;
+      const sender = mail.from;
+      const authenticatedUndeliverable =
+        authenticated?.reply.outcome === "undeliverable";
       return (
         address.scopeId === scope.scopeId &&
         address.agentId === scope.agentId &&
         mail.to.agentId === scope.agentId &&
         envelope.key === mail.key &&
-        (frozenUndeliverable ||
-          scope.agents.some(({ agentId }) => agentId === mail.from.agentId)) &&
+        (authenticatedUndeliverable ||
+          (sender.kind === "agent" &&
+            scope.agents.some(({ agentId }) => agentId === sender.agentId))) &&
         mail.replyTo.every(({ agentId }) =>
           scope.agents.some((agent) => agent.agentId === agentId),
         ) &&
         (mail.replyTo.length === 0 ||
           (mail.replyTo.length === 1 &&
-            mail.replyTo[0]?.agentId === mail.from.agentId &&
-            mail.replyTo[0].sessionId === mail.from.sessionId))
+            sender.kind === "agent" &&
+            mail.replyTo[0]?.agentId === sender.agentId &&
+            mail.replyTo[0].sessionId === sender.sessionId))
       );
     };
     if (mail.replyTo.length === 0)
@@ -339,11 +341,39 @@ export class AgentDelegation {
       admitted.reply,
       stageAcceptedNotice,
     );
+    if (
+      admitted.reply?.outcome === "undeliverable" &&
+      admitted.mail.from.kind === "system"
+    ) {
+      this.fleet().recordUndeliverableReply(
+        admitted.mail.key.slice(0, -":reply:0".length),
+      );
+    }
     const sessionId = admitted.mail.to.sessionId ?? receipt.sessionId;
     return {
       status: "accepted",
       receipt: sessionId === undefined ? receipt : { ...receipt, sessionId },
     };
+  }
+
+  /** Admit local outbox exhaustion through the same Fleet/system reply gate. */
+  async localUndeliverable(original: BirdDogMail): Promise<PostDeliveryResult> {
+    const identity = await this.deps.identity();
+    if (identity === null) return "refused";
+    let reply: BirdDogMail;
+    try {
+      reply = undeliverableReply(original, Date.now());
+    } catch {
+      return "refused";
+    }
+    if (!this.fleet().recordLocalUndeliverable(original, reply))
+      return "refused";
+    return await this.receive({
+      key: reply.key,
+      kind: "agentMail",
+      address: { scopeId: identity.scopeId, agentId: identity.agentId },
+      event: reply,
+    });
   }
 }
 
@@ -399,7 +429,7 @@ export function agentMailRoute(
 /** The host's one Post lane, as Agent mail borrows it. */
 export type AgentMailPost = Pick<
   PostRuntime<{ agentMail: ReturnType<typeof agentMailRoute> }>,
-  "send" | "read" | "nextWake"
+  "send" | "read" | "nextWake" | "deadLetters"
 >;
 
 /** Recipient-owned replies and receipt-bearing submissions over the host's one Post lane. */
@@ -412,6 +442,11 @@ export class AgentMail {
         DelegationIdentity | null | Promise<DelegationIdentity | null>;
       /** Only a typed disclosure refusal becomes undefined; missing settled facts must fail. */
       replySettlement: AgentReplySettlement;
+      /** Route a terminal reply for this sender through its Fleet admission. */
+      onUndeliverable: (
+        original: BirdDogMail,
+        reply: BirdDogMail,
+      ) => Promise<PostDeliveryResult>;
       drain: () => Promise<void>;
       wake: () => Promise<void>;
     }>,
@@ -438,6 +473,49 @@ export class AgentMail {
       return parseDelegationReceipt(JSON.stringify(row.receipt));
     if (row?.state === "dead") throw new Error(`Agent delivery ${row.reason}`);
     throw new Error("Agent did not return a delegated work receipt");
+  }
+
+  /** Reconcile exhausted original outbox mail into one local system reply. */
+  async stageUndeliverableReplies(): Promise<void> {
+    const identity = await this.deps.identity();
+    if (identity === null) return;
+    const post = this.deps.post();
+    let cursor: string | undefined;
+    do {
+      const page = post.deadLetters(64, cursor);
+      for (const letter of page.letters) {
+        if (
+          letter.reason !== "exhausted" ||
+          letter.envelope.kind !== "agentMail"
+        )
+          continue;
+        const envelope = Schema.decodeUnknownOption(PostEnvelopeSchema)(
+          letter.envelope,
+        );
+        if (envelope._tag === "None" || envelope.value.kind !== "agentMail")
+          continue;
+        const original = Schema.decodeUnknownOption(BirdDogMailSchema)(
+          envelope.value.event,
+        );
+        const address = Schema.decodeUnknownOption(agentMailAddressSchema)(
+          envelope.value.address,
+        );
+        if (
+          original._tag === "None" ||
+          address._tag === "None" ||
+          original.value.key !== envelope.value.key ||
+          original.value.reply !== undefined ||
+          original.value.from.kind !== "agent" ||
+          original.value.from.agentId !== identity.agentId ||
+          address.value.scopeId !== identity.scopeId ||
+          address.value.agentId !== original.value.to.agentId
+        )
+          continue;
+        const reply = undeliverableReply(original.value, Date.now());
+        await this.deps.onUndeliverable(original.value, reply);
+      }
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
   }
 
   /** Stage the acceptance reply through this Post owner without leaving the transaction. */

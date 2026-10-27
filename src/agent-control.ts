@@ -451,13 +451,14 @@ export async function waitForAgentSettlement(
 
 /**
  * A host's refusal of an Agent creating an Agent: the creator asked to give the
- * created Agent more than it holds, or the host cannot tell which Agent is
- * creating. It reaches the caller as an `agents.create` failure.
+ * created Agent more than it holds, the host cannot tell which Agent is
+ * creating, or the request id belongs to another creating Agent or Session. It
+ * reaches the caller as an `agents.create` failure.
  */
 export class AgentCreateRefused extends Error {
   override readonly name = "AgentCreateRefused";
   constructor(
-    readonly reason: "exceeds_creator" | "no_creator",
+    readonly reason: "exceeds_creator" | "no_creator" | "request_conflict",
     message: string,
   ) {
     super(message);

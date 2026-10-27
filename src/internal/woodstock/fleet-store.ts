@@ -149,12 +149,17 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
   storage.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_held_delegations (
     request_id TEXT PRIMARY KEY
   ) STRICT`);
+  storage.sql
+    .exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_undeliverable_delegations (
+    request_id TEXT PRIMARY KEY
+  ) STRICT`);
   return {
     read: (requestId: string) =>
       storage.sql
         .exec(
           `SELECT delegation.input, delegation.mail,
             CASE
+              WHEN terminal.request_id IS NOT NULL THEN 'undeliverable'
               WHEN held.request_id IS NOT NULL THEN 'held'
               WHEN delegation.receipt IS NOT NULL THEN 'accepted'
               ELSE 'pending'
@@ -163,6 +168,8 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
           FROM shiitake_fleet_delegations AS delegation
           LEFT JOIN shiitake_fleet_held_delegations AS held
             ON held.request_id = delegation.request_id
+          LEFT JOIN shiitake_fleet_undeliverable_delegations AS terminal
+            ON terminal.request_id = delegation.request_id
           WHERE delegation.request_id = ?`,
           requestId,
         )
@@ -231,9 +238,38 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
         storage.sql.exec(
           `INSERT OR IGNORE INTO shiitake_fleet_held_delegations (request_id)
           SELECT request_id FROM shiitake_fleet_delegations
-          WHERE request_id = ? AND receipt IS NULL`,
+          WHERE request_id = ? AND receipt IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM shiitake_fleet_undeliverable_delegations
+              WHERE request_id = ?
+            )`,
+          requestId,
           requestId,
         );
+      });
+    },
+    recordUndeliverable(requestId: string): boolean {
+      return storage.transactionSync(() => {
+        const held = storage.sql
+          .exec(
+            `SELECT delegation.request_id
+            FROM shiitake_fleet_delegations AS delegation
+            JOIN shiitake_fleet_held_delegations AS held
+              ON held.request_id = delegation.request_id
+            WHERE delegation.request_id = ? AND delegation.receipt IS NULL`,
+            requestId,
+          )
+          .toArray()[0];
+        if (held === undefined) return false;
+        storage.sql.exec(
+          "INSERT OR IGNORE INTO shiitake_fleet_undeliverable_delegations(request_id) VALUES (?)",
+          requestId,
+        );
+        storage.sql.exec(
+          "DELETE FROM shiitake_fleet_held_delegations WHERE request_id = ?",
+          requestId,
+        );
+        return true;
       });
     },
   };

@@ -598,49 +598,23 @@ it("inherits the delegation depth cap across handoffs and refuses work at the li
         outcome: "cancelled",
       },
     });
-    const undeliverable: import("@fungi.computer/bird-dog").BirdDogMail = {
-      key: `${admitted.key}:reply:0`,
+    const withoutFacts: import("@fungi.computer/bird-dog").BirdDogMail = {
+      key: reply.key,
       from: {
         kind: "agent",
         agentId: "c",
         sessionId: "c-session",
       },
-      to: {
-        kind: "agent",
-        agentId: "b",
-        sessionId: "b-session",
-      },
-      replyTo: [],
-      content: "Not delivered: recipient offline.",
-      createdAt: Date.now(),
-      reply: { outcome: "undeliverable", reason: "recipient_offline" },
-    };
-    expect(reopened.authenticateReply(undeliverable)).toEqual({
-      ancestors: ["a"],
-      maxDepth: 2,
-      reply: {
-        agentId: "c",
-        sessionId: "c-session",
-        outcome: "undeliverable",
-        reason: "recipient_offline",
-      },
-    });
-    expect(
-      reopened.authenticateReply({
-        ...undeliverable,
-        key: `${admitted.key}:reply:1`,
-      }),
-    ).toBeUndefined();
-    const withoutFacts: import("@fungi.computer/bird-dog").BirdDogMail = {
-      key: reply.key,
-      from: reply.from,
       to: reply.to,
       replyTo: reply.replyTo,
       content: reply.content,
       createdAt: reply.createdAt,
     };
     const forgeries: import("@fungi.computer/bird-dog").BirdDogMail[] = [
-      { ...reply, from: { ...reply.from, sessionId: "unrelated" } },
+      {
+        ...reply,
+        from: { kind: "agent", agentId: "c", sessionId: "unrelated" },
+      },
       { ...reply, reply: { commandId: "other-work", outcome: "completed" } },
       { ...reply, key: `${admitted.key}:reply:1` },
       withoutFacts,

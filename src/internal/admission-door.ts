@@ -134,10 +134,17 @@ function decodeReply(request: AdmitRequest): VerifiedAgentReply | undefined {
     "Verified Agent reply is invalid",
   );
   const mail = request.mail;
+  const agentAuthored =
+    mail?.from.kind === "agent" &&
+    mail.from.agentId === reply.agentId &&
+    mail.from.sessionId === reply.sessionId;
+  const systemUndeliverable =
+    mail?.from.kind === "system" &&
+    reply.outcome === "undeliverable" &&
+    reply.reason === "recipient_offline";
   if (
     mail?.replyTo.length !== 0 ||
-    mail.from.agentId !== reply.agentId ||
-    mail.from.sessionId !== reply.sessionId ||
+    (!agentAuthored && !systemUndeliverable) ||
     request.command.type !== "prompt" ||
     request.command.delivery !== "steer"
   )

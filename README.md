@@ -20,16 +20,7 @@ To add your own behaviour, start the extension guide at
 ## Community-funded
 
 We don't take VC money. Fungi is built in the open and proudly backed by its
-community, including the **$SHIIT** community token.
-
-$SHIT is not $SHIIT.
-
-Official contract address (Solana):
-`412ECWXN3jGbd1kn8ck7eeupWttkmrFkNm9JqfAzpump`
-
-This is the only official address. Fungi will never DM you about the token.
-Nothing here is financial advice, and the token isn't a share in Fungi. More at
-[fungi.computer/funding](https://fungi.computer/funding).
+community.
 
 ## Recover an uncertain send
 
