@@ -51,10 +51,6 @@ import {
   type RunContract,
 } from "./woodstock/index.js";
 
-function runtimeFailure(message: string): ShiitakeError {
-  return new ShiitakeError("runtime", "rejected", message);
-}
-
 const toolSetupMessages = {
   missing: "Instruction capabilities have no tool runtime",
   runtime: "Tool runtime failed",
@@ -70,6 +66,39 @@ export class ToolSetupError extends ShiitakeError {
   get diagnostic(): string {
     return toolSetupMessages[this.phase];
   }
+}
+
+/** Closed reasons a rejected run names, never a foreign error's own text. */
+const runRejectedDiagnostics = {
+  model: "model-failed",
+  tool: "tool-failed",
+  control: "control-failed",
+  listener: "listener-failed",
+} as const;
+
+/** A run Mule ended with a non-model error; it names a closed reason. */
+export class RunRejectedError extends ShiitakeError {
+  constructor(
+    private readonly reason: keyof typeof runRejectedDiagnostics,
+    underlying: MuleError,
+  ) {
+    super(
+      "runtime",
+      "rejected",
+      "Mule rejected the durable command run",
+      undefined,
+      underlying,
+    );
+  }
+
+  get diagnostic(): string {
+    return runRejectedDiagnostics[this.reason];
+  }
+}
+
+/** Name a non-model Mule error by its closed reason. */
+function rejectedRun(error: MuleError): RunRejectedError {
+  return new RunRejectedError(error.phase, error);
 }
 
 /**
@@ -359,7 +388,9 @@ export function runAcceptedCommand(
                     returnedFailureReason(exit.value);
                   failureReason = (
                     failedModelAttempts > 1 &&
-                    exit.value.modelLimitReason === undefined
+                    exit.value.modelLimitReason === undefined &&
+                    acquired.rejection?.(exit.value.message)?.code !==
+                      "usage-limit-reached"
                       ? `The model failed ${String(failedModelAttempts)} times on this conversation: ${cause}`
                       : cause
                   ).slice(0, 200);
@@ -368,13 +399,15 @@ export function runAcceptedCommand(
                 const error = Cause.findErrorOption(exit.cause);
                 return recorder(
                   failedEnd,
-                  Option.isSome(error) && error.value.phase === "model"
-                    ? `model:rejected: ${error.value.message}`.slice(0, 200)
-                    : unavailableRunReason({
+                  Option.isNone(error)
+                    ? unavailableRunReason({
                         runId: failedEnd.run.value,
                         provider: acquired.model.provider,
                         model: acquired.model.id,
-                      }),
+                      })
+                    : error.value.phase === "model"
+                      ? `model:rejected: ${error.value.message}`.slice(0, 200)
+                      : `runtime:rejected: ${rejectedRun(error.value).diagnostic}`,
                 );
               }),
               Effect.mapError((error) =>
@@ -386,7 +419,7 @@ export function runAcceptedCommand(
                       undefined,
                       error,
                     )
-                  : runtimeFailure("Mule rejected the durable command run"),
+                  : rejectedRun(error),
               ),
             );
         },

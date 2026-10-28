@@ -59,6 +59,7 @@ import {
   invokeSyncHandler,
 } from "./extension-hook.js";
 import {
+  hasSessionAttention,
   setSessionAttention,
   clearSessionAttention,
   projectSessionAttention,
@@ -67,6 +68,7 @@ import {
   hasStoredSession,
   readSessionLineage,
   hasPendingSessionSteer,
+  readWorkSender,
   hasSuccessfulToolResult,
   advanceCursor,
   declareSessionDocument,
@@ -91,10 +93,15 @@ import {
   writeTimer,
 } from "./woodstock/index.js";
 import { JsonValueSchema } from "./json-value.js";
-import { publishOwnerObservation } from "./observation-kernel.js";
+import {
+  hasOwnerObservers,
+  publishOwnerObservation,
+} from "./observation-kernel.js";
 
 /** The settled consumer name core itself uses for mail and control repair. */
 export const coreConsumer = "core";
+/** Core reports to delegators after the extensions have seen a settlement. */
+export const reportConsumer = "core-report";
 
 const maximumKeyLength = 256;
 const maximumRecordBytes = 1024 * 1024;
@@ -200,6 +207,7 @@ export type ExtensionRuntime = Readonly<{
     extensionId: string,
     command: string,
     input: Json,
+    caller?: import("../extensions.js").ExtensionCommandCallerV0,
   ) => Effect.Effect<Json, ShiitakeError>;
   list: () => readonly ExtensionStatusV0[];
   resume: (id: string) => Effect.Effect<ExtensionStatusV0, ShiitakeError>;
@@ -621,7 +629,7 @@ export function openExtensionRuntime(
       set: (sessionId, item) => {
         const decoded = Schema.decodeUnknownResult(AttentionItemSchema, {
           onExcessProperty: "error",
-        })(item);
+        })(item.waitingOn === undefined ? item : { ...item, inbox: false });
         return decoded._tag === "Failure"
           ? Effect.fail(stateError("bound", "Attention item is invalid"))
           : mutate(sessionId, () => {
@@ -633,6 +641,13 @@ export function openExtensionRuntime(
               setSessionAttention(owner, sessionId, id, decoded.success);
             });
       },
+      awaitsPerson: (sessionId) =>
+        requireRead(id).pipe(
+          Effect.tap(() => grantGuard(member, "attention")),
+          Effect.andThen(
+            storeStep(() => hasSessionAttention(owner, sessionId)),
+          ),
+        ),
       clear: (sessionId, itemId) =>
         boundedKey(itemId, "An attention id").pipe(
           Effect.andThen(
@@ -670,6 +685,7 @@ export function openExtensionRuntime(
                       extensionId: id,
                       correlation: request.correlation ?? null,
                     },
+                    continuesWorkId: request.continuesWorkId,
                   });
                   return result.status === "accepted"
                     ? {
@@ -996,6 +1012,8 @@ export function openExtensionRuntime(
         send: sendFor(member),
         timers: timersFor(member),
         attention: attentionFor(member),
+        isObserved: (sessionId: string) =>
+          member.status === "running" && hasOwnerObservers(owner, sessionId),
         sessionPosition: (sessionId: string) =>
           requireRead(member.admitted.id).pipe(
             Effect.andThen(grantGuard(member, "state")),
@@ -1024,6 +1042,20 @@ export function openExtensionRuntime(
                   decodeClientSessionId(run.sessionId),
                   run.workId,
                 ),
+              ),
+            ),
+          ),
+        workSender: (run: Pick<RunIdentityV0, "sessionId" | "workId">) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "run_tools")),
+            Effect.andThen(
+              storeStep(
+                () =>
+                  readWorkSender(
+                    owner,
+                    decodeClientSessionId(run.sessionId),
+                    run.workId,
+                  ) ?? null,
               ),
             ),
           ),
@@ -1807,7 +1839,7 @@ export function openExtensionRuntime(
         }
         return Object.freeze(slots);
       },
-      call: (target, extensionId, command, raw) =>
+      call: (target, extensionId, command, raw, caller) =>
         Effect.gen(function* () {
           const member = members.get(extensionId);
           if (member?.admitted.grants.has("commands") !== true)
@@ -1878,7 +1910,10 @@ export function openExtensionRuntime(
               ),
             );
           }
-          const prepared = handler({ sessionId, input: raw });
+          const prepared =
+            caller === undefined
+              ? handler({ sessionId, input: raw })
+              : handler({ sessionId, input: raw, caller });
           if (prepared._tag === "Failure")
             return yield* Effect.fail(
               new ShiitakeError(

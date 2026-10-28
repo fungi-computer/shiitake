@@ -1,5 +1,42 @@
 # @fungi.computer/shiitake
 
+## 0.6.0
+
+### Minor Changes
+
+- Changes since 0.5.0:
+
+  - fix(shiitake): drop the visitor line alias the integration removed
+  - fix(shiitake): probe terminal facts before projecting settlement
+  - fix(subagents): retain quiet watched rows in the bounded cache
+  - fix(subagents): poll the footer only for live observers
+  - fix(shiitake): keep the waiting-on-you cap private
+  - feat(tui,truffle): the Board ships as a program extension, read from stores
+  - feat(shiitake): route a child's waiting items to the Agent that sent the
+    work
+  - fix(delegation): report a delegated Session once it rests, never another
+    sender's mail
+  - feat(parakeet): answer questions in the composer on the terminal and the web
+  - fix(delegation): every idle Session reports to whoever sent it work
+  - feat(goal): goal.wait, polling turns wait on children, agents.send puts new
+    Sessions under a goal
+  - fix(shiitake): keep usage limits out of repeated-model-failure summaries
+  - feat(shiitake): support Local parent answers to child Asks
+  - fix(tui): checkpoint bounded live client recovery
+  - feat(oyster): compose visitor channel through Shiitake client
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.5.0
+  - @fungi.computer/bird-dog@0.3.0
+  - @fungi.computer/knapsack@0.4.0
+  - @fungi.computer/mule@0.2.1
+  - @fungi.computer/mycelium@0.2.3
+
 ## 0.5.0
 
 ### Minor Changes

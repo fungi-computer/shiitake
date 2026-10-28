@@ -34,6 +34,8 @@ it.each([
     let acquisition: ModelAcquisition = {
       ...resource(() => Promise.resolve()),
       retryable,
+      rejection: (message) =>
+        message === refused ? { code: "usage-limit-reached" } : undefined,
     };
     if (withStream) acquisition = { ...acquisition, stream: faux.stream };
     if (withRetryAfter)
@@ -45,6 +47,10 @@ it.each([
       expect(acquired.retryable).toBe(retryable);
       expect(acquired.retryable(refused)).toBe(true);
       expect(acquired.retryable(unknown)).toBe(false);
+      expect(acquired.rejection?.(refused)).toEqual({
+        code: "usage-limit-reached",
+      });
+      expect(acquired.rejection?.(unknown)).toBeUndefined();
     } finally {
       await Effect.runPromise(acquired.release);
     }

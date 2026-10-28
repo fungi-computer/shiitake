@@ -75,8 +75,9 @@ readonly reason:
 ### AgentCreateRefused
 
 A host's refusal of an Agent creating an Agent: the creator asked to give the
-created Agent more than it holds, or the host cannot tell which Agent is
-creating. It reaches the caller as an `agents.create` failure.
+created Agent more than it holds, the host cannot tell which Agent is creating,
+or the request id belongs to another creating Agent or Session. It reaches the
+caller as an `agents.create` failure.
 
 #### Extends
 
@@ -92,10 +93,10 @@ new AgentCreateRefused(reason, message): AgentCreateRefused;
 
 ###### Parameters
 
-| Parameter | Type                                  |
-| --------- | ------------------------------------- |
-| `reason`  | `"exceeds_creator"` \| `"no_creator"` |
-| `message` | `string`                              |
+| Parameter | Type                                                          |
+| --------- | ------------------------------------------------------------- |
+| `reason`  | `"exceeds_creator"` \| `"no_creator"` \| `"request_conflict"` |
+| `message` | `string`                                                      |
 
 ###### Returns
 
@@ -124,10 +125,61 @@ Error.name;
 ##### reason
 
 ```ts
-readonly reason: "exceeds_creator" | "no_creator";
+readonly reason: "exceeds_creator" | "no_creator" | "request_conflict";
 ```
 
 ## Type Aliases
+
+### AgentControlAnswerInput
+
+```ts
+type AgentControlAnswerInput = Readonly<{
+  agentId: string;
+  sessionId: string;
+  askId: string;
+  requestId: string;
+  answers: MyceliumJsonValue;
+}>;
+```
+
+Sender-authenticated submission for one child Session's routed Ask.
+
+---
+
+### AgentControlEscalateInput
+
+```ts
+type AgentControlEscalateInput = Readonly<{
+  agentId: string;
+  sessionId: string;
+  itemId: string;
+  note?: string;
+}>;
+```
+
+Sender-authenticated escalation of one item a child Session left waiting.
+
+---
+
+### AgentControlAnswerOutput
+
+```ts
+type AgentControlAnswerOutput = z.infer<typeof answerOutput>;
+```
+
+Typed outcome of a sender's answer to a child Ask.
+
+---
+
+### AgentControlEscalateOutput
+
+```ts
+type AgentControlEscalateOutput = z.infer<typeof escalateOutput>;
+```
+
+Typed outcome of a sender's escalation of a child's item.
+
+---
 
 ### ArchiveRefusalReason
 
@@ -173,10 +225,16 @@ One host-offered model usable as an Agent's create or setModel choice.
 ```ts
 type AgentDelegationInput = Readonly<{
   agentId: string;
-  sessionId: string;
   text: string;
   requestId: string;
-  delivery: "steer" | "followUp";
+}> &
+  | Readonly<{
+  sessionId: string;
+  delivery: "steer";
+}>
+  | Readonly<{
+  sessionId?: string;
+  delivery: "followUp";
 }>;
 ```
 
@@ -226,6 +284,16 @@ type AgentControlDirectory = Readonly<{
     invocation?,
   ) => Promise<Accepted | Held>;
   recall?: (input, sourceSessionId, signal) => Promise<CancelResult>;
+  answer?: (
+    input,
+    senderSessionId,
+    signal,
+  ) => Promise<AgentControlAnswerOutput>;
+  escalate?: (
+    input,
+    senderSessionId,
+    signal,
+  ) => Promise<AgentControlEscalateOutput>;
   create?: (input, signal) => Promise<AgentControlAgent>;
   setModel?: (input, signal) => Promise<void>;
   archive?: (input, signal) => Promise<void>;
@@ -247,6 +315,126 @@ type AgentControlDirectory = Readonly<{
 Host-owned discovery and per-operation access to ordinary Agents.
 
 ## Variables
+
+### answerOutput
+
+```ts
+const answerOutput: ZodDiscriminatedUnion<
+  [
+    ZodObject<
+      {
+        status: ZodLiteral<"answered">;
+        via: ZodEnum<{
+          in_turn: "in_turn";
+          follow_up: "follow_up";
+        }>;
+        commandId: ZodExactOptional<ZodString>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"not_found">;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"closed">;
+        reason: ZodEnum<{
+          cancelled: "cancelled";
+          undeliverable: "undeliverable";
+          answered: "answered";
+          declined: "declined";
+          withdrawn: "withdrawn";
+          expired: "expired";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"refused">;
+        reason: ZodEnum<{
+          not_sender: "not_sender";
+          no_provenance: "no_provenance";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"unavailable">;
+        reason: ZodLiteral<"unsupported">;
+      },
+      $strict
+    >,
+  ],
+  "status"
+>;
+```
+
+Typed outcome of a sender's answer to a child Ask.
+
+---
+
+### escalateOutput
+
+```ts
+const escalateOutput: ZodDiscriminatedUnion<
+  [
+    ZodObject<
+      {
+        status: ZodLiteral<"escalated">;
+        to: ZodLiteral<"person">;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"not_found">;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"closed">;
+        reason: ZodEnum<{
+          cancelled: "cancelled";
+          undeliverable: "undeliverable";
+          answered: "answered";
+          declined: "declined";
+          withdrawn: "withdrawn";
+          expired: "expired";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"refused">;
+        reason: ZodEnum<{
+          not_sender: "not_sender";
+          no_provenance: "no_provenance";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"unavailable">;
+        reason: ZodLiteral<"unsupported">;
+      },
+      $strict
+    >,
+  ],
+  "status"
+>;
+```
+
+Typed outcome of a sender's escalation of a child's item.
+
+---
 
 ### archiveRefusalReasons
 
@@ -279,10 +467,16 @@ function waitForAgentSettlement(
 ): Promise<
   Readonly<{
     acceptedSender: string | null;
+    delegator: string | null;
     terminal: SessionTerminal;
     content: string;
     usage: readonly Pick<AssistantMessage, "model" | "provider" | "usage">[];
     toolCalls: number;
+    waitingOnYou: readonly Readonly<{
+      itemId: string;
+      kind: string;
+      summary: string;
+    }>[];
   }>
 >;
 ```
@@ -301,10 +495,12 @@ Await one exact durable terminal without opening a transcript observation.
 
 #### Returns
 
-`Promise`\<`Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
-[`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
-readonly `Pick`\<`AssistantMessage`, `"model"` \| `"provider"` \| `"usage"`\>[];
-`toolCalls`: `number`; \}\>\>
+`Promise`\<`Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
+`string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
+`content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, `"model"` \|
+`"provider"` \| `"usage"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
+`Readonly`\<\{ `itemId`: `string`; `kind`: `string`; `summary`: `string`;
+\}\>[]; \}\>\>
 
 ---
 

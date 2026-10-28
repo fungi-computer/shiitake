@@ -1081,6 +1081,7 @@ type SendInputV0 = Readonly<{
   }>;
   when: "now" | "idle";
   correlation?: string;
+  continuesWorkId?: string;
 }>;
 ```
 
@@ -1160,6 +1161,19 @@ session: string;
 
 ---
 
+### ExtensionCommandCallerV0
+
+```ts
+type ExtensionCommandCallerV0 = Readonly<{
+  agentId: string;
+  sessionId: string;
+}>;
+```
+
+Host-authenticated caller context; never decoded from command JSON or HTTP.
+
+---
+
 ### CommandHandlersV0
 
 ```ts
@@ -1168,6 +1182,7 @@ type CommandHandlersV0<C> = {
     call: Readonly<{
       sessionId: CommandSessionIdsV0[C[K]["scope"]];
       input: C[K]["input"]["Type"];
+      caller?: ExtensionCommandCallerV0;
     }>,
   ) =>
     | C[K]["output"]["Type"]
@@ -1197,6 +1212,9 @@ type AttentionV0 = Readonly<{
     sessionId,
     item,
   ) => Effect.Effect<void, ExtensionStateError, ExtensionTx>;
+  awaitsPerson: (
+    sessionId,
+  ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   clear: (
     sessionId,
     id,
@@ -1227,11 +1245,19 @@ type ExtensionContextV0<S, Config, D> = Readonly<{
   hasPendingSteer: (
     run,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
+  workSender: (
+    run,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
   hasSuccessfulToolResult: (
     run,
     toolCallId,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   observe: (sessionId) => Effect.Effect<void, never, ExtensionTx>;
+  isObserved: (sessionId) => boolean;
   transact: <A, E>(body) => Effect.Effect<A, E | ExtensionStop | ShiitakeError>;
 }>;
 ```
@@ -1722,9 +1748,9 @@ A parsed invocation retains its typed handler until the transaction runs.
 
 #### Parameters
 
-| Parameter | Type                                                                           |
-| --------- | ------------------------------------------------------------------------------ |
-| `frame`   | `Readonly`\<\{ `sessionId`: `string` \| `null`; `input`: [`Json`](#json); \}\> |
+| Parameter | Type                                                                                                                                               |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `frame`   | `Readonly`\<\{ `sessionId`: `string` \| `null`; `input`: [`Json`](#json); `caller?`: [`ExtensionCommandCallerV0`](#extensioncommandcallerv0); \}\> |
 
 #### Returns
 
@@ -1854,6 +1880,16 @@ Public state-update shape: infer the return _before_ rejecting async results.
 
 ---
 
+### AttentionRecipient
+
+```ts
+type AttentionRecipient = typeof AttentionRecipientSchema.Type;
+```
+
+Decoded Agent Session an attention item waits on.
+
+---
+
 ### AttentionItem
 
 ```ts
@@ -1894,6 +1930,22 @@ ASCII extension identity shared by the host definition and its clients.
 
 ---
 
+### AttentionRecipientSchema
+
+```ts
+const AttentionRecipientSchema: Struct<{
+  agentId: NonEmptyString;
+  sessionId: NonEmptyString;
+  name: NonEmptyString;
+}>;
+```
+
+The Agent Session that sent the work an item belongs to. The host derives it
+from the accepted mail; it is the only party the item waits on until it is
+escalated.
+
+---
+
 ### AttentionItemSchema
 
 ```ts
@@ -1904,11 +1956,20 @@ const AttentionItemSchema: Struct<{
   since: Int;
   expiresAt: optional<Int>;
   inbox: optional<Literal<false>>;
+  waitingOn: optional<
+    Struct<{
+      agentId: NonEmptyString;
+      sessionId: NonEmptyString;
+      name: NonEmptyString;
+    }>
+  >;
 }>;
 ```
 
 An extension-owned request for human attention; expiry is owned by its timer.
-Items marked `inbox: false` remain visible without changing the inbox state.
+Items marked `inbox: false` remain visible without changing the inbox state. An
+item with `waitingOn` waits on that Agent first and is never a person's inbox
+item until it is escalated past every Agent.
 
 ## Functions
 

@@ -5,7 +5,12 @@ export { type SessionAttention } from "./session-attention.js";
 import type { SandboxFailureEvent } from "@fungi.computer/mycelium";
 import type { ModelPreference } from "./internal/model-preference.js";
 import type { Message } from "@fungi.computer/mule/effect";
-import type { ExtensionSlotV0, ExtensionStatusV0, Json } from "./extensions.js";
+import type {
+  ExtensionCommandCallerV0,
+  ExtensionSlotV0,
+  ExtensionStatusV0,
+  Json,
+} from "./extensions.js";
 import type {
   AbortCommand,
   BranchCommand,
@@ -63,6 +68,15 @@ export type {
   TitleCommand,
 } from "./internal/client-boundary.js";
 
+export {
+  participantSnapshot,
+  visitorPendingPrompt,
+  visitorSnapshot,
+  visitorView,
+  type ParticipantPolicy,
+  type VisitorPendingPrompt,
+  type VisitorView,
+} from "./client-visitor.js";
 /** Semantic acknowledgement returned after one durable acceptance commit. */
 export type Accepted = Readonly<{
   /** Indicates that the owner transaction committed. */
@@ -242,8 +256,12 @@ export type SessionExtensionSlots = Readonly<Record<string, ExtensionSlotV0>>;
 
 /** Generic Session-scope extension commands. */
 export type SessionExtensionControls = Readonly<{
-  /** Call one Session-scope command with its encoded input; resolves the encoded output. */
-  call: (command: string, input: Json) => Promise<Json>;
+  /** Call one Session-scope command with its encoded input and optional host caller. */
+  call: (
+    command: string,
+    input: Json,
+    caller?: ExtensionCommandCallerV0,
+  ) => Promise<Json>;
 }>;
 
 /** Generic Agent-scope extension controls. */

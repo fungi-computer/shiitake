@@ -22,7 +22,10 @@ type OwnerPublication =
       reason: ObservationReason;
     }>
   | Readonly<{ kind: "agent-execution" }>;
-type OwnerPublisher = (publication: OwnerPublication) => void;
+type OwnerPublisher = Readonly<{
+  publish: (publication: OwnerPublication) => void;
+  observes: (sessionId: string) => boolean;
+}>;
 type Listener = {
   readonly sessionId: string;
   readonly settlementOnly: boolean;
@@ -35,6 +38,16 @@ type Listener = {
 };
 
 const ownerPublishers = new WeakMap<SqliteOwner, Set<OwnerPublisher>>();
+
+/** Actual live-view demand, excluding exact-command settlement waiters. */
+export function hasOwnerObservers(
+  store: SqliteOwner,
+  sessionId: string,
+): boolean {
+  for (const publisher of ownerPublishers.get(store) ?? [])
+    if (publisher.observes(sessionId)) return true;
+  return false;
+}
 
 /** One scoped process-local observation registration. */
 export type ObservationRegistration = Readonly<{
@@ -113,9 +126,9 @@ export function publishOwnerObservation(
 ): void {
   const publishers = ownerPublishers.get(store);
   if (publishers === undefined) return;
-  for (const publish of publishers) {
+  for (const publisher of publishers) {
     try {
-      publish({ kind: "session", sessionId, reason });
+      publisher.publish({ kind: "session", sessionId, reason });
     } catch (cause) {
       reportCatchFailure("owner-observation-publish", cause);
       continue;
@@ -127,9 +140,9 @@ export function publishOwnerObservation(
 export function publishAgentExecutionChange(store: SqliteOwner): void {
   const publishers = ownerPublishers.get(store);
   if (publishers === undefined) return;
-  for (const publish of publishers) {
+  for (const publisher of publishers) {
     try {
-      publish({ kind: "agent-execution" });
+      publisher.publish({ kind: "agent-execution" });
     } catch (cause) {
       reportCatchFailure("owner-execution-change-publish", cause);
     }
@@ -198,7 +211,14 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
       );
     }
   };
-  publishers.add(publish);
+  const publisher: OwnerPublisher = {
+    publish,
+    observes: (sessionId) =>
+      [...(sessions.get(sessionId) ?? [])].some(
+        (listener) => !listener.closed && !listener.settlementOnly,
+      ),
+  };
+  publishers.add(publisher);
   ownerPublishers.set(store, publishers);
 
   return Object.freeze({
@@ -264,7 +284,7 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
     close: Effect.sync(() => {
       if (released) return;
       released = true;
-      publishers.delete(publish);
+      publishers.delete(publisher);
       if (publishers.size === 0) ownerPublishers.delete(store);
       for (const listener of active) closeListener(listener);
     }),

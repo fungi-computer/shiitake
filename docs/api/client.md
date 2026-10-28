@@ -10,12 +10,57 @@
 
 ## Type Aliases
 
+### ParticipantPolicy
+
+```ts
+type ParticipantPolicy = Readonly<{
+  turnIsCurrent: (sessionId, commandId) => boolean;
+  deliverAgentReply: (sessionId, commandId, reply) => boolean;
+}>;
+```
+
+The host decides which Agent work may be delivered to this participant.
+
+---
+
+### VisitorView
+
+```ts
+type VisitorView = Readonly<{
+  status: "idle" | "working";
+  lines: readonly Readonly<{
+    id: string;
+    from: "visitor" | "agent" | "operator";
+    text: string;
+  }>[];
+  progress: string | null;
+}>;
+```
+
+What a visitor may see of their own conversation Session.
+
+---
+
+### VisitorPendingPrompt
+
+```ts
+type VisitorPendingPrompt = Pick<
+  SessionPendingPrompt,
+  "commandId" | "requestId" | "text" | "delivery" | "images"
+>;
+```
+
+Public pending facts exclude the host's private metadata and admission origin.
+
+---
+
 ### Accepted
 
 ```ts
 type Accepted = Readonly<{
   status: "accepted";
   commandId: string;
+  sessionId?: string;
 }>;
 ```
 
@@ -115,6 +160,7 @@ type SessionCommandHandler = {
     Readonly<{
       status: "accepted";
       commandId: string;
+      sessionId?: string;
     }>
   >;
   (input): Promise<CancelResult>;
@@ -142,6 +188,7 @@ Execute one retained type-discriminated Session command.
 (input): Promise<Readonly<{
   status: "accepted";
   commandId: string;
+  sessionId?: string;
 }>>;
 ```
 
@@ -155,7 +202,8 @@ Accept a prompt or a compaction request as queued Session work.
 
 ##### Returns
 
-`Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>\>
+`Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`;
+`sessionId?`: `string`; \}\>\>
 
 #### Call Signature
 
@@ -977,6 +1025,93 @@ const DelegationReceiptSchema: Schema.Codec<DelegationReceipt>;
 A delegated send is accepted by its owner or held in durable mail custody.
 
 ## Functions
+
+### participantSnapshot()
+
+```ts
+function participantSnapshot(snapshot, owner): SessionSnapshot;
+```
+
+Filter participant delivery only; the holder's stored Session is unchanged.
+
+#### Parameters
+
+| Parameter  | Type                                      |
+| ---------- | ----------------------------------------- |
+| `snapshot` | [`SessionSnapshot`](#sessionsnapshot)     |
+| `owner`    | [`ParticipantPolicy`](#participantpolicy) |
+
+#### Returns
+
+[`SessionSnapshot`](#sessionsnapshot)
+
+---
+
+### visitorPendingPrompt()
+
+```ts
+function visitorPendingPrompt(prompt, visitorId): VisitorPendingPrompt;
+```
+
+Project one owner-selected prompt without exposing host identity or correlation
+metadata.
+
+#### Parameters
+
+| Parameter   | Type                                            |
+| ----------- | ----------------------------------------------- |
+| `prompt`    | [`SessionPendingPrompt`](#sessionpendingprompt) |
+| `visitorId` | `string`                                        |
+
+#### Returns
+
+[`VisitorPendingPrompt`](#visitorpendingprompt)
+
+---
+
+### visitorSnapshot()
+
+```ts
+function visitorSnapshot(snapshot, visitorId): SessionSnapshot;
+```
+
+Visitor-scoped Session facts use the visitor's public address, never the
+internal Session ID.
+
+#### Parameters
+
+| Parameter   | Type                                  |
+| ----------- | ------------------------------------- |
+| `snapshot`  | [`SessionSnapshot`](#sessionsnapshot) |
+| `visitorId` | `string`                              |
+
+#### Returns
+
+[`SessionSnapshot`](#sessionsnapshot)
+
+---
+
+### visitorView()
+
+```ts
+function visitorView(snapshot, visitorId): VisitorView;
+```
+
+Project only this visitor's host-attributed prompts, their replies, and explicit
+operator replies.
+
+#### Parameters
+
+| Parameter   | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot`  | \| `Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly `Readonly`\<\{ `requestId?`: `string`; `meta?`: [`Json`](extensions.md#json); `data?`: [`Json`](extensions.md#json); `origin?`: `Readonly`\<\{ `extensionId`: `string`; `correlation`: `string` \| `null`; \}\>; `id`: `string`; `sequence`: `number`; `commandId`: `string` \| `null`; `value`: [`ModelMessage`](#modelmessage); \}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`; `diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `tokensBefore`: `number`; `tokensAfter`: `number` \| `null`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger) \| `null`; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger); `result`: `"failed"` \| `"nothing_to_compact"` \| `"stale"` \| `"insufficient"`; `diagnostic`: `string` \| `null`; \}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`: [`SessionPendingPrompts`](#sessionpendingprompts); `activity`: [`SessionActivity`](#sessionactivity); `progress`: \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`; `revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`: `number`; \}\>[]; `extensions`: [`SessionExtensionSlots`](#sessionextensionslots); `attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`: `number` \| `null`; \}\>; \}\> \| `null` |
+| `visitorId` | `string`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+#### Returns
+
+[`VisitorView`](#visitorview)
+
+---
 
 ### parseDelegationReceipt()
 

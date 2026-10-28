@@ -113,6 +113,8 @@ function testSession(
       (() =>
         Promise.resolve({
           acceptedSender: null,
+          waitingOnYou: [],
+          delegator: null,
           terminal: {
             commandId: "target",
             outcome: "completed",
@@ -501,6 +503,73 @@ it("allows a follow-up send to an Agent whose Session is created on acceptance",
   }
 });
 
+it("carries a send's goal to the directory only when it opens a new Session", async () => {
+  const sends: unknown[] = [];
+  const refusals: string[] = [];
+  const runtime = await Mycelium.make({
+    session: { sessionId: "parent-session" },
+    sources: [
+      createAgentControlSource({
+        list: () => Promise.resolve([]),
+        open: () => Promise.reject(new Error("No target Session is opened")),
+        send: (input) => {
+          sends.push(input);
+          return Promise.resolve({
+            status: "accepted",
+            commandId: "recipient-command",
+          });
+        },
+      }),
+    ],
+    sandbox: directSandbox(async (bindings) => {
+      const send = bindings.agents?.send;
+      if (send === undefined) throw new Error("Agent send absent");
+      const base = { agentId: "machine-child", delivery: "followUp" };
+      await send({ ...base, requestId: "named", text: "Lane", goal: "Ship" });
+      await send({ ...base, requestId: "quick", text: "Ask", goal: false });
+      await send({ ...base, requestId: "plain", text: "Lane" });
+      await send({
+        ...base,
+        requestId: "existing",
+        sessionId: "child-session",
+        text: "More",
+        goal: "Nope",
+      }).catch((error: unknown) => {
+        refusals.push(error instanceof Error ? error.message : String(error));
+      });
+      return null;
+    }),
+  });
+  const lease = await runtime.acquire();
+  try {
+    const call = await Effect.runPromise(
+      lease.executeTool.prepare({
+        type: "toolCall",
+        id: "delegate",
+        name: "execute",
+        arguments: { code: "agents.send" },
+      }),
+    );
+    await Effect.runPromise(Stream.runCollect(call.execute()));
+    expect(sends).toEqual([
+      expect.objectContaining({ requestId: "named", goal: "Ship" }),
+      expect.objectContaining({ requestId: "quick", goal: false }),
+      {
+        agentId: "machine-child",
+        requestId: "plain",
+        text: "Lane",
+        delivery: "followUp",
+      },
+    ]);
+    expect(refusals).toEqual([
+      "goal applies only to a send that opens a new Session",
+    ]);
+  } finally {
+    await lease.release();
+    await runtime.close();
+  }
+});
+
 it("refuses a send before acceptance and carries a model diagnostic through wait", async () => {
   const diagnostic =
     "model:rejected: openai is not signed in. Run /login or choose another model with /model.";
@@ -512,6 +581,8 @@ it("refuses a send before acceptance and carries a model diagnostic through wait
     () =>
       Promise.resolve({
         acceptedSender: null,
+        waitingOnYou: [],
+        delegator: null,
         terminal: {
           commandId: "rejected",
           outcome: "failed",
@@ -638,6 +709,155 @@ async function runAgentCode(
     await runtime.close();
   }
 }
+
+it("routes agents.answer through the invoking Session captured by the host", async () => {
+  let result: unknown;
+  let sourceSessionId: string | undefined;
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      answer: (input, sessionId) => {
+        sourceSessionId = sessionId;
+        expect(input).toMatchObject({
+          agentId: "child",
+          sessionId: "child-session",
+          askId: "ask-1",
+          requestId: "answer-1",
+        });
+        return Promise.resolve({
+          status: "unavailable",
+          reason: "unsupported",
+        });
+      },
+      open: () => Promise.reject(new Error("unused")),
+    },
+    async (tools) => {
+      if (tools.answer === undefined)
+        throw new Error("Answer operation missing");
+      result = await tools.answer({
+        agentId: "child",
+        sessionId: "child-session",
+        askId: "ask-1",
+        requestId: "answer-1",
+        answers: { storage: { selected: ["SQLite"] } },
+      });
+      return null;
+    },
+    "creator-session",
+  );
+  expect(sourceSessionId).toBe("creator-session");
+  expect(result).toEqual({ status: "unavailable", reason: "unsupported" });
+});
+
+it("routes agents.escalate through the invoking Session and names the answer in its result", async () => {
+  const seen: string[] = [];
+  const results: unknown[] = [];
+  const directory = {
+    list: () => Promise.resolve([]),
+    escalate: (
+      input: { itemId: string },
+      sessionId: string,
+    ): Promise<{ status: "escalated"; to: "person" }> => {
+      seen.push(`${sessionId}:${input.itemId}`);
+      return Promise.resolve({ status: "escalated", to: "person" });
+    },
+    open: () => Promise.reject(new Error("unused")),
+  };
+  await runAgentCode(
+    directory,
+    async (tools) => {
+      if (tools.escalate === undefined)
+        throw new Error("Escalate operation missing");
+      results.push(
+        await tools.escalate({
+          agentId: "child",
+          sessionId: "child-session",
+          itemId: "ask-1",
+        }),
+      );
+      return null;
+    },
+    "sender-session",
+  );
+  expect(seen).toEqual(["sender-session:ask-1"]);
+  expect(results).toEqual([{ status: "escalated", to: "person" }]);
+});
+
+it("offers neither answer nor escalate to a host that cannot route them", async () => {
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () => Promise.reject(new Error("unused")),
+    },
+    (tools) => {
+      expect(tools.answer).toBeUndefined();
+      expect(tools.escalate).toBeUndefined();
+      return Promise.resolve(null);
+    },
+  );
+});
+
+it("returns the items a waited-on Agent left waiting on the caller", async () => {
+  const waitingOnYou = [
+    { itemId: "ask-1", kind: "question", summary: "Branch" },
+  ];
+  const session = testSession(
+    () => undefined,
+    () =>
+      Promise.resolve({
+        acceptedSender: null,
+        delegator: null,
+        waitingOnYou,
+        terminal: {
+          commandId: "target",
+          outcome: "completed" as const,
+          sequence: 1,
+          diagnostic: null,
+        },
+        content: "Asked, waiting.",
+        usage: [],
+        toolCalls: 0,
+      }),
+  );
+  let result: unknown;
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () =>
+        Promise.resolve({
+          agent: {
+            session: () => session,
+            createSession: () => Promise.reject(new Error("unused")),
+            deleteSession: () => Promise.reject(new Error("unused")),
+            listSessions: () =>
+              Promise.resolve({ sessions: [], next: undefined }),
+            extensions: {
+              list: () => Promise.resolve([]),
+              call: () => Promise.reject(new Error("unused")),
+              resume: () => Promise.reject(new Error("unused")),
+            },
+            close: () => Promise.resolve(),
+          },
+          release: () => Promise.resolve(),
+        }),
+    },
+    async (tools) => {
+      if (tools.wait === undefined) throw new Error("Wait operation missing");
+      result = await tools.wait({
+        agentId: "child",
+        sessionId: "session-a",
+        commandId: "target",
+      });
+      return null;
+    },
+  );
+  expect(result).toMatchObject({
+    commandId: "target",
+    outcome: "completed",
+    text: "Asked, waiting.",
+    waitingOnYou,
+  });
+});
 
 it("returns held custody to the delegated-work tool as waiting: recipient offline", async () => {
   const held = {
@@ -855,6 +1075,8 @@ async function waitWithHistory(
     ...testSession(undefined, () =>
       Promise.resolve({
         acceptedSender: null,
+        waitingOnYou: [],
+        delegator: null,
         terminal,
         content:
           messages

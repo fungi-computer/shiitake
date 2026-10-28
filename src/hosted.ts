@@ -243,12 +243,15 @@ function hostedPort(
       }),
       attention: Object.freeze({
         set: () => Effect.fail(unavailable("Attention")),
+        awaitsPerson: () => Effect.fail(unavailable("Attention")),
         clear: () => Effect.fail(unavailable("Attention")),
       }),
       hasPendingSteer: () => Effect.fail(unavailable("Steering")),
+      workSender: () => Effect.fail(unavailable("Run sender")),
       sessionPosition: () => Effect.fail(unavailable("Session timeline")),
       hasSuccessfulToolResult: () => Effect.fail(unavailable("A tool result")),
       observe: () => Effect.die(unavailable("Observation")),
+      isObserved: () => false,
       transact: () =>
         Effect.fail(
           new ShiitakeError(

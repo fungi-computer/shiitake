@@ -9,6 +9,7 @@ import {
   agentIds,
   delegationReplyMeta,
   delegationSendMeta,
+  settlementReadableBy,
   type AgentGrant,
 } from "../src/fleet.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
@@ -733,4 +734,33 @@ it("reads the existing correspondence receipt by request ID across reopen withou
   } finally {
     fixture.close();
   }
+});
+
+it("a delegator reads only settlements no other Agent's mail admitted", () => {
+  // Its own mail, or a goal, loop or person turn in the delegated Session.
+  expect(
+    settlementReadableBy(
+      { acceptedSender: "first", delegator: "first" },
+      "first",
+    ),
+  ).toBe(true);
+  expect(
+    settlementReadableBy({ acceptedSender: null, delegator: "first" }, "first"),
+  ).toBe(true);
+  // A later sender's correspondence stays with that sender.
+  expect(
+    settlementReadableBy(
+      { acceptedSender: "later", delegator: "first" },
+      "first",
+    ),
+  ).toBe(false);
+  expect(
+    settlementReadableBy(
+      { acceptedSender: "later", delegator: "first" },
+      "later",
+    ),
+  ).toBe(true);
+  expect(
+    settlementReadableBy({ acceptedSender: null, delegator: "first" }, "later"),
+  ).toBe(false);
 });

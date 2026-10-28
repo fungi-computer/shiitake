@@ -122,3 +122,90 @@ it("bounds four attempts then continues the same Session without replaying faile
     fixture.close();
   }
 }, 10_000);
+
+it("does not turn a typed usage limit after a transient retry into a failed-N-times summary", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  const reason =
+    "Anthropic usage limit reached on your Claude subscription; resets at 16:00.";
+  const limited = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: reason,
+  });
+  let attempts = 0;
+  let reconcile: Effect.Effect<void, ShiitakeError> | undefined;
+  const runtime: RuntimeHostEffect = {
+    bind: (input) =>
+      Effect.sync(() => {
+        reconcile = input.reconcile;
+        return {
+          commit: (mutation) => mutation,
+          requestWake: Effect.void,
+          close: Effect.void,
+        };
+      }),
+  };
+  try {
+    const snapshot = await Effect.runPromise(
+      Effect.gen(function* () {
+        const agent = yield* makeShiitake({
+          store: fixture.owner,
+          extensions: noExtensions,
+          runtime,
+          retry: { enabled: true, maxRetries: 3, baseDelayMs: 0 },
+          instructions: {
+            load: () => Effect.succeed({ revision: "v1", text: "Answer." }),
+          },
+          model: {
+            acquire: () =>
+              Effect.succeed({
+                model: faux.model,
+                retryable: (message) => message !== limited,
+                rejection: (message) =>
+                  message === limited
+                    ? { code: "usage-limit-reached" as const }
+                    : undefined,
+                failureReason: (message) =>
+                  message === limited ? reason : undefined,
+                stream: () => {
+                  attempts++;
+                  const message =
+                    attempts === 1
+                      ? fauxAssistantMessage("", {
+                          stopReason: "error",
+                          errorMessage: "Anthropic is unavailable.",
+                        })
+                      : limited;
+                  const stream = createAssistantMessageEventStream();
+                  stream.push({
+                    type: "error",
+                    reason: "error",
+                    error: message,
+                  });
+                  stream.end(message);
+                  return stream;
+                },
+                release: Effect.void,
+              }),
+          },
+        });
+        const session = agent.session("usage-limit-summary");
+        yield* session.command({
+          type: "prompt",
+          requestId: "usage-limit-command",
+          delivery: "followUp",
+          text: "Hello.",
+        });
+        if (reconcile === undefined) return yield* Effect.die("no reconciler");
+        yield* reconcile;
+        const result = yield* session.read();
+        yield* agent.close;
+        return result;
+      }),
+    );
+    expect(attempts).toBe(2);
+    expect(snapshot.terminals.at(-1)?.diagnostic).toBe(reason);
+  } finally {
+    fixture.close();
+  }
+});

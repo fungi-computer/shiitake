@@ -11,6 +11,7 @@ import {
   delegationProvenance,
   delegationReplyMeta,
   delegationSendMeta,
+  settlementReadableBy,
   type AgentGrant,
 } from "./fleet.js";
 import type { WatchdogSqliteOwner } from "@fungi.computer/watchdog";
@@ -124,12 +125,12 @@ export class AgentDelegation {
     )
       throw new AgentDisclosureRefused();
     const facts = await host.readSettlement(sessionId, commandId);
-    if (facts !== undefined && facts.acceptedSender !== sender.agentId)
+    if (facts !== undefined && !settlementReadableBy(facts, sender.agentId))
       throw new AgentDisclosureRefused();
     return facts;
   }
 
-  /** Delegate work to an in-scope Agent: steer its Session, or start fleet correspondence. */
+  /** Delegate work to an in-scope Agent through fleet correspondence; a steer rides the mail. */
   async send(
     input: AgentDelegationInput,
     sourceSessionId: string,
@@ -152,17 +153,6 @@ export class AgentDelegation {
       requestId: input.requestId,
     });
     signal.throwIfAborted();
-    if (input.delivery === "steer") {
-      const opened = await this.deps.directory().open(input.agentId, signal);
-      try {
-        return await opened.agent.session(input.sessionId).send(input.text, {
-          requestId,
-          delivery: "steer",
-        });
-      } finally {
-        await opened.release();
-      }
-    }
     const provenance = await delegationProvenance({
       agentId: scope.agentId,
       sessionId: sourceSessionId,
@@ -183,6 +173,7 @@ export class AgentDelegation {
       {
         agentId: input.agentId,
         sessionId: input.sessionId,
+        delivery: input.delivery,
         text: input.text,
         requestId,
       },
@@ -530,6 +521,7 @@ export class AgentMail {
 
   /** BirdDog's mail room: disclosed settlement replies fan out over Post. */
   mailRoom(): BirdDogEffect & {
+    /** Stage acceptance through this Post owner within the caller's transaction. */
     stageAcceptedNotice: (mail: BirdDogMail, scopeId: string) => void;
   } {
     return {

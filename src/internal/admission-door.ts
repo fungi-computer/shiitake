@@ -1,3 +1,4 @@
+import { messageAuthor } from "@fungi.computer/agar/agents";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -15,6 +16,7 @@ import {
 } from "./client-boundary.js";
 import type { SqliteOwner } from "./contracts.js";
 import { publishOwnerObservation } from "./observation-kernel.js";
+import type { AttentionRecipient } from "../session-attention.js";
 import {
   AdmissionOriginSchema,
   acceptSessionCommandOwned,
@@ -22,6 +24,9 @@ import {
   withdrawSessionRequestOwned,
   assertSessionRequestNotWithdrawn,
   hasStoredSession,
+  readWorkSender,
+  recordWorkSender,
+  recordSessionDelegator,
   type AdmissionOrigin,
   type EnqueueAcceptedWork,
   type RunContract,
@@ -59,6 +64,11 @@ export type AdmitRequest = Readonly<{
   reply?: VerifiedAgentReply;
   /** Synchronous owner-local side effect committed with a mail admission. */
   onAccepted?: (sessionId: string, commandId: string) => void;
+  /**
+   * New work that continues earlier work in this Session (for example, the
+   * follow-up that delivers an answer) keeps that work's sender.
+   */
+  continuesWorkId?: string | undefined;
 }>;
 
 /** Outcome of one door admission. */
@@ -112,6 +122,7 @@ type DecodedRequest = Readonly<{
   meta: Json | undefined;
   reply: VerifiedAgentReply | undefined;
   onAccepted: ((sessionId: string, commandId: string) => void) | undefined;
+  continuesWorkId: string | undefined;
 }>;
 
 const decodeOrigin = Schema.decodeUnknownResult(AdmissionOriginSchema, {
@@ -156,6 +167,28 @@ function decodeReply(request: AdmitRequest): VerifiedAgentReply | undefined {
   return reply;
 }
 
+/**
+ * The Agent Session whose work this admission is: the sender of delegated
+ * mail that expects a reply, or the sender of the earlier work this one
+ * continues. Replies and every other admission have none.
+ */
+function workSender(
+  owner: SqliteOwner,
+  request: DecodedRequest,
+): AttentionRecipient | undefined {
+  const mail = request.mail;
+  if (mail?.from.kind === "agent" && mail.replyTo.length > 0)
+    return {
+      agentId: mail.from.agentId,
+      sessionId: mail.from.sessionId,
+      // The host-authenticated author names the sender; mail.meta is the sender's own claim.
+      name: messageAuthor(request.meta)?.name ?? mail.from.agentId,
+    };
+  return request.continuesWorkId === undefined
+    ? undefined
+    : readWorkSender(owner, request.sessionId, request.continuesWorkId);
+}
+
 /** Bind the door to one owner, run contract, Watchdog queue and host wake. */
 export function openAdmissionDoor(
   input: Readonly<{
@@ -198,6 +231,7 @@ export function openAdmissionDoor(
     mail: request.mail,
     reply: decodeReply(request),
     onAccepted: request.onAccepted,
+    continuesWorkId: request.continuesWorkId,
     meta:
       request.meta === undefined
         ? undefined
@@ -266,6 +300,17 @@ export function openAdmissionDoor(
       targetWorkId,
       request.reply,
     );
+    if (accepted.delivery === "new" && targetWorkId === undefined) {
+      const sender = workSender(input.owner, request);
+      if (sender !== undefined)
+        recordWorkSender(
+          input.owner,
+          sessionId,
+          accepted.accepted.commandId,
+          sender,
+        );
+    }
+    recordSessionDelegator(input.owner, sessionId, request.mail);
     request.onAccepted?.(sessionId, accepted.accepted.commandId);
     touched.set(
       sessionId,

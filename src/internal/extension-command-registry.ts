@@ -7,6 +7,7 @@ import type {
   CommandSessionIdsV0,
   CommandsV0,
   ExtensionCommandError,
+  ExtensionCommandCallerV0,
   ExtensionRead,
   ExtensionStateError,
   ExtensionTx,
@@ -19,7 +20,11 @@ type CommandFailure =
   ExtensionCommandError | ExtensionStateError | AdmissionError;
 /** A parsed invocation retains its typed handler until the transaction runs. */
 export type RegisteredExtensionCommandV0 = (
-  frame: Readonly<{ sessionId: string | null; input: Json }>,
+  frame: Readonly<{
+    sessionId: string | null;
+    input: Json;
+    caller?: ExtensionCommandCallerV0;
+  }>,
 ) => Result.Result<
   () => Effect.Effect<
     Json,
@@ -47,6 +52,7 @@ function bindCommand<
     call: Readonly<{
       sessionId: CommandSessionIdsV0[Scope];
       input: Input["Type"];
+      caller?: ExtensionCommandCallerV0;
     }>,
   ) =>
     | Output["Type"]
@@ -67,7 +73,13 @@ function bindCommand<
       Result.map(
         decodeInput(frame.input),
         (input) => () =>
-          invokeTransactionHook(() => handler({ sessionId, input })).pipe(
+          invokeTransactionHook(() =>
+            handler(
+              frame.caller === undefined
+                ? { sessionId, input }
+                : { sessionId, input, caller: frame.caller },
+            ),
+          ).pipe(
             Effect.flatMap((output) =>
               Schema.encodeEffect(spec.output)(output).pipe(
                 Effect.flatMap(Schema.decodeUnknownEffect(JsonValueSchema)),

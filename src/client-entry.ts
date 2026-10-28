@@ -31,6 +31,11 @@ const commandAction = Schema.Struct({
   id: rowIdentitySchemaV1,
   label: rowLabelSchemaV1,
   input: Schema.optional(objectArguments),
+  /**
+   * The action starts a decision the person answers in the composer, so a
+   * client takes the composer over for it instead of waiting for a click.
+   */
+  awaiting: Schema.optionalKey(Schema.Literal("question")),
 });
 const commandRow = Schema.Struct({
   ...rowSchemaV1.fields,

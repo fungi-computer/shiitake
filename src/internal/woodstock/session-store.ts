@@ -33,6 +33,8 @@ import {
   type StoredSessionEntry,
 } from "./session-entry.js";
 import { prepareSessionAttention } from "./session-attention.js";
+import { prepareWorkSenders } from "./work-senders.js";
+import { prepareSessionDelegators } from "./session-delegator.js";
 import { copySessionGrants, prepareSessionGrants } from "./session-grants.js";
 import { prepareSessionInbox, touchSessionInbox } from "./session-inbox.js";
 import { sessionIds } from "./identities.js";
@@ -1210,6 +1212,29 @@ export function readSessionCommandAdmissionByRequest(
   return readCommandAdmission(owner, sessionId, { requestId });
 }
 
+/** Probe the indexed terminal facts without materializing a live work's body. */
+export function hasSessionWorkTerminal(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+): boolean {
+  // Keep the readability check even when the work has no terminal rows.
+  readSessionRow(owner, sessionId);
+  return (
+    owner.sql
+      .exec(
+        `SELECT 1 AS present FROM session_entries
+         INDEXED BY idx_session_entries_work_terminal
+         WHERE session_id = ? AND work_id = ?
+           AND type IN ('run_terminal', 'work_terminal')
+         LIMIT 1`,
+        sessionId,
+        workId,
+      )
+      .toArray().length > 0
+  );
+}
+
 /** Read entries correlated to one accepted work identity in Session order. */
 export function readSessionEntriesForWork(
   owner: SqliteOwner,
@@ -1447,6 +1472,7 @@ export function deleteStoredSession(
       "DELETE FROM session_command_admissions WHERE session_id = ?",
       // The inbox row references the Session; it goes in the same transaction.
       "DELETE FROM session_attention WHERE session_id = ?",
+      "DELETE FROM session_work_senders WHERE session_id = ?",
       "DELETE FROM session_tool_grants WHERE session_id = ?",
       "DELETE FROM session_inbox WHERE session_id = ?",
       "DELETE FROM session_creation_receipts WHERE session_id = ?",
@@ -1807,6 +1833,8 @@ export function prepareSessionStore(owner: SqliteOwner): void {
     createSessionEntryTable(owner);
     prepareSessionDocuments(owner);
     prepareSessionAttention(owner);
+    prepareWorkSenders(owner);
+    prepareSessionDelegators(owner);
     prepareSessionGrants(owner);
     prepareSessionInbox(owner);
     owner.sql.exec(`
@@ -1831,6 +1859,11 @@ export function prepareSessionStore(owner: SqliteOwner): void {
     );
     owner.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_entries_work ON session_entries(work_id, sequence)",
+    );
+    owner.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_session_entries_work_terminal
+       ON session_entries(session_id, work_id)
+       WHERE type IN ('run_terminal', 'work_terminal')`,
     );
     // Context and preference reads look up these rare older facts directly
     // rather than walking the history behind them.

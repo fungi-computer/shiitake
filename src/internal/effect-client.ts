@@ -25,7 +25,7 @@ import type {
   ShiitakeSession,
 } from "../client.js";
 import { ShiitakeError } from "../errors.js";
-import type { Json } from "../extensions.js";
+import type { ExtensionCommandCallerV0, Json } from "../extensions.js";
 import type { ModelPreference } from "./model-preference.js";
 import type {
   ShiitakeEffectAgent,
@@ -134,8 +134,11 @@ function sessionFacade(
     extension: (extensionId: string) => {
       const extension = session.extension(extensionId);
       return Object.freeze({
-        call: (command: string, input: Json) =>
-          runShiitakePromise(extension.call(command, input)),
+        call: (
+          command: string,
+          input: Json,
+          caller?: ExtensionCommandCallerV0,
+        ) => runShiitakePromise(extension.call(command, input, caller)),
       });
     },
     read: (input) => runShiitakePromise(session.read(input)),

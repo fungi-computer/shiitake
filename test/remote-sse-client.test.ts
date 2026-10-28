@@ -494,6 +494,45 @@ it("neutral watch yields a parsed snapshot and live frames", async () => {
   await agent.close();
 });
 
+it("fails a slow client's bounded watch rather than silently losing its durable frames", async () => {
+  FakeEventSource.current = undefined;
+  vi.stubGlobal("EventSource", FakeEventSource);
+  const agent = createShiitakeClient({ baseUrl: "/api" });
+  const pending = agent.session("slow").watch();
+  await vi.waitFor(() => {
+    expect(FakeEventSource.pending()).toBeDefined();
+  });
+  const source = FakeEventSource.created();
+  source.emit("snapshot", sessionSnapshot({ sessionId: "slow" }));
+  const watch = await pending;
+  const frame: SessionFrame = {
+    kind: "reset",
+    reason: "history_unavailable",
+    cursor: null,
+    baseline: sessionSnapshot({ sessionId: "slow" }),
+  };
+  try {
+    // The consumer does not pull while the producer pushes many real SSE
+    // messages. A dropped update must force a fresh watch, never look valid.
+    for (let index = 0; index < 300; index += 1) source.emit("frame", frame);
+    expect(source.closeCount).toBe(1);
+    const iterator = watch.changes[Symbol.asyncIterator]();
+    await expect(async () => {
+      for (;;) {
+        const result = await iterator.next();
+        if (result.done) throw new Error("overflow was silently ended");
+      }
+    }).rejects.toMatchObject({
+      _tag: "ShiitakeError",
+      cause: "unavailable",
+      message: "Session stream client fell behind",
+    });
+  } finally {
+    await watch.close();
+    await agent.close();
+  }
+});
+
 it("neutral watch parses an extension-only update at the existing cursor", async () => {
   FakeEventSource.current = undefined;
   vi.stubGlobal("EventSource", FakeEventSource);

@@ -384,12 +384,30 @@ export function createAgentDirectory(sql: WatchdogSqliteOwner["sql"]) {
   };
 }
 
+/**
+ * Whether an Agent may read one command's settlement: the Agent whose mail the
+ * command answered, or the Session's delegator of record for work no Agent's
+ * mail admitted (goal, loop and person turns, the work its reports carry).
+ * Another Agent's correspondence stays with that Agent.
+ */
+export function settlementReadableBy(
+  facts: Pick<CommandSettlement, "acceptedSender" | "delegator">,
+  agentId: string,
+): boolean {
+  return (
+    facts.acceptedSender === agentId ||
+    (facts.acceptedSender === null && facts.delegator === agentId)
+  );
+}
+
 /** Replay identity and work, with the parent supplied exclusively by the grant. */
 export const agentDelegationTaskSchema = z.lazy(() =>
   z.strictObject({
     requestId: identity,
     agentId: identity,
     sessionId: identity.optional(),
+    /** A live steer into the recipient's running turn; queued follow-up when omitted. */
+    delivery: z.enum(["followUp", "steer"]).optional(),
     text: z
       .string()
       .min(1)
@@ -609,7 +627,9 @@ export function createFleetCorrespondence(
       throw new AgentGrantError("delegation_loop");
     if (ancestors.length >= maxDepth)
       throw new AgentGrantError("delegation_depth");
-    const delegation = { ancestors: [...ancestors, parent.agentId], maxDepth };
+    const path = { ancestors: [...ancestors, parent.agentId], maxDepth };
+    const delegation =
+      task.delivery === "steer" ? { ...path, steer: true as const } : path;
     const outgoingMeta = {
       ...(objectMeta.success
         ? objectMeta.data
@@ -691,15 +711,25 @@ export function createFleetCorrespondence(
     mail: BirdDogMail,
   ): AuthenticatedDelegationReply | undefined {
     // This owner sends to one correspondent, so BirdDog's reply index is zero.
-    const suffix = ":reply:0";
+    // A report names the idle Session's delegator mail and the settled command.
     if (
       mail.replyTo.length !== 0 ||
       mail.reply === undefined ||
-      mail.reply.outcome === "accepted" ||
-      !mail.key.endsWith(suffix)
+      mail.reply.outcome === "accepted"
     )
       return undefined;
-    const mailKey = mail.key.slice(0, -suffix.length);
+    const reportAt = mail.key.lastIndexOf(":report:");
+    // A report's key names the command it settles.
+    const isReport =
+      reportAt >= 0 &&
+      "commandId" in mail.reply &&
+      mail.key.slice(reportAt) === `:report:${mail.reply.commandId}:0`;
+    const mailKey = isReport
+      ? mail.key.slice(0, reportAt)
+      : mail.key.endsWith(":reply:0")
+        ? mail.key.slice(0, -":reply:0".length)
+        : undefined;
+    if (mailKey === undefined) return undefined;
     const row = read(mailKey);
     if (row === undefined || row.state === "undeliverable") return undefined;
     const sent = decodeMail(row.mail);
@@ -735,6 +765,7 @@ export function createFleetCorrespondence(
     )
       return undefined;
     if (
+      !isReport &&
       mail.reply.outcome !== "undeliverable" &&
       row.state === "accepted" &&
       row.receipt !== null
@@ -863,7 +894,9 @@ export function createFleetCorrespondence(
     start,
     /** Match a reply to frozen mail and restore the caller's delegation path. */
     authenticateReply,
+    /** Bind exhausted local delivery to its frozen sender correspondence. */
     recordLocalUndeliverable,
+    /** Prevent replay after a system undeliverable reply is admitted. */
     recordUndeliverableReply,
     /** Read an existing acceptance receipt without reserving or delivering mail. */
     receipt,

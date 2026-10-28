@@ -24,9 +24,9 @@ new AgentDelegation(deps): AgentDelegation;
 
 ###### Parameters
 
-| Parameter | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deps`    | `Readonly`\<\{ `storage`: `WatchdogSqliteOwner`; `expiresAt`: () => `number`; `identity`: () => \| [`DelegationIdentity`](#delegationidentity) \| `null` \| `Promise`\<[`DelegationIdentity`](#delegationidentity) \| `null`\>; `directory`: () => [`AgentControlDirectory`](agent-control.md#agentcontroldirectory); `deliver`: (`mail`) => `Promise`\<[`DelegationReceipt`](client.md#delegationreceipt)\>; `prepare`: (`mail`) => `Promise`\<`void`\>; `accept`: (`mail`, `reply?`) => `Promise`\<[`Accepted`](client.md#accepted)\>; \}\> |
+| Parameter | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deps`    | `Readonly`\<\{ `storage`: `WatchdogSqliteOwner`; `expiresAt`: () => `number`; `identity`: () => \| [`DelegationIdentity`](#delegationidentity) \| `null` \| `Promise`\<[`DelegationIdentity`](#delegationidentity) \| `null`\>; `directory`: () => [`AgentControlDirectory`](agent-control.md#agentcontroldirectory); `deliver`: (`mail`) => `Promise`\<[`DelegationReceipt`](client.md#delegationreceipt)\>; `prepare`: (`mail`) => `Promise`\<`void`\>; `stageAcceptedNotice`: (`mail`, `scopeId`) => `void`; `accept`: (`mail`, `reply`, `stageAcceptedNotice`) => `Promise`\<[`Accepted`](client.md#accepted)\>; \}\> |
 
 ###### Returns
 
@@ -144,6 +144,24 @@ Admit one addressed Agent mail for this Agent, or refuse it.
 
 `Promise`\<`PostDeliveryResult`\>
 
+##### localUndeliverable()
+
+```ts
+localUndeliverable(original): Promise<PostDeliveryResult>;
+```
+
+Admit local outbox exhaustion through the same Fleet/system reply gate.
+
+###### Parameters
+
+| Parameter  | Type          |
+| ---------- | ------------- |
+| `original` | `BirdDogMail` |
+
+###### Returns
+
+`Promise`\<`PostDeliveryResult`\>
+
 ---
 
 ### AgentDisclosureRefused
@@ -189,9 +207,9 @@ new AgentMail(deps): AgentMail;
 
 ###### Parameters
 
-| Parameter | Type                                                                                                                                                                                                                                                                                                                                                                                                |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `deps`    | `Readonly`\<\{ `storage`: `WatchdogSqliteOwner`; `post`: () => [`AgentMailPost`](#agentmailpost); `identity`: () => \| [`DelegationIdentity`](#delegationidentity) \| `null` \| `Promise`\<[`DelegationIdentity`](#delegationidentity) \| `null`\>; `replySettlement`: [`AgentReplySettlement`](#agentreplysettlement); `drain`: () => `Promise`\<`void`\>; `wake`: () => `Promise`\<`void`\>; \}\> |
+| Parameter | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `deps`    | `Readonly`\<\{ `storage`: `WatchdogSqliteOwner`; `post`: () => [`AgentMailPost`](#agentmailpost); `identity`: () => \| [`DelegationIdentity`](#delegationidentity) \| `null` \| `Promise`\<[`DelegationIdentity`](#delegationidentity) \| `null`\>; `replySettlement`: [`AgentReplySettlement`](#agentreplysettlement); `onUndeliverable`: (`original`, `reply`) => `Promise`\<`PostDeliveryResult`\>; `drain`: () => `Promise`\<`void`\>; `wake`: () => `Promise`\<`void`\>; \}\> |
 
 ###### Returns
 
@@ -217,17 +235,52 @@ Submit one mail and return recipient acceptance or relay-held custody.
 
 `Promise`\<[`DelegationReceipt`](client.md#delegationreceipt)\>
 
+##### stageUndeliverableReplies()
+
+```ts
+stageUndeliverableReplies(): Promise<void>;
+```
+
+Reconcile exhausted original outbox mail into one local system reply.
+
+###### Returns
+
+`Promise`\<`void`\>
+
+##### stageAcceptedNotice()
+
+```ts
+stageAcceptedNotice(mail, scopeId): void;
+```
+
+Stage the acceptance reply through this Post owner without leaving the
+transaction.
+
+###### Parameters
+
+| Parameter | Type          |
+| --------- | ------------- |
+| `mail`    | `BirdDogMail` |
+| `scopeId` | `string`      |
+
+###### Returns
+
+`void`
+
 ##### mailRoom()
 
 ```ts
-mailRoom(): BirdDogEffect;
+mailRoom(): Readonly<{
+  fanOut: (settlement) => Effect<void, BirdDogError>;
+  postMail?: (mail) => Effect<void, BirdDogError>;
+  drainOutbox: () => Effect<void, BirdDogError>;
+  nextWakeAt: () => Effect<number | undefined, BirdDogError>;
+}> & object;
 ```
 
 BirdDog's mail room: disclosed settlement replies fan out over Post.
 
 ###### Returns
-
-`BirdDogEffect`
 
 ## Type Aliases
 
@@ -272,7 +325,7 @@ type AgentMailPost = Pick<
   PostRuntime<{
     agentMail: ReturnType<typeof agentMailRoute>;
   }>,
-  "send" | "read" | "nextWake"
+  "send" | "read" | "nextWake" | "deadLetters"
 >;
 ```
 
@@ -302,106 +355,206 @@ link routes Agent work without owning Shiitake's grammar.
 ### agentMailRoute()
 
 ```ts
-function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress, {
-  key: string;
-  to: {
-     kind: "agent";
-     agentId: string;
-     sessionId: string;
-  };
+function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress,
+  | {
   from: {
      kind: "agent";
      agentId: string;
      sessionId: string;
   };
-  replyTo: readonly object[];
-  content: string;
-  createdAt: number;
-  meta?: Json | undefined;
   reply?:   | {
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
    }
      | {
+     outcome: "accepted";
+     commandId: string;
+   }
+     | {
      outcome: "undeliverable";
-     reason: "recipient_offline" | "recipient_left";
+     reason: "recipient_left";
    };
-}, {
   key: string;
   to: {
      kind: "agent";
      agentId: string;
-     sessionId: string;
-  };
-  from: {
-     kind: "agent";
-     agentId: string;
-     sessionId: string;
+     sessionId?: string;
   };
   replyTo: readonly object[];
   content: string;
   createdAt: number;
   meta?: Json | undefined;
+}
+  | {
+  from: {
+     kind: "system";
+     systemId: "hub";
+  };
+  reply: {
+     outcome: "undeliverable";
+     reason: "recipient_offline";
+  };
+  key: string;
+  to: {
+     kind: "agent";
+     agentId: string;
+     sessionId?: string;
+  };
+  replyTo: readonly object[];
+  content: string;
+  createdAt: number;
+  meta?: Json | undefined;
+},
+  | {
+  from: {
+     kind: "agent";
+     agentId: string;
+     sessionId: string;
+  };
   reply?:   | {
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
    }
      | {
+     outcome: "accepted";
+     commandId: string;
+   }
+     | {
      outcome: "undeliverable";
-     reason: "recipient_offline" | "recipient_left";
+     reason: "recipient_left";
    };
-}, AgentMailAddress, {
   key: string;
   to: {
      kind: "agent";
      agentId: string;
-     sessionId: string;
-  };
-  from: {
-     kind: "agent";
-     agentId: string;
-     sessionId: string;
+     sessionId?: string;
   };
   replyTo: readonly object[];
   content: string;
   createdAt: number;
   meta?: Json | undefined;
+}
+  | {
+  from: {
+     kind: "system";
+     systemId: "hub";
+  };
+  reply: {
+     outcome: "undeliverable";
+     reason: "recipient_offline";
+  };
+  key: string;
+  to: {
+     kind: "agent";
+     agentId: string;
+     sessionId?: string;
+  };
+  replyTo: readonly object[];
+  content: string;
+  createdAt: number;
+  meta?: Json | undefined;
+}, AgentMailAddress,
+  | {
+  from: {
+     kind: "agent";
+     agentId: string;
+     sessionId: string;
+  };
   reply?:   | {
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
    }
      | {
+     outcome: "accepted";
+     commandId: string;
+   }
+     | {
      outcome: "undeliverable";
-     reason: "recipient_offline" | "recipient_left";
+     reason: "recipient_left";
    };
-}, {
   key: string;
   to: {
      kind: "agent";
      agentId: string;
-     sessionId: string;
-  };
-  from: {
-     kind: "agent";
-     agentId: string;
-     sessionId: string;
+     sessionId?: string;
   };
   replyTo: readonly object[];
   content: string;
   createdAt: number;
   meta?: Json | undefined;
+}
+  | {
+  from: {
+     kind: "system";
+     systemId: "hub";
+  };
+  reply: {
+     outcome: "undeliverable";
+     reason: "recipient_offline";
+  };
+  key: string;
+  to: {
+     kind: "agent";
+     agentId: string;
+     sessionId?: string;
+  };
+  replyTo: readonly object[];
+  content: string;
+  createdAt: number;
+  meta?: Json | undefined;
+},
+  | {
+  from: {
+     kind: "agent";
+     agentId: string;
+     sessionId: string;
+  };
   reply?:   | {
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
    }
      | {
+     outcome: "accepted";
+     commandId: string;
+   }
+     | {
      outcome: "undeliverable";
-     reason: "recipient_offline" | "recipient_left";
+     reason: "recipient_left";
    };
+  key: string;
+  to: {
+     kind: "agent";
+     agentId: string;
+     sessionId?: string;
+  };
+  replyTo: readonly object[];
+  content: string;
+  createdAt: number;
+  meta?: Json | undefined;
+}
+  | {
+  from: {
+     kind: "system";
+     systemId: "hub";
+  };
+  reply: {
+     outcome: "undeliverable";
+     reason: "recipient_offline";
+  };
+  key: string;
+  to: {
+     kind: "agent";
+     agentId: string;
+     sessionId?: string;
+  };
+  replyTo: readonly object[];
+  content: string;
+  createdAt: number;
+  meta?: Json | undefined;
 }> & Omit<Readonly<{
   addressKind: string;
   deadlineMs?: number;
@@ -439,35 +592,55 @@ retries.
 
 #### Returns
 
-`PostRoute`\<`AgentMailAddress`, \{ `key`: `string`; `to`: \{ `kind`: `"agent"`;
-`agentId`: `string`; `sessionId`: `string`; \}; `from`: \{ `kind`: `"agent"`;
-`agentId`: `string`; `sessionId`: `string`; \}; `replyTo`: readonly `object`[];
-`content`: `string`; `createdAt`: `number`; `meta?`: Json \| undefined;
-`reply?`: \| \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \|
-`"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`:
-`string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`
-\| `"recipient_left"`; \}; \}, \{ `key`: `string`; `to`: \{ `kind`: `"agent"`;
-`agentId`: `string`; `sessionId`: `string`; \}; `from`: \{ `kind`: `"agent"`;
-`agentId`: `string`; `sessionId`: `string`; \}; `replyTo`: readonly `object`[];
-`content`: `string`; `createdAt`: `number`; `meta?`: Json \| undefined;
-`reply?`: \| \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \|
-`"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`:
-`string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`
-\| `"recipient_left"`; \}; \}, `AgentMailAddress`, \{ `key`: `string`; `to`: \{
-`kind`: `"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `from`: \{
-`kind`: `"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `replyTo`:
+`PostRoute`\<`AgentMailAddress`, \| \{ `from`: \{ `kind`: `"agent"`; `agentId`:
+`string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`: `string`;
+`outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \|
+`"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{ `outcome`: `"accepted"`;
+`commandId`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
+`"recipient_left"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`:
+`string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[]; `content`:
+`string`; `createdAt`: `number`; `meta?`: Json \| undefined; \} \| \{ `from`: \{
+`kind`: `"system"`; `systemId`: `"hub"`; \}; `reply`: \{ `outcome`:
+`"undeliverable"`; `reason`: `"recipient_offline"`; \}; `key`: `string`; `to`:
+\{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
+`replyTo`: readonly `object`[]; `content`: `string`; `createdAt`: `number`;
+`meta?`: Json \| undefined; \}, \| \{ `from`: \{ `kind`: `"agent"`; `agentId`:
+`string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`: `string`;
+`outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \|
+`"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{ `outcome`: `"accepted"`;
+`commandId`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
+`"recipient_left"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`:
+`string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[]; `content`:
+`string`; `createdAt`: `number`; `meta?`: Json \| undefined; \} \| \{ `from`: \{
+`kind`: `"system"`; `systemId`: `"hub"`; \}; `reply`: \{ `outcome`:
+`"undeliverable"`; `reason`: `"recipient_offline"`; \}; `key`: `string`; `to`:
+\{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
+`replyTo`: readonly `object`[]; `content`: `string`; `createdAt`: `number`;
+`meta?`: Json \| undefined; \}, `AgentMailAddress`, \| \{ `from`: \{ `kind`:
+`"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `reply?`: \| \{
+`commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"`
+\| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{
+`outcome`: `"accepted"`; `commandId`: `string`; \} \| \{ `outcome`:
+`"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`; `to`: \{
+`kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`:
 readonly `object`[]; `content`: `string`; `createdAt`: `number`; `meta?`: Json
-\| undefined; `reply?`: \| \{ `commandId`: `string`; `outcome`: `"completed"` \|
-`"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`;
-`diagnostic?`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
-`"recipient_offline"` \| `"recipient_left"`; \}; \}, \{ `key`: `string`; `to`:
-\{ `kind`: `"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `from`: \{
-`kind`: `"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `replyTo`:
+\| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`: `"hub"`; \};
+`reply`: \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`; \};
+`key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`:
+`string`; \}; `replyTo`: readonly `object`[]; `content`: `string`; `createdAt`:
+`number`; `meta?`: Json \| undefined; \}, \| \{ `from`: \{ `kind`: `"agent"`;
+`agentId`: `string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`:
+`string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \|
+`"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{
+`outcome`: `"accepted"`; `commandId`: `string`; \} \| \{ `outcome`:
+`"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`; `to`: \{
+`kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`:
 readonly `object`[]; `content`: `string`; `createdAt`: `number`; `meta?`: Json
-\| undefined; `reply?`: \| \{ `commandId`: `string`; `outcome`: `"completed"` \|
-`"failed"` \| `"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`;
-`diagnostic?`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
-`"recipient_offline"` \| `"recipient_left"`; \}; \}\> & `Omit`\<`Readonly`\<\{
+\| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`: `"hub"`; \};
+`reply`: \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`; \};
+`key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`:
+`string`; \}; `replyTo`: readonly `object`[]; `content`: `string`; `createdAt`:
+`number`; `meta?`: Json \| undefined; \}\> & `Omit`\<`Readonly`\<\{
 `addressKind`: `string`; `deadlineMs?`: `number`; `address`: `Codec`\<`unknown`,
 `unknown`\>; `event`: `Codec`\<`unknown`, `unknown`\>; `encodeEnvelope`:
 (`envelope`) => `object`; `parseDelivery`: (`envelope`) => `object`;

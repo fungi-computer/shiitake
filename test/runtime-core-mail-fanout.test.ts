@@ -34,6 +34,7 @@ import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
 import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import { readSessionCommandAdmissionByRequest } from "../src/internal/woodstock/session-store.js";
 import { manualExtensionRuntime } from "./fixtures/extension-host.fixture.js";
+import { defineExtension, ExtensionId } from "../src/extensions.js";
 
 function manualRuntime() {
   let reconcile: Effect.Effect<void, Error> | undefined;
@@ -584,7 +585,8 @@ it("fans an exhausted disappeared child claim without fabricating output", async
       expect.objectContaining({
         to: parent,
         from: child,
-        content: "The delegated work ended interrupted without reply text.",
+        content:
+          "The delegated work ended interrupted: Restart recovery budget exhausted (2 recoveries)",
         reply: {
           commandId: accepted.commandId,
           outcome: "interrupted",
@@ -1143,6 +1145,220 @@ it("gives no reply from a refused Session's damaged history", async () => {
         )
         .one(),
     ).toEqual({ outcome: "failed", state: "settled" });
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("reports a later turn the delegating mail did not start to the sender once the Session is idle", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("Working"),
+    fauxAssistantMessage("READY"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-late-1", "Set a goal")),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    expect(posted.map(({ key }) => key)).toEqual(["delegation-late-1:reply:0"]);
+
+    const later = await Effect.runPromise(
+      core.agent
+        .session(child.sessionId)
+        .send("Continue the goal", { requestId: "goal-turn-2" }),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+
+    expect(posted).toEqual([
+      expect.objectContaining({ key: "delegation-late-1:reply:0" }),
+      {
+        key: `delegation-late-1:report:${later.commandId}:0`,
+        to: parent,
+        from: child,
+        replyTo: [],
+        content: "READY",
+        createdAt: 100,
+        reply: { commandId: later.commandId, outcome: "completed" },
+      },
+    ]);
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("a steered send reports exactly once", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("First done"),
+    fauxAssistantMessage("Steered done"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-steer-1", "Start")),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    const steered = await Effect.runPromise(
+      core.acceptMail({
+        ...addressedMail("delegation-steer-2", "Change course"),
+        to: child,
+        meta: { delegation: { ancestors: [], maxDepth: 8, steer: true } },
+      }),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+
+    expect(posted.map(({ key }) => key)).toEqual([
+      "delegation-steer-1:reply:0",
+      "delegation-steer-2:reply:0",
+    ]);
+    expect(posted[1]?.reply).toEqual({
+      commandId: steered.commandId,
+      outcome: "completed",
+    });
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+/** Admits one follow-up turn after every run it did not start, like a goal. */
+const continuerId = ExtensionId.make("test-continuer");
+const continuer = defineExtension({
+  id: continuerId,
+  version: "1.0.0",
+}).define({
+  hooks: {
+    onSettled: (ctx, page) =>
+      Effect.forEach(
+        page.filter(
+          ({ origin, outcome }) => origin === null && outcome === "completed",
+        ),
+        (run) =>
+          ctx.send({
+            sessionId: run.sessionId,
+            requireExistingSession: true,
+            when: "idle",
+            correlation: run.workId,
+            prompt: {
+              text: "Continue",
+              requestId: `continue-${run.workId}`,
+              delivery: "followUp",
+            },
+          }),
+        { discard: true },
+      ),
+  },
+});
+
+it("a turn an extension continues reports once, when the continued Session rests", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("Working"),
+    fauxAssistantMessage("Continued"),
+    fauxAssistantMessage("Step one"),
+    fauxAssistantMessage("READY"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(
+      {
+        ...runtimeOptions(fixture.owner, runtime.runtime, faux),
+        extensions: {
+          roster: [continuer],
+          grants: [{ id: continuerId, capabilities: ["settled", "send"] }],
+        },
+      },
+      room,
+    ),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-continued-1", "Start")),
+    );
+    for (let tick = 0; tick < 6; tick += 1) await runtime.reconcile();
+    await Effect.runPromise(
+      core.agent
+        .session(child.sessionId)
+        .send("Go on", { requestId: "person-turn" }),
+    );
+    for (let tick = 0; tick < 6; tick += 1) await runtime.reconcile();
+
+    expect(
+      posted.map(({ key }) => key.replace(/:report:.*:0$/, ":report")),
+    ).toEqual([
+      "delegation-continued-1:reply:0",
+      "delegation-continued-1:report",
+      "delegation-continued-1:report",
+    ]);
+    expect(posted.map(({ content }) => content)).toEqual([
+      "Working",
+      "Continued",
+      "READY",
+    ]);
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("never reports another Agent's mail to the Session's delegator", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("For the delegator"),
+    fauxAssistantMessage("For someone else"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-first-1", "Start")),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    await Effect.runPromise(
+      core.acceptMail({
+        key: "other-sender-1",
+        to: child,
+        from: { kind: "agent", agentId: "other-agent", sessionId: "other" },
+        replyTo: [],
+        content: "Private errand",
+        createdAt: 42,
+      }),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+
+    expect(posted.map(({ key }) => key)).toEqual([
+      "delegation-first-1:reply:0",
+    ]);
   } finally {
     await Effect.runPromise(core.agent.close);
     fixture.close();

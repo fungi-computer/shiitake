@@ -28,6 +28,7 @@ import {
 } from "./extension-roster.js";
 import {
   coreConsumer,
+  reportConsumer,
   openExtensionRuntime,
   type ExtensionRuntime,
 } from "./extension-runtime.js";
@@ -287,6 +288,16 @@ export function openRuntimeCoordinator(
           options.store.transactionSync(() => {
             advanceCursor(options.store, coreConsumer, 0);
           });
+        // A store that predates reports starts them at the core cursor
+        // instead of reporting its history.
+        if (readCursor(options.store, reportConsumer) === undefined)
+          options.store.transactionSync(() => {
+            advanceCursor(
+              options.store,
+              reportConsumer,
+              readCursor(options.store, coreConsumer) ?? 0,
+            );
+          });
       },
       catch: () =>
         new ShiitakeError(
@@ -317,6 +328,7 @@ export function openRuntimeCoordinator(
       const cursors = yield* Effect.try({
         try: () => [
           readCursor(options.store, coreConsumer) ?? 0,
+          readCursor(options.store, reportConsumer) ?? 0,
           ...extensions.settledConsumers().map(({ cursor }) => cursor),
         ],
         catch: () => runtimeFailure("Settled cursor is unavailable"),

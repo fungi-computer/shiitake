@@ -6,10 +6,15 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
-beforeEach(() =>
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] }),
-);
-afterEach(() => vi.useRealTimers());
+beforeEach(() => {
+  // Keep this retained execution proof on the policy floor; Mule tests jitter.
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+});
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 import { requestMessages } from "./fixtures/model-context.js";
 
@@ -698,6 +703,6 @@ it("ends a run with one failed terminal when steering delivery fails mid-run", a
 it("records why a failed run failed on its durable Watchdog job", async () => {
   expect((await runWithSteeringFailure()).job).toMatchObject({
     outcome: "failed",
-    failure_reason: "runtime:rejected",
+    failure_reason: "runtime:rejected: control-failed",
   });
 });

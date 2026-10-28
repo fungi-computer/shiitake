@@ -11,6 +11,7 @@ import type {
   AssistantMessage,
   Model,
   MuleStreamFunction,
+  ProviderRejection,
 } from "@fungi.computer/mule/effect";
 import type {
   AccessOptions,
@@ -74,6 +75,8 @@ export type ModelAcquisition = Readonly<{
    * Unknown messages must return undefined.
    */
   failureReason?: (message: AssistantMessage) => string | undefined;
+  /** Bounded provider facts for this door's exact failure, never SDK prose. */
+  rejection?: (message: AssistantMessage) => ProviderRejection | undefined;
   /** Provider prose for this door's exact failed turn; never a diagnostic. */
   providerError?: (message: AssistantMessage) => string | undefined;
   /** Release the acquired model resources. */
@@ -321,6 +324,8 @@ export type {
 export type CommandSettlement = Readonly<{
   /** Original Agent sender recorded at acceptance, never the terminal's canceller. */
   acceptedSender: string | null;
+  /** Agent that first sent this Session work and receives its reports, if any. */
+  delegator: string | null;
   /** Durable terminal and the command that ended the work's opaque metadata. */
   terminal: SessionTerminal;
   /** Last completed assistant text; cancelled work returns no answer. */
@@ -329,4 +334,13 @@ export type CommandSettlement = Readonly<{
   usage: readonly Pick<AssistantMessage, "provider" | "model" | "usage">[];
   /** Distinct tool-call intentions belonging to this exact work. */
   toolCalls: number;
+  /**
+   * Open items of the Session that now wait on the Agent that sent this work.
+   * Child-authored data: summaries inform, only the sender's host checks decide.
+   */
+  waitingOnYou: readonly Readonly<{
+    itemId: string;
+    kind: string;
+    summary: string;
+  }>[];
 }>;

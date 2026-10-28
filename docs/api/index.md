@@ -224,7 +224,7 @@ type ShiitakeHost = Readonly<{
     commandId,
   ) => Promise<CommandSettlement | undefined>;
   agent: ShiitakeOwnerAgent;
-  acceptMail: (mail, meta?, reply?) => Promise<Accepted>;
+  acceptMail: (mail, meta?, reply?, stageAcceptedNotice?) => Promise<Accepted>;
 }>;
 ```
 
@@ -415,6 +415,7 @@ type ModelAcquisition = Readonly<{
   retryable: (message) => boolean;
   retryAfterMs?: (message) => number | undefined;
   failureReason?: (message) => string | undefined;
+  rejection?: (message) => ProviderRejection | undefined;
   providerError?: (message) => string | undefined;
   release: () => Promise<void>;
 }>;
@@ -932,9 +933,10 @@ function makeHost(options, mailRoom): Promise<Readonly<{
    }>
     | undefined>;
   agent: ShiitakeOwnerAgent;
-  acceptMail: (mail, meta?, reply?) => Promise<Readonly<{
+  acceptMail: (mail, meta?, reply?, stageAcceptedNotice?) => Promise<Readonly<{
      status: "accepted";
      commandId: string;
+     sessionId?: string;
   }>>;
 }>>;
 ```
@@ -956,8 +958,8 @@ Construct the host-only Promise facade over the canonical Effect program.
 readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
 `number`; \}\> \| `undefined`\>; `agent`:
 [`ShiitakeOwnerAgent`](#shiitakeowneragent); `acceptMail`: (`mail`, `meta?`,
-`reply?`) => `Promise`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`:
-`string`; \}\>\>; \}\>\>
+`reply?`, `stageAcceptedNotice?`) => `Promise`\<`Readonly`\<\{ `status`:
+`"accepted"`; `commandId`: `string`; `sessionId?`: `string`; \}\>\>; \}\>\>
 
 ## References
 

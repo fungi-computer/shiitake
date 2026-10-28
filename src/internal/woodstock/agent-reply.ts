@@ -58,6 +58,9 @@ function opening(reply: VerifiedAgentReply): string {
   attributes.push(["outcome", reply.outcome]);
   if (reply.outcome !== "undeliverable" && reply.diagnostic !== undefined)
     attributes.push(["diagnostic", reply.diagnostic]);
+  if (reply.outcome !== "undeliverable" && reply.waitingOnYou !== undefined)
+    // A host fact, outside the child's text: the items the child left waiting on the recipient.
+    attributes.push(["waiting_on_you", JSON.stringify(reply.waitingOnYou)]);
   if (reply.outcome === "undeliverable")
     attributes.push(["reason", reply.reason]);
   const rendered = attributes

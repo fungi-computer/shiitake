@@ -19,7 +19,12 @@ type ShiitakeEffectHost = Readonly<{
     commandId,
   ) => Effect.Effect<CommandSettlement | undefined, ShiitakeError>;
   agent: ShiitakeEffectOwner;
-  acceptMail: (mail, meta?, reply?) => Effect.Effect<Accepted, ShiitakeError>;
+  acceptMail: (
+    mail,
+    meta?,
+    reply?,
+    stageAcceptedNotice?,
+  ) => Effect.Effect<Accepted, ShiitakeError>;
 }>;
 ```
 
@@ -36,6 +41,7 @@ type ModelAcquisitionEffect = Readonly<{
   retryAfterMs?: (message) => number | undefined;
   retryable: (message) => boolean;
   failureReason?: (message) => string | undefined;
+  rejection?: (message) => ProviderRejection | undefined;
   providerError?: (message) => string | undefined;
   release: Effect.Effect<void, ShiitakeError>;
 }>;
@@ -157,6 +163,7 @@ type ShiitakeEffectCommandHandler = {
     Readonly<{
       status: "accepted";
       commandId: string;
+      sessionId?: string;
     }>,
     ShiitakeError
   >;
@@ -187,6 +194,7 @@ Effect-native addressable Session handle.
 (input): Effect<Readonly<{
   status: "accepted";
   commandId: string;
+  sessionId?: string;
 }>, ShiitakeError>;
 ```
 
@@ -200,8 +208,8 @@ Accept one durable prompt command.
 
 ##### Returns
 
-`Effect`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`; \}\>,
-[`ShiitakeError`](index.md#shiitakeerror)\>
+`Effect`\<`Readonly`\<\{ `status`: `"accepted"`; `commandId`: `string`;
+`sessionId?`: `string`; \}\>, [`ShiitakeError`](index.md#shiitakeerror)\>
 
 #### Call Signature
 
@@ -489,9 +497,10 @@ function openHost(options, mailRoom): Effect<Readonly<{
    }>
     | undefined, ShiitakeError>;
   agent: ShiitakeEffectOwner;
-  acceptMail: (mail, meta?, reply?) => Effect<Readonly<{
+  acceptMail: (mail, meta?, reply?, stageAcceptedNotice?) => Effect<Readonly<{
      status: "accepted";
      commandId: string;
+     sessionId?: string;
   }>, ShiitakeError>;
 }>, ShiitakeError>;
 ```
@@ -513,8 +522,9 @@ Open the Effect-native host composition with addressed mail.
 readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
 `number`; \}\> \| `undefined`, [`ShiitakeError`](index.md#shiitakeerror)\>;
 `agent`: [`ShiitakeEffectOwner`](#shiitakeeffectowner); `acceptMail`: (`mail`,
-`meta?`, `reply?`) => `Effect`\<`Readonly`\<\{ `status`: `"accepted"`;
-`commandId`: `string`; \}\>, [`ShiitakeError`](index.md#shiitakeerror)\>; \}\>,
+`meta?`, `reply?`, `stageAcceptedNotice?`) => `Effect`\<`Readonly`\<\{ `status`:
+`"accepted"`; `commandId`: `string`; `sessionId?`: `string`; \}\>,
+[`ShiitakeError`](index.md#shiitakeerror)\>; \}\>,
 [`ShiitakeError`](index.md#shiitakeerror)\>
 
 ---

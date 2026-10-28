@@ -393,12 +393,20 @@ export function parseForkedSession(value: string): ForkedSession {
 export const commandSettlementSchema: Schema.Codec<CommandSettlement> =
   Schema.Struct({
     acceptedSender: Schema.NullOr(Schema.String),
+    delegator: Schema.NullOr(Schema.String),
     terminal: SessionTerminalSchema,
     content: Schema.String,
     usage: Schema.Array(
       Schema.Struct({ provider: Schema.String, model: Schema.String, usage }),
     ),
     toolCalls: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+    waitingOnYou: Schema.Array(
+      Schema.Struct({
+        itemId: Schema.String,
+        kind: Schema.String,
+        summary: Schema.String,
+      }),
+    ).check(Schema.isMaxLength(8)),
   });
 
 /** A timeout is null on the JSON wire and undefined at the client boundary. */

@@ -4,8 +4,23 @@ const identity = Schema.NonEmptyString.check(Schema.isMaxLength(256));
 const instant = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
 /**
+ * The Agent Session that sent the work an item belongs to. The host derives it
+ * from the accepted mail; it is the only party the item waits on until it is
+ * escalated.
+ */
+export const AttentionRecipientSchema = Schema.Struct({
+  agentId: identity,
+  sessionId: identity,
+  name: identity,
+});
+/** Decoded Agent Session an attention item waits on. */
+export type AttentionRecipient = typeof AttentionRecipientSchema.Type;
+
+/**
  * An extension-owned request for human attention; expiry is owned by its timer.
  * Items marked `inbox: false` remain visible without changing the inbox state.
+ * An item with `waitingOn` waits on that Agent first and is never a person's
+ * inbox item until it is escalated past every Agent.
  */
 export const AttentionItemSchema = Schema.Struct({
   id: identity,
@@ -15,6 +30,8 @@ export const AttentionItemSchema = Schema.Struct({
   expiresAt: Schema.optional(instant),
   /** This item does not change the Session's inbox state; omission does. */
   inbox: Schema.optional(Schema.Literal(false)),
+  /** The Agent this item waits on; absent means a person. */
+  waitingOn: Schema.optional(AttentionRecipientSchema),
 });
 
 /** Input to the granted attention door, scoped to the calling extension. */

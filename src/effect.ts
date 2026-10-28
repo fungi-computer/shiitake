@@ -12,7 +12,11 @@ import type {
   ShiitakeEffectOwner,
 } from "./internal/effect-contracts.js";
 import type { SqliteOwner } from "./internal/contracts.js";
-import { readSessionFactPage } from "./internal/woodstock/index.js";
+import {
+  readSessionFactPage,
+  readSessionInbox,
+  readStoredSessionAttention,
+} from "./internal/woodstock/index.js";
 
 export type {
   AbortCommand,
@@ -144,6 +148,21 @@ export type {
  */
 export function readSessionSummaries(owner: SqliteOwner, after?: string) {
   return readSessionFactPage(owner, after);
+}
+
+/**
+ * One page of saved conversations with their stored run state (needs_you,
+ * running, errored, done), in tier then newest-activity order, read from the
+ * store alone: no Agent runtime starts. The state is as the runtime last wrote
+ * it, so it can lag work a stopped runtime left behind.
+ */
+export function readStoredSessionStates(owner: SqliteOwner, after?: string) {
+  return readSessionInbox(owner, after);
+}
+
+/** One saved conversation's open attention items, read from the store alone. */
+export function readStoredAttention(owner: SqliteOwner, sessionId: string) {
+  return readStoredSessionAttention(owner, sessionId);
 }
 
 export { sqliteRowSchema } from "./internal/contracts.js";

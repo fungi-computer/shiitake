@@ -428,7 +428,13 @@ type CloudflareShiitake = ShiitakeOwnerAgent &
       sessionId,
       commandId,
     ) => Promise<CommandSettlement | undefined>;
-    acceptMail: (mail, meta?, reply?) => Promise<Accepted>;
+    acceptMail: (
+      mail,
+      meta?,
+      reply?,
+      stageAcceptedNotice?,
+      sessionGrantDelivery?,
+    ) => Promise<Accepted>;
     alarm: () => Promise<void>;
     activeSessions: () => Promise<readonly string[]>;
     abortActive: () => Promise<void>;

@@ -1,8 +1,10 @@
 import type { FileTool } from "@fungi.computer/knapsack";
-import type { AttentionItem } from "./session-attention.js";
+import type { AttentionItem, AttentionRecipient } from "./session-attention.js";
 export {
   AttentionItemSchema,
+  AttentionRecipientSchema,
   type AttentionItem,
+  type AttentionRecipient,
   type SessionAttention,
 } from "./session-attention.js";
 import type { Message, Usage } from "@fungi.computer/mule/effect";
@@ -372,6 +374,8 @@ export type SendInputV0 = Readonly<{
   when: "now" | "idle";
   /** Stored with the admission and returned on `SettledRunV0.origin`. */
   correlation?: string;
+  /** This work continues earlier work of the Session and keeps its sender. */
+  continuesWorkId?: string;
 }>;
 /** Door outcome for one extension admission. */
 export type SendResultV0 =
@@ -411,12 +415,20 @@ export type CommandSessionIdsV0 = {
   session: string;
 };
 
+/** Host-authenticated caller context; never decoded from command JSON or HTTP. */
+export type ExtensionCommandCallerV0 = Readonly<{
+  agentId: string;
+  sessionId: string;
+}>;
+
 /** Handlers for every declared command, run in one core transaction. */
 export type CommandHandlersV0<C extends CommandsV0> = {
   readonly [K in keyof C]: (
     call: Readonly<{
       sessionId: CommandSessionIdsV0[C[K]["scope"]];
       input: C[K]["input"]["Type"];
+      /** Present only when the owning in-process host authenticates a caller. */
+      caller?: ExtensionCommandCallerV0;
     }>,
   ) =>
     | C[K]["output"]["Type"]
@@ -433,6 +445,10 @@ export type AttentionV0 = Readonly<{
     sessionId: string,
     item: AttentionItem,
   ) => Effect.Effect<void, ExtensionStateError, ExtensionTx>;
+  /** Whether any extension holds an inbox item asking a person to act (a question or approval). */
+  awaitsPerson: (
+    sessionId: string,
+  ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   /** Clear this extension’s item; other owners cannot be changed. */
   clear: (
     sessionId: string,
@@ -468,6 +484,18 @@ export type ExtensionContextV0<
   hasPendingSteer: (
     run: Pick<RunIdentityV0, "sessionId" | "workId">,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
+  /**
+   * The Agent Session that sent this run, or null when a person (or the host)
+   * did. Attention an extension raises for the run waits on it first.
+   * Requires run_tools.
+   */
+  workSender: (
+    run: Pick<RunIdentityV0, "sessionId" | "workId">,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
   /** Whether this run durably recorded a successful tool outcome. Requires run_tools. */
   hasSuccessfulToolResult: (
     run: Pick<RunIdentityV0, "sessionId" | "workId">,
@@ -475,6 +503,8 @@ export type ExtensionContextV0<
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   /** Publish a Session observation after this transaction commits. */
   observe: (sessionId: string) => Effect.Effect<void, never, ExtensionTx>;
+  /** Process-local live-view demand, excluding exact-command settlement waiters. */
+  isObserved: (sessionId: string) => boolean;
   /**
    * Run one write transaction from outside a hook (for example a Mycelium
    * tool execute). Core commits, publishes, and requests a wake when it

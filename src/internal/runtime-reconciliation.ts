@@ -3,6 +3,7 @@ import {
   decodeAgentJob,
   type BirdDogEffect,
 } from "@fungi.computer/bird-dog/effect";
+import type { BirdDogSettlement } from "@fungi.computer/bird-dog";
 import type { WatchdogSettledJob } from "@fungi.computer/watchdog";
 import type {
   WatchdogRuntimeEffect,
@@ -17,7 +18,11 @@ import { ShiitakeError } from "../errors.js";
 import type { SettledRunV0 } from "../extensions.js";
 import { ExtensionId } from "../extension-contract.js";
 import type { SqliteOwner } from "./contracts.js";
-import { coreConsumer, type ExtensionRuntime } from "./extension-runtime.js";
+import {
+  coreConsumer,
+  reportConsumer,
+  type ExtensionRuntime,
+} from "./extension-runtime.js";
 import { publishOwnerObservation } from "./observation-kernel.js";
 import {
   advanceCursor,
@@ -26,7 +31,11 @@ import {
   readSettledRunFacts,
   readSettlementContent,
   readSettlementDiagnostic,
+  readSessionDelegator,
   readSettlementMeta,
+  readWaitingOn,
+  readWaitingOnSender,
+  type WaitingOnYou,
   recordWorkSettlement,
   sessionLineageRefused,
   settleControls,
@@ -38,17 +47,15 @@ function runtimeFailure(message: string): ShiitakeError {
   return new ShiitakeError("runtime", "rejected", message);
 }
 
-function fanOutSettlement(
+/** BirdDog's settlement facts for one settled job, without its correspondents. */
+function settlementFacts(
   store: SqliteOwner,
-  mailRoom: BirdDogEffect | undefined,
   job: WatchdogSettledJob,
-): Effect.Effect<void, ShiitakeError> {
-  if (mailRoom === undefined) return Effect.void;
+  /** The open items this settlement names as waiting on its recipient. */
+  waitingOnYou: Effect.Effect<readonly WaitingOnYou[], ShiitakeError>,
+): Effect.Effect<BirdDogSettlement, ShiitakeError> {
   return Effect.gen(function* () {
-    const payload = yield* Effect.try({
-      try: () => decodeAgentJob(job),
-      catch: () => runtimeFailure("Agent work payload is invalid"),
-    });
+    const payload = yield* decodeJob(job);
     const content =
       job.outcome === "cancelled"
         ? ""
@@ -58,18 +65,137 @@ function fanOutSettlement(
       job.outcome === "completed" || job.outcome === "cancelled"
         ? undefined
         : yield* readSettlementDiagnostic(store, payload.work);
-    const settled =
-      diagnostic === undefined
-        ? { job, content }
-        : { job, content, diagnostic };
-    yield* mailRoom
-      .fanOut(meta === undefined ? settled : { ...settled, meta })
+    let settled: BirdDogSettlement = { job, content };
+    if (diagnostic !== undefined) settled = { ...settled, diagnostic };
+    // A cancelled run names nothing; what it left open is the canceller's to see.
+    const waiting = job.outcome === "cancelled" ? [] : yield* waitingOnYou;
+    if (waiting.length > 0) settled = { ...settled, waitingOnYou: waiting };
+    return meta === undefined ? settled : { ...settled, meta };
+  });
+}
+
+function decodeJob(job: WatchdogSettledJob) {
+  return Effect.try({
+    try: () => decodeAgentJob(job),
+    catch: () => runtimeFailure("Agent work payload is invalid"),
+  });
+}
+
+function fanOut(
+  mailRoom: BirdDogEffect,
+  settled: BirdDogSettlement,
+): Effect.Effect<void, ShiitakeError> {
+  return mailRoom
+    .fanOut(settled)
+    .pipe(
+      Effect.mapError(() =>
+        runtimeFailure("Agent reply fan-out is unavailable"),
+      ),
+    );
+}
+
+/** Reply to the delegating mail that admitted this work, if it asked for one. */
+function replyToMail(
+  store: SqliteOwner,
+  mailRoom: BirdDogEffect | undefined,
+  job: WatchdogSettledJob,
+): Effect.Effect<void, ShiitakeError> {
+  if (mailRoom === undefined) return Effect.void;
+  return Effect.gen(function* () {
+    const payload = yield* decodeJob(job);
+    if ((payload.mail?.replyTo.length ?? 0) === 0) return;
+    // The reply goes to the mail's sender: name what waits on that sender.
+    const waiting = Effect.try({
+      try: () =>
+        readWaitingOnSender(
+          store,
+          payload.work.sessionId,
+          payload.work.commandFactId,
+        ),
+      catch: () => runtimeFailure("Session attention is unavailable"),
+    });
+    yield* fanOut(mailRoom, yield* settlementFacts(store, job, waiting));
+  });
+}
+
+/**
+ * Report work no delegating mail answered to the Session's delegator of
+ * record. It runs after the extensions have seen the settlement, so a goal
+ * or loop that admitted the next turn keeps the Session busy and the stretch
+ * of turns reports once, when the Session finally rests. Another Agent's
+ * original mail is that Agent's correspondence and never reported here.
+ */
+function reportToDelegator(
+  store: SqliteOwner,
+  watchdog: WatchdogRuntimeEffect,
+  mailRoom: BirdDogEffect | undefined,
+  job: WatchdogSettledJob,
+): Effect.Effect<void, ShiitakeError> {
+  if (mailRoom === undefined) return Effect.void;
+  return Effect.gen(function* () {
+    const payload = yield* decodeJob(job);
+    const mail = payload.mail;
+    if (mail !== undefined && mail.replyTo.length > 0) return;
+    const head = yield* watchdog
+      .readQueueHead(job.queue)
       .pipe(
         Effect.mapError(() =>
-          runtimeFailure("Agent reply fan-out is unavailable"),
+          runtimeFailure("Session queue head is unavailable"),
         ),
       );
+    if (head.state !== "idle") return;
+    const delegator = yield* Effect.try({
+      try: () => readSessionDelegator(store, payload.work.sessionId),
+      catch: () => runtimeFailure("Session delegator is unavailable"),
+    });
+    if (delegator === undefined) return;
+    const from = mail?.reply === undefined ? mail?.from : undefined;
+    const anotherAgentsMail =
+      from !== undefined &&
+      !(
+        from.kind === "agent" &&
+        delegator.replyTo.some(({ agentId }) => agentId === from.agentId)
+      );
+    if (anotherAgentsMail) return;
+    // The report goes to the delegator: name what waits on it.
+    const waiting = Effect.try({
+      try: () =>
+        readWaitingOn(store, payload.work.sessionId, delegator.replyTo),
+      catch: () => runtimeFailure("Session attention is unavailable"),
+    });
+    const settled = yield* settlementFacts(store, job, waiting);
+    yield* fanOut(mailRoom, { ...settled, delegator });
   });
+}
+
+/**
+ * The `core-report` settled consumer: after the extensions' turn, report each
+ * Session's last settled job in the page, one record at a time.
+ */
+function reportSettled(
+  store: SqliteOwner,
+  watchdog: WatchdogRuntimeEffect,
+  mailRoom: BirdDogEffect | undefined,
+  records: readonly WatchdogSettledRecord[],
+): Effect.Effect<void, ShiitakeError> {
+  return Effect.forEach(
+    records,
+    (record, index) =>
+      Effect.gen(function* () {
+        const later = records
+          .slice(index + 1)
+          .some(({ job }) => job.queue === record.job.queue);
+        if (!later && !(yield* settledInRefusedSession(store, record.job)))
+          yield* reportToDelegator(store, watchdog, mailRoom, record.job);
+        yield* Effect.try({
+          try: () => {
+            advanceCursor(store, reportConsumer, record.sequence);
+          },
+          catch: () => runtimeFailure("Settled cursor is unavailable"),
+        });
+      }),
+    { discard: true },
+  );
 }
 
 function repairWorkSettlement(
@@ -236,7 +362,7 @@ function settleCore(
         if (!(yield* settledInRefusedSession(store, record.job))) {
           yield* repairWorkSettlement(store, record.job);
           yield* settleTargetedControls(store, watchdog, record.job);
-          yield* fanOutSettlement(store, mailRoom, record.job);
+          yield* replyToMail(store, mailRoom, record.job);
         }
         yield* Effect.try({
           try: () => {
@@ -273,9 +399,14 @@ export function reconcileRuntime(
       try: () => readCursor(input.store, coreConsumer) ?? 0,
       catch: () => runtimeFailure("Settled cursor is unavailable"),
     });
+    const reportCursor = yield* Effect.try({
+      try: () => readCursor(input.store, reportConsumer) ?? coreCursor,
+      catch: () => runtimeFailure("Settled cursor is unavailable"),
+    });
     const consumers = input.extensions.settledConsumers();
     const after = Math.min(
       coreCursor,
+      reportCursor,
       ...consumers.map(({ cursor }) => cursor),
     );
     const page = yield* input.watchdog.readSettled(pageSize, after);
@@ -287,23 +418,33 @@ export function reconcileRuntime(
         page.filter(({ sequence }) => sequence > coreCursor),
       ),
     );
+    const processed = yield* Effect.try({
+      try: () => readCursor(input.store, coreConsumer) ?? 0,
+      catch: () => runtimeFailure("Settled cursor is unavailable"),
+    });
     const runs = yield* Effect.try({
-      try: () => {
-        const processed = readCursor(input.store, coreConsumer) ?? 0;
-        return page
+      try: () =>
+        page
           .filter(({ sequence }) => sequence <= processed)
-          .map((record) => settledRun(input.store, record));
-      },
+          .map((record) => settledRun(input.store, record)),
       catch: () => runtimeFailure("Settled run facts are unavailable"),
     });
-    yield* input.extensions.deliverSettled(
-      runs,
-      readCursor(input.store, coreConsumer) ?? 0,
+    yield* input.extensions.deliverSettled(runs, processed);
+    const reports = yield* Effect.exit(
+      reportSettled(
+        input.store,
+        input.watchdog,
+        input.mailRoom,
+        page.filter(
+          ({ sequence }) => sequence > reportCursor && sequence <= processed,
+        ),
+      ),
     );
     const moreTimers = yield* input.extensions.fireDueTimers(Date.now());
     if (page.length === pageSize || moreTimers) yield* input.requestWake;
     yield* drainMail(input.mailRoom);
     if (Exit.isFailure(core)) return yield* Effect.failCause(core.cause);
+    if (Exit.isFailure(reports)) return yield* Effect.failCause(reports.cause);
   }).pipe(
     Effect.mapError((failure) =>
       failure instanceof ShiitakeError

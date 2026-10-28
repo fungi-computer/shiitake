@@ -5,6 +5,7 @@ import type {
   AssistantMessage,
   Model,
   MuleStreamFunction,
+  ProviderRejection,
   RetryPolicy,
 } from "@fungi.computer/mule/effect";
 import type {
@@ -76,6 +77,8 @@ export type ModelAcquisitionEffect = Readonly<{
   retryable: (message: AssistantMessage) => boolean;
   /** Owner-authored reason for this door's failure message, never SDK prose. */
   failureReason?: (message: AssistantMessage) => string | undefined;
+  /** Bounded provider facts for this door's exact failure, never SDK prose. */
+  rejection?: (message: AssistantMessage) => ProviderRejection | undefined;
   /** Provider prose for this door's exact failed turn; never a diagnostic. */
   providerError?: (message: AssistantMessage) => string | undefined;
   /** Effect finalizer for acquired model resources. */
@@ -290,7 +293,11 @@ export type ShiitakeEffectSession = Readonly<{
 /** Effect-native Session-scope extension commands. */
 export type ShiitakeEffectSessionExtension = Readonly<{
   /** Run one command with its encoded input; succeeds with the encoded output. */
-  call: (command: string, input: Json) => Effect.Effect<Json, ShiitakeError>;
+  call: (
+    command: string,
+    input: Json,
+    caller?: import("../extensions.js").ExtensionCommandCallerV0,
+  ) => Effect.Effect<Json, ShiitakeError>;
 }>;
 
 /** Effect-native Agent-scope extension controls. */

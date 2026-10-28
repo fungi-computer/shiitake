@@ -1,6 +1,8 @@
 import type { Json } from "../../extensions.js";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { readSessionAttention } from "./session-attention.js";
+import { readWaitingOnSender } from "./work-senders.js";
+import { readSessionDelegator } from "./session-delegator.js";
 import type { SessionAttention } from "../../session-attention.js";
 import type { UserMessage } from "@fungi.computer/mule/effect";
 import type { SandboxFailureEvent } from "@fungi.computer/mycelium";
@@ -26,6 +28,7 @@ import {
   lineageRowLimit,
   readLineageWindow,
   readLineageWorkFacts,
+  hasSessionWorkTerminal,
   readSessionEntriesForWork,
   readSessionLineage,
   readPendingSessionCommands,
@@ -767,6 +770,10 @@ export function projectCommandSettlement(
   const admission = readSessionCommandAdmission(owner, sessionId, commandId);
   if (admission === undefined)
     throw unavailable("Accepted Session command is unavailable");
+  // A live work has no settlement to project. The owner's terminal index
+  // answers this without decoding the work again on every polling tick.
+  if (!hasSessionWorkTerminal(owner, sessionId, admission.entry.workId))
+    return undefined;
   const rows = readSessionEntriesForWork(
     owner,
     sessionId,
@@ -791,6 +798,8 @@ export function projectCommandSettlement(
   const sender = messageAuthor(admission.entry.meta);
   return {
     acceptedSender: sender?.kind === "agent" ? sender.id : null,
+    delegator:
+      readSessionDelegator(owner, sessionId)?.replyTo[0]?.agentId ?? null,
     terminal: meta === undefined ? terminal : { ...terminal, meta },
     content:
       terminal.outcome === "cancelled"
@@ -809,5 +818,6 @@ export function projectCommandSettlement(
         entry.kind === "tool_intent" ? [entry.call.id] : [],
       ),
     ).size,
+    waitingOnYou: readWaitingOnSender(owner, sessionId, admission.entry.workId),
   };
 }

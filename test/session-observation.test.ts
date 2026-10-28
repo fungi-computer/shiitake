@@ -5,6 +5,7 @@ import { expect, it } from "vitest";
 
 import { Shiitake, type SessionFrame } from "../src/index.js";
 import {
+  hasOwnerObservers,
   mergeObservationSignals,
   openObservationKernel,
   publishAgentExecutionChange,
@@ -43,6 +44,31 @@ it("coalesces progress wakes without hiding a durable observation", async () => 
   } finally {
     second.close();
     await Effect.runPromise(kernel.close);
+    fixture.close();
+  }
+});
+
+it("tracks live-view demand across kernels without counting settlement waiters", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const first = openObservationKernel(fixture.owner);
+  const second = openObservationKernel(fixture.owner);
+  try {
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(false);
+    await Effect.runPromise(first.register("watched", "settlement"));
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(false);
+    const view = await Effect.runPromise(second.register("watched"));
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(true);
+    expect(hasOwnerObservers(fixture.owner, "another")).toBe(false);
+    view.close();
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(false);
+    await Effect.runPromise(second.register("watched"));
+    await Effect.runPromise(first.close);
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(true);
+    await Effect.runPromise(second.close);
+    expect(hasOwnerObservers(fixture.owner, "watched")).toBe(false);
+  } finally {
+    await Effect.runPromise(first.close);
+    await Effect.runPromise(second.close);
     fixture.close();
   }
 });

@@ -7,7 +7,7 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { Shiitake } from "../src/index.js";
 import {
   createCompatibilityRuntimeHost,
@@ -15,7 +15,12 @@ import {
   createNativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
-afterEach(() => vi.useRealTimers());
+// These state transitions use the policy floor; Mule tests nonzero jitter.
+beforeEach(() => vi.spyOn(Math, "random").mockReturnValue(0));
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 function deferred() {
   let resolve!: () => void;

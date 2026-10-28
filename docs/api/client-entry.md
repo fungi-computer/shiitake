@@ -172,6 +172,7 @@ const clientTimelineCellSchemaV1: Struct<{
         id: String;
         label: String;
         input: optional<$Record<..., ...>>;
+        awaiting: optionalKey<Literal<...>>;
      }>>>;
   }>>;
 }>;
@@ -222,6 +223,7 @@ const clientContributionSchemaV1: Struct<{
         id: String;
         label: String;
         input: optional<$Record<..., ...>>;
+        awaiting: optionalKey<Literal<...>>;
      }>>>;
      inspection: optionalKey<Struct<{
         commandId: String;
@@ -261,6 +263,7 @@ const clientContributionSchemaV1: Struct<{
         id: String;
         label: String;
         input: optional<$Record<String, Codec<Json, Json, never, never>>>;
+        awaiting: optionalKey<Literal<"question">>;
      }>;
   }>>;
 }>;

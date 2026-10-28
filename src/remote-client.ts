@@ -152,41 +152,51 @@ function remoteEvents(
   sources: Set<ActiveRemoteSource>,
   eventSource: ShiitakeEventSourceConstructor | undefined,
 ): Stream.Stream<RemoteSessionEvent, ShiitakeError> {
-  return Stream.callback<RawRemoteSessionEvent, ShiitakeError>((queue) =>
-    Effect.acquireRelease(
-      Effect.try({
-        try: () => {
-          const constructor = eventSource ?? EventSource;
-          const active: ActiveRemoteSource = {
-            source: new constructor(url),
-            closed: false,
-          };
-          const emit = (
-            kind: RawRemoteSessionEvent["kind"],
-            event: Event,
-          ): void => {
-            Queue.offerUnsafe(queue, { kind, event });
-          };
-          active.source.addEventListener("snapshot", (event) => {
-            emit("snapshot", event);
-          });
-          active.source.addEventListener("frame", (event) => {
-            emit("frame", event);
-          });
-          active.source.addEventListener("runtime-error", (event) => {
-            emit("runtime-error", event);
-          });
-          active.source.addEventListener("error", (event) => {
-            if (active.source.readyState === closedEventSourceReadyState)
-              emit("source-error", event);
-          });
-          sources.add(active);
-          return active;
-        },
-        catch: () => unavailable("Session stream could not open"),
-      }),
-      (active) => closeRemoteSource(active, sources),
-    ),
+  return Stream.callback<RawRemoteSessionEvent, ShiitakeError>(
+    (queue) =>
+      Effect.acquireRelease(
+        Effect.try({
+          try: () => {
+            const constructor = eventSource ?? EventSource;
+            const active: ActiveRemoteSource = {
+              source: new constructor(url),
+              closed: false,
+            };
+            const emit = (
+              kind: RawRemoteSessionEvent["kind"],
+              event: Event,
+            ): void => {
+              if (!Queue.offerUnsafe(queue, { kind, event })) {
+                // A dropped frame breaks this watch's ordering. Fail instead
+                // of delivering an incomplete history to the client.
+                Queue.failCauseUnsafe(
+                  queue,
+                  Cause.fail(unavailable("Session stream client fell behind")),
+                );
+                Effect.runSync(closeRemoteSource(active, sources));
+              }
+            };
+            active.source.addEventListener("snapshot", (event) => {
+              emit("snapshot", event);
+            });
+            active.source.addEventListener("frame", (event) => {
+              emit("frame", event);
+            });
+            active.source.addEventListener("runtime-error", (event) => {
+              emit("runtime-error", event);
+            });
+            active.source.addEventListener("error", (event) => {
+              if (active.source.readyState === closedEventSourceReadyState)
+                emit("source-error", event);
+            });
+            sources.add(active);
+            return active;
+          },
+          catch: () => unavailable("Session stream could not open"),
+        }),
+        (active) => closeRemoteSource(active, sources),
+      ),
+    { bufferSize: 256, strategy: "dropping" },
   ).pipe(
     Stream.mapEffect(decodeRemoteEvent),
     Stream.interruptWhen(clientClosed.await),

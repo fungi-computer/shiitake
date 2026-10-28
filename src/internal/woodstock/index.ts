@@ -79,6 +79,7 @@ import {
   readSessionInboxPage,
   recordSessionInboxDeletion,
 } from "./session-inbox.js";
+import { readSessionAttention } from "./session-attention.js";
 
 export * from "./extension-store.js";
 export { readLatestPendingPrompt } from "./client-projection.js";
@@ -87,6 +88,8 @@ export {
   createFleetDelegationStore,
 } from "./fleet-store.js";
 export * from "./session-attention.js";
+export * from "./work-senders.js";
+export * from "./session-delegator.js";
 export {
   deliverSessionGrants,
   prepareSessionGrants,
@@ -532,6 +535,17 @@ export function readSessionInbox(
   after: string | undefined,
 ): Effect.Effect<import("../../client.js").SessionSummaryPage, ShiitakeError> {
   return storeEffect(() => readSessionInboxPage(owner, after));
+}
+
+/** Read a Session's open attention items from the store alone. */
+export function readStoredSessionAttention(
+  owner: SqliteOwner,
+  sessionId: string,
+): Effect.Effect<
+  readonly import("../../client.js").SessionAttention[],
+  ShiitakeError
+> {
+  return storeEffect(() => readSessionAttention(owner, sessionId));
 }
 
 /** Read one strict-after page from Woodstock's selected lineage. */

@@ -18,6 +18,7 @@ import { coreProtocolDigest } from "./extension-roster.js";
 import {
   runAcceptedCommand,
   runAcceptedCompaction,
+  RunRejectedError,
   ToolSetupError,
 } from "./run-scope.js";
 import { CompactionCommitError } from "./compaction/session-compaction.js";
@@ -47,6 +48,7 @@ function failedDecision(error: ShiitakeError): WatchdogExecutionDecision {
   const category = `${error.boundary}:${error.cause}`;
   const diagnostic =
     error instanceof ToolSetupError ||
+    error instanceof RunRejectedError ||
     error instanceof CompactionCommitError ||
     error instanceof BrokenSessionError
       ? error.diagnostic

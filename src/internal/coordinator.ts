@@ -2,6 +2,7 @@ import { nanoid } from "@fungi.computer/cairn";
 import { parseModelPreference } from "./model-preference.js";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import { acceptedNotice } from "@fungi.computer/bird-dog/effect";
+import { FungiMessageMetaSchema } from "@fungi.computer/agar/agents";
 import type { VerifiedAgentReply } from "./woodstock/index.js";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -27,7 +28,7 @@ import type {
   WatchOptions,
 } from "../client.js";
 import { ShiitakeError } from "../errors.js";
-import type { Json } from "../extensions.js";
+import type { ExtensionCommandCallerV0, Json } from "../extensions.js";
 import type { ModelPreference } from "./model-preference.js";
 import {
   decodeClientReadOptions,
@@ -953,7 +954,11 @@ export function openCoordinator(
       }),
       extension: (extensionId: string) =>
         Object.freeze({
-          call: (command: string, input: Json) =>
+          call: (
+            command: string,
+            input: Json,
+            caller?: ExtensionCommandCallerV0,
+          ) =>
             runtime.assertOpen.pipe(
               Effect.andThen(
                 runtime.extensions.call(
@@ -961,6 +966,7 @@ export function openCoordinator(
                   extensionId,
                   command,
                   input,
+                  caller,
                 ),
               ),
             ),
@@ -1082,6 +1088,12 @@ export function openCoordinator(
   });
 }
 
+/** Whether the sender asked this mail to steer the recipient's running turn. */
+function steersRunningTurn(mail: BirdDogMail): boolean {
+  const meta = FungiMessageMetaSchema.safeParse(mail.meta);
+  return meta.success && meta.data.delegation?.steer === true;
+}
+
 /**
  * Accept one addressed mail envelope; the door decodes it as a prompt. `reply`
  * is the host's authentication of a delegated Agent's reply; only then does
@@ -1140,7 +1152,8 @@ export function acceptAddressedMail(
     mail.to.sessionId,
     {
       requestId: mail.key,
-      delivery: reply === undefined ? "followUp" : "steer",
+      delivery:
+        reply !== undefined || steersRunningTurn(mail) ? "steer" : "followUp",
       type: "prompt",
       text: mail.content,
     },
