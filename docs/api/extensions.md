@@ -162,7 +162,7 @@ The door refused an extension admission.
 #### Extends
 
 - `YieldableError`\<`this`\> & `object` & `Readonly`\<\{ `reason`: `"closed"` \|
-  `"conflict"` \| `"invalid"`; `message`: `string`; \}\>
+  `"conflict"` \| `"invalid"` \| `"archived"`; `message`: `string`; \}\>
 
 #### Constructors
 
@@ -174,11 +174,11 @@ new AdmissionError(args): AdmissionError;
 
 ###### Parameters
 
-| Parameter      | Type                                                                            |
-| -------------- | ------------------------------------------------------------------------------- |
-| `args`         | \{ `reason`: `"closed"` \| `"conflict"` \| `"invalid"`; `message`: `string`; \} |
-| `args.reason`  | `"closed"` \| `"conflict"` \| `"invalid"`                                       |
-| `args.message` | `string`                                                                        |
+| Parameter      | Type                                                                                            |
+| -------------- | ----------------------------------------------------------------------------------------------- |
+| `args`         | \{ `reason`: `"closed"` \| `"conflict"` \| `"invalid"` \| `"archived"`; `message`: `string`; \} |
+| `args.reason`  | `"closed"` \| `"conflict"` \| `"invalid"` \| `"archived"`                                       |
+| `args.message` | `string`                                                                                        |
 
 ###### Returns
 
@@ -188,7 +188,7 @@ new AdmissionError(args): AdmissionError;
 
 ```ts
 Data.TaggedError("AdmissionError")<{
-  reason: "invalid" | "conflict" | "closed";
+  reason: "invalid" | "conflict" | "closed" | "archived";
   message: string;
 }>.constructor
 ```
@@ -198,7 +198,7 @@ Data.TaggedError("AdmissionError")<{
 ##### reason
 
 ```ts
-readonly reason: "closed" | "conflict" | "invalid";
+readonly reason: "closed" | "conflict" | "invalid" | "archived";
 ```
 
 ###### Inherited from

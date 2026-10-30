@@ -2,6 +2,7 @@ export { commandSettlementSchema } from "./client-wire.js";
 import {
   createFleetDirectoryStore,
   createFleetDelegationStore,
+  readSessionDelegator,
   type VerifiedAgentReply,
 } from "./internal/woodstock/index.js";
 import type { CommandSettlement } from "./internal/contracts.js";
@@ -110,7 +111,12 @@ export type AgentLifecycleFact = Readonly<{
 export class AgentGrantError extends Error {
   constructor(
     readonly reason:
-      "agent" | "action" | "expired" | "delegation_loop" | "delegation_depth",
+      | "agent"
+      | "action"
+      | "expired"
+      | "delegation_loop"
+      | "delegation_depth"
+      | "delegator_missing",
   ) {
     super(reason);
   }
@@ -402,17 +408,27 @@ export function settlementReadableBy(
 
 /** Replay identity and work, with the parent supplied exclusively by the grant. */
 export const agentDelegationTaskSchema = z.lazy(() =>
-  z.strictObject({
-    requestId: identity,
-    agentId: identity,
-    sessionId: identity.optional(),
-    /** A live steer into the recipient's running turn; queued follow-up when omitted. */
-    delivery: z.enum(["followUp", "steer"]).optional(),
-    text: z
-      .string()
-      .min(1)
-      .max(256 * 1024),
-  }),
+  z
+    .strictObject({
+      requestId: identity,
+      agentId: identity,
+      sessionId: identity.optional(),
+      /** A live steer into the recipient's running turn; queued follow-up when omitted. */
+      delivery: z.enum(["followUp", "steer"]).optional(),
+      /** Only a new-Session follow-up carries goal intent. */
+      goal: z
+        .union([z.string().min(1).max(4_000), z.literal(false)])
+        .optional(),
+      text: z
+        .string()
+        .min(1)
+        .max(256 * 1024),
+    })
+    .refine(
+      ({ goal, sessionId, delivery }) =>
+        goal === undefined || (sessionId === undefined && delivery !== "steer"),
+      { path: ["goal"], error: "goal requires a new-Session follow-up" },
+    ),
 );
 /** A caller reuses this task unchanged while polling Pending. */
 export type AgentDelegationTask = z.infer<typeof agentDelegationTaskSchema>;
@@ -554,6 +570,24 @@ const delegationMetadata = z.object({
   delegation: FungiMessageMetaSchema.shape.delegation,
 });
 
+/** An original one-way report can only name an ancestor of its Agent sender. */
+export function isOneWayAncestorNotice(mail: BirdDogMail): boolean {
+  if (
+    mail.reply !== undefined ||
+    mail.replyTo.length !== 0 ||
+    mail.from.kind !== "agent" ||
+    mail.to.sessionId === undefined
+  )
+    return false;
+  const parsed = delegationMetadata.safeParse(mail.meta);
+  return (
+    parsed.success &&
+    parsed.data.delegation !== undefined &&
+    parsed.data.delegation.ancestors.includes(mail.to.agentId) &&
+    parsed.data.delegation.ancestors.at(-1) === mail.from.agentId
+  );
+}
+
 const delegationRowSchema = z.lazy(() =>
   z.strictObject({
     input: z.string(),
@@ -590,6 +624,26 @@ export type OutstandingDelegation = Readonly<{
   unreadable?: string;
 }>;
 
+/** Read confirmed sender receipts that have no locally observed settlement.
+ * Call inside the Agent owner's transaction that also changes archived state.
+ * Remote reads happen separately; an unobserved settlement remains busy.
+ */
+export function readOutstandingDelegationSync(
+  storage: WatchdogSqliteOwner,
+): OutstandingDelegation | undefined {
+  const raw = createFleetDelegationStore(storage).unsettled()[0];
+  if (raw === undefined) return undefined;
+  const row = delegationRowSchema.parse(raw);
+  const mail = decodeMail(row.mail);
+  const sessionId = mail.to.sessionId;
+  if (sessionId === undefined) throw new DirectoryError(503, "partial_init");
+  return {
+    agentId: mail.to.agentId,
+    sessionId,
+    commandId: parseAccepted(z.string().parse(row.receipt)).commandId,
+  };
+}
+
 /**
  * BirdDog submission and reply authentication. The durable row freezes
  * correspondence before transport; an ambiguous delivery reuses that exact mail.
@@ -622,14 +676,18 @@ export function createFleetCorrespondence(
       : undefined;
     const ancestors = inherited?.ancestors ?? [];
     const maxDepth = Math.min(grant.maxDepth ?? 8, inherited?.maxDepth ?? 8);
-    // Ancestry bounds work depth; it does not remove authorized peer targets.
+    // A report to an ancestor is one-way: the parent handles the work but
+    // must not send its settlement back as a new prompt to the worker.
     if (parent.agentId === task.agentId)
       throw new AgentGrantError("delegation_loop");
     if (ancestors.length >= maxDepth)
       throw new AgentGrantError("delegation_depth");
     const path = { ancestors: [...ancestors, parent.agentId], maxDepth };
-    const delegation =
-      task.delivery === "steer" ? { ...path, steer: true as const } : path;
+    const delegation = {
+      ...path,
+      ...(task.delivery === "steer" && { steer: true }),
+      ...(task.goal !== undefined && { goal: task.goal }),
+    } satisfies Json;
     const outgoingMeta = {
       ...(objectMeta.success
         ? objectMeta.data
@@ -648,11 +706,25 @@ export function createFleetCorrespondence(
     let row = read(task.requestId);
     if (row === undefined) {
       const from = { kind: "agent" as const, ...parent };
+      const ancestor = ancestors.includes(task.agentId);
+      // A sessionless report to a parent goes to the creator's recorded
+      // Session. Never create a fresh Session merely to carry a notice.
+      const targetSessionId =
+        task.sessionId ??
+        (ancestor
+          ? readSessionDelegator(
+              options.storage,
+              parent.sessionId,
+            )?.replyTo.find(({ agentId }) => agentId === task.agentId)
+              ?.sessionId
+          : undefined);
+      if (ancestor && targetSessionId === undefined)
+        throw new AgentGrantError("delegator_missing");
       let mail: BirdDogMail = {
         key: task.requestId,
         from,
         to:
-          task.sessionId === undefined
+          targetSessionId === undefined
             ? {
                 kind: "agent",
                 agentId: task.agentId,
@@ -660,9 +732,9 @@ export function createFleetCorrespondence(
             : {
                 kind: "agent",
                 agentId: task.agentId,
-                sessionId: task.sessionId,
+                sessionId: targetSessionId,
               },
-        replyTo: [from],
+        replyTo: ancestor ? [] : [from],
         content: task.text,
         createdAt: Date.now(),
       };
@@ -925,6 +997,7 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
       sessionId,
       accepted.commandId,
     );
+    if (settlement !== undefined) store.recordSettled(task.requestId);
     return settlement === undefined
       ? pending(1000)
       : {
@@ -939,7 +1012,8 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
    * target, so the owner is still waiting for a reply; undefined when none.
    */
   async function outstanding(): Promise<OutstandingDelegation | undefined> {
-    for (const raw of store.sent()) {
+    let waiting: OutstandingDelegation | undefined;
+    for (const raw of store.unsettled()) {
       const row = delegationRowSchema.parse(raw);
       if (row.receipt === null) continue;
       if (row.state !== "accepted") continue;
@@ -952,23 +1026,25 @@ export function createFleetDelegation(options: FleetDelegationOptions) {
         sessionId: to.sessionId,
         commandId,
       };
-      let settlement: CommandSettlement | undefined;
-      try {
-        settlement = await options.readSettlement(
-          to.agentId,
-          to.sessionId,
-          commandId,
+      const result = await options
+        .readSettlement(to.agentId, to.sessionId, commandId)
+        .then(
+          (settlement) => ({ kind: "read" as const, settlement }),
+          (cause: unknown) => ({ kind: "unreadable" as const, cause }),
         );
-      } catch (cause) {
+      if (result.kind === "unreadable") {
         // Work whose state cannot be read is still owed; say why.
-        return {
+        waiting ??= {
           ...target,
-          unreadable: cause instanceof Error ? cause.message : "unreadable",
+          unreadable:
+            result.cause instanceof Error ? result.cause.message : "unreadable",
         };
+        continue;
       }
-      if (settlement === undefined) return target;
+      if (result.settlement === undefined) waiting ??= target;
+      else store.recordSettled(decodeMail(row.mail).key);
     }
-    return undefined;
+    return waiting;
   }
   return {
     /** The delegated work this owner still waits on, if any. */

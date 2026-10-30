@@ -1,4 +1,5 @@
 import type { BirdDogDelegator, BirdDogMail } from "@fungi.computer/bird-dog";
+import type { WatchdogSqliteOwner } from "@fungi.computer/watchdog";
 import { BirdDogAgentReferenceSchema } from "@fungi.computer/bird-dog/effect";
 import * as Schema from "effect/Schema";
 
@@ -55,7 +56,7 @@ export function recordSessionDelegator(
 
 /** The Session's delegator of record, if any Agent has sent it work. */
 export function readSessionDelegator(
-  owner: SqliteOwner,
+  owner: WatchdogSqliteOwner,
   sessionId: string,
 ): BirdDogDelegator | undefined {
   const [row] = owner.sql

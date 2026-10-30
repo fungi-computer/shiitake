@@ -64,6 +64,34 @@ it.
 
 ## Functions
 
+### toShiitakeErrorWire()
+
+```ts
+function toShiitakeErrorWire(cause): object;
+```
+
+Sanitize one caught host failure for Shiitake's public wire.
+
+#### Parameters
+
+| Parameter | Type      |
+| --------- | --------- |
+| `cause`   | `unknown` |
+
+#### Returns
+
+`object`
+
+| Name         | Type                                                                                                                                                                    | Default value                 |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `_tag`       | `"ShiitakeError"`                                                                                                                                                       | -                             |
+| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | `ShiitakeErrorBoundarySchema` |
+| `cause`      | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"archived"` | `ShiitakeErrorCauseSchema`    |
+| `message`    | `string`                                                                                                                                                                | `Schema.String`               |
+| `requestId?` | `string`                                                                                                                                                                | -                             |
+
+---
+
 ### createShiitakeHttpRoutes()
 
 ```ts

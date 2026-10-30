@@ -243,7 +243,10 @@ function settleTargetedControls(
       diagnostic: job.failureReason,
       enqueue: (work) => {
         watchdog.transactional.enqueueAcceptedJob(
-          agentJobFromInput({ work: { ...work, recovery: agentTurnRecovery } }),
+          agentJobFromInput({
+            work: { ...work, recovery: agentTurnRecovery },
+            delivery: work.delivery,
+          }),
         );
       },
     });

@@ -676,10 +676,8 @@ it("neutral watch survives reconnecting errors and fails after permanent EventSo
     progress: {
       messageId: "message-1",
       revision: 1,
-      text: "still connected",
-      thinking: "",
-      textTruncated: false,
-      thinkingTruncated: false,
+      text: { offset: 0, append: "still connected" },
+      thinking: { offset: 0, append: "" },
     },
   });
   await expect(afterReconnectableError).resolves.toMatchObject({

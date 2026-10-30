@@ -36,13 +36,13 @@ Construct a sanitized boundary failure.
 
 ###### Parameters
 
-| Parameter    | Type                                                                                                                                                    | Description                                                                                                                        |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                             | Boundary that rejected the operation.                                                                                              |
-| `category`   | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | Safe category describing why it was rejected.                                                                                      |
-| `message`    | `string`                                                                                                                                                | Human-readable message safe for callers to display.                                                                                |
-| `requestId?` | `string`                                                                                                                                                | Request identity recoverable when a send may have reached the owner.                                                               |
-| `cause?`     | `unknown`                                                                                                                                               | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
+| Parameter    | Type                                                                                                                                                                    | Description                                                                                                                        |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | Boundary that rejected the operation.                                                                                              |
+| `category`   | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"archived"` | Safe category describing why it was rejected.                                                                                      |
+| `message`    | `string`                                                                                                                                                                | Human-readable message safe for callers to display.                                                                                |
+| `requestId?` | `string`                                                                                                                                                                | Request identity recoverable when a send may have reached the owner.                                                               |
+| `cause?`     | `unknown`                                                                                                                                                               | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
 
 ###### Returns
 
@@ -75,7 +75,8 @@ readonly cause:
   | "rejected"
   | "unavailable"
   | "state_reset_required"
-  | "storage_pressure";
+  | "storage_pressure"
+  | "archived";
 ```
 
 Safe category describing why it was rejected.
@@ -577,6 +578,9 @@ type ShiitakeOptions = Readonly<{
   meta?: HostMetaOptions;
   store: SqliteOwner;
   storagePressure?: StoragePressureCheck;
+  admission?: Readonly<{
+    assertOpen: () => void;
+  }>;
   compaction?: CompactionOptions;
   runtime: RuntimeHost;
   model: ModelSource;
@@ -635,10 +639,16 @@ can.
 ```ts
 type CommandSettlement = Readonly<{
   acceptedSender: string | null;
+  delegator: string | null;
   terminal: SessionTerminal;
   content: string;
   usage: readonly Pick<AssistantMessage, "provider" | "model" | "usage">[];
   toolCalls: number;
+  waitingOnYou: readonly Readonly<{
+    itemId: string;
+    kind: string;
+    summary: string;
+  }>[];
 }>;
 ```
 
@@ -926,10 +936,16 @@ function makeHost(options, mailRoom): Promise<Readonly<{
   readSettlement: (sessionId, commandId) => Promise<
      | Readonly<{
      acceptedSender: string | null;
+     delegator: string | null;
      terminal: SessionTerminal;
      content: string;
      usage: readonly Pick<AssistantMessage, ... | ... | ...>[];
      toolCalls: number;
+     waitingOnYou: readonly Readonly<{
+        itemId: ...;
+        kind: ...;
+        summary: ...;
+     }>[];
    }>
     | undefined>;
   agent: ShiitakeOwnerAgent;
@@ -953,13 +969,15 @@ Construct the host-only Promise facade over the canonical Effect program.
 #### Returns
 
 `Promise`\<`Readonly`\<\{ `readSettlement`: (`sessionId`, `commandId`) =>
-`Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
-[`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
-readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
-`number`; \}\> \| `undefined`\>; `agent`:
-[`ShiitakeOwnerAgent`](#shiitakeowneragent); `acceptMail`: (`mail`, `meta?`,
-`reply?`, `stageAcceptedNotice?`) => `Promise`\<`Readonly`\<\{ `status`:
-`"accepted"`; `commandId`: `string`; `sessionId?`: `string`; \}\>\>; \}\>\>
+`Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
+`string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
+`content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, ... \| ... \|
+...\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly `Readonly`\<\{
+`itemId`: ...; `kind`: ...; `summary`: ...; \}\>[]; \}\> \| `undefined`\>;
+`agent`: [`ShiitakeOwnerAgent`](#shiitakeowneragent); `acceptMail`: (`mail`,
+`meta?`, `reply?`, `stageAcceptedNotice?`) => `Promise`\<`Readonly`\<\{
+`status`: `"accepted"`; `commandId`: `string`; `sessionId?`: `string`; \}\>\>;
+\}\>\>
 
 ## References
 
@@ -1044,6 +1062,12 @@ Re-exports [SessionMessage](client.md#sessionmessage)
 ### SessionProgress
 
 Re-exports [SessionProgress](client.md#sessionprogress)
+
+---
+
+### SessionProgressDelta
+
+Re-exports [SessionProgressDelta](client.md#sessionprogressdelta)
 
 ---
 

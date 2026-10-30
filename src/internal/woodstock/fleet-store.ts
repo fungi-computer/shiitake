@@ -153,6 +153,12 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
     .exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_undeliverable_delegations (
     request_id TEXT PRIMARY KEY
   ) STRICT`);
+  // A remote settlement confirmed by this owner. Without this local fact an
+  // accepted sender receipt remains indistinguishable from outstanding work.
+  storage.sql
+    .exec(`CREATE TABLE IF NOT EXISTS shiitake_fleet_settled_delegations (
+    request_id TEXT PRIMARY KEY
+  ) STRICT`);
   return {
     read: (requestId: string) =>
       storage.sql
@@ -174,16 +180,36 @@ export function createFleetDelegationStore(storage: WatchdogSqliteOwner) {
           requestId,
         )
         .toArray()[0],
-    /** Every recipient-accepted delegation, newest first. */
-    sent: () =>
+    /** Accepted sends not yet observed settled, for owner-local archive admission. */
+    unsettled: () =>
       storage.sql
         .exec(
           `SELECT input, mail, 'accepted' AS state, receipt
-          FROM shiitake_fleet_delegations
+          FROM shiitake_fleet_delegations AS delegation
           WHERE receipt IS NOT NULL
-          ORDER BY rowid DESC`,
+            AND NOT EXISTS (
+              SELECT 1 FROM shiitake_fleet_settled_delegations AS settled
+              WHERE settled.request_id = delegation.request_id
+            )
+          ORDER BY delegation.rowid DESC`,
         )
         .toArray(),
+    recordSettled(requestId: string) {
+      storage.transactionSync(() => {
+        const accepted = storage.sql
+          .exec(
+            "SELECT 1 FROM shiitake_fleet_delegations WHERE request_id = ? AND receipt IS NOT NULL",
+            requestId,
+          )
+          .toArray();
+        if (accepted.length !== 1)
+          throw new Error("Cannot record settlement without acceptance");
+        storage.sql.exec(
+          "INSERT OR IGNORE INTO shiitake_fleet_settled_delegations(request_id) VALUES(?)",
+          requestId,
+        );
+      });
+    },
     reserve(requestId: string, input: string, mail: string) {
       storage.transactionSync(() => {
         storage.sql.exec(

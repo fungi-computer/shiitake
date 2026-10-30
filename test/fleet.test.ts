@@ -4,15 +4,237 @@ import { messageAuthor } from "@fungi.computer/agar/agents";
 import {
   createAgentDirectory,
   createFleetCorrespondence,
+  createFleetDelegation,
+  readOutstandingDelegationSync,
   AgentGrantError,
+  agentDelegationTaskSchema,
   agentGrantSchema,
   agentIds,
   delegationReplyMeta,
   delegationSendMeta,
   settlementReadableBy,
+  type AgentDelegationTask,
   type AgentGrant,
 } from "../src/fleet.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import {
+  createStoredSession,
+  prepareSessionStore,
+} from "../src/internal/woodstock/session-store.js";
+import { recordSessionDelegator } from "../src/internal/woodstock/session-delegator.js";
+import { admitWithoutCheck } from "../src/internal/woodstock/storage-admission.js";
+
+it("addresses a sessionless ancestor notice to the worker's creator Session without a reply", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const delivered: import("@fungi.computer/bird-dog").BirdDogMail[] = [];
+  try {
+    prepareSessionStore(fixture.owner);
+    const workerSession = createStoredSession(
+      fixture.owner,
+      "creator-mail",
+      admitWithoutCheck.admitNew,
+    );
+    const creator = {
+      kind: "agent" as const,
+      agentId: "ancestor",
+      sessionId: "creator-session",
+    };
+    recordSessionDelegator(fixture.owner, workerSession, {
+      key: "creator-mail",
+      from: creator,
+      to: { kind: "agent", agentId: "worker", sessionId: workerSession },
+      replyTo: [creator],
+      content: "Create the worker Session",
+      createdAt: 1,
+    });
+    const fleet = createFleetDelegation({
+      storage: fixture.owner,
+      open: () => Promise.reject(new Error("A notice must not open a Session")),
+      readSettlement: () => Promise.resolve(undefined),
+      deliver: (mail) => {
+        delivered.push(mail);
+        return Promise.resolve({
+          status: "accepted",
+          commandId: "notice-work",
+        });
+      },
+    });
+    const grant: AgentGrant = {
+      agents: ["ancestor", "worker"],
+      actions: ["delegate"],
+      expiresAt: Date.now() + 60_000,
+      provenance: {
+        actor: "worker",
+        session: { agentId: "worker", sessionId: workerSession },
+      },
+      meta: { delegation: { ancestors: ["ancestor"], maxDepth: 8 } },
+    };
+    await expect(
+      fleet.start(grant, {
+        requestId: "notice",
+        agentId: "ancestor",
+        text: "Status report",
+      }),
+    ).resolves.toMatchObject({ sessionId: creator.sessionId });
+    expect(delivered).toMatchObject([
+      {
+        to: creator,
+        from: { kind: "agent", agentId: "worker", sessionId: workerSession },
+        replyTo: [],
+      },
+    ]);
+  } finally {
+    fixture.close();
+  }
+});
+
+it("refuses a sessionless ancestor notice with a typed missing-delegator reason", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    prepareSessionStore(fixture.owner);
+    const fleet = createFleetDelegation({
+      storage: fixture.owner,
+      open: () => Promise.reject(new Error("No creator to open")),
+      readSettlement: () => Promise.resolve(undefined),
+      deliver: () => Promise.reject(new Error("No notice may be delivered")),
+    });
+    await expect(
+      fleet.start(
+        {
+          agents: ["ancestor", "worker"],
+          actions: ["delegate"],
+          expiresAt: Date.now() + 60_000,
+          provenance: {
+            actor: "worker",
+            session: { agentId: "worker", sessionId: "worker-session" },
+          },
+          meta: { delegation: { ancestors: ["ancestor"], maxDepth: 8 } },
+        },
+        {
+          requestId: "notice-without-creator",
+          agentId: "ancestor",
+          text: "Status report",
+        },
+      ),
+    ).rejects.toMatchObject({
+      reason: "delegator_missing",
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+it.each([
+  {
+    kind: "an explicit Session",
+    task: {
+      requestId: "existing-session-goal",
+      agentId: "child",
+      sessionId: "child-session",
+      delivery: "followUp",
+      goal: "Tend the orchard",
+      text: "Start work",
+    },
+  },
+  {
+    kind: "a steer",
+    task: {
+      requestId: "steered-goal",
+      agentId: "child",
+      delivery: "steer",
+      goal: "Tend the orchard",
+      text: "Start work",
+    },
+  },
+] satisfies readonly { kind: string; task: AgentDelegationTask }[])(
+  "refuses a delegated goal with $kind at the typed Fleet boundary",
+  ({ task }) => {
+    const parsed = agentDelegationTaskSchema.safeParse(task);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("Goal was incorrectly accepted");
+    expect(parsed.error).toBeInstanceOf(z.ZodError);
+    expect(parsed.error.issues).toMatchObject([
+      {
+        code: "custom",
+        path: ["goal"],
+        message: "goal requires a new-Session follow-up",
+      },
+    ]);
+  },
+);
+
+it("reads accepted delegated work locally until a remote settlement is durably observed", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  let settled = false;
+  const fleet = createFleetDelegation({
+    storage: fixture.owner,
+    open: () => Promise.reject(new Error("Addressed delivery needs no open")),
+    deliver: () =>
+      Promise.resolve({
+        status: "accepted" as const,
+        commandId: "remote-work",
+      }),
+    readSettlement: () =>
+      Promise.resolve(
+        settled
+          ? {
+              acceptedSender: "parent",
+              delegator: "parent",
+              terminal: {
+                commandId: "remote-work",
+                outcome: "completed" as const,
+                sequence: 1,
+                diagnostic: null,
+              },
+              content: "done",
+              usage: [],
+              toolCalls: 0,
+              waitingOnYou: [],
+            }
+          : undefined,
+      ),
+  });
+  const grant: AgentGrant = {
+    agents: ["parent", "child"],
+    actions: ["delegate"],
+    expiresAt: Date.now() + 60_000,
+    provenance: {
+      actor: "parent",
+      session: { agentId: "parent", sessionId: "parent-session" },
+    },
+  };
+  try {
+    await fleet.start(grant, {
+      requestId: "parent-work",
+      agentId: "child",
+      sessionId: "child-session",
+      text: "Complete once",
+    });
+    const readBusy = () =>
+      fixture.owner.transactionSync(() =>
+        readOutstandingDelegationSync(fixture.owner),
+      );
+    expect(readBusy()).toEqual({
+      agentId: "child",
+      sessionId: "child-session",
+      commandId: "remote-work",
+    });
+    expect(await fleet.outstanding()).toEqual(readBusy());
+    settled = true;
+    expect(await fleet.outstanding()).toBeUndefined();
+    expect(readBusy()).toBeUndefined();
+    await expect(
+      createFleetDelegation({
+        storage: fixture.owner,
+        open: () => Promise.reject(new Error("Unused")),
+        deliver: () => Promise.reject(new Error("Unused")),
+        readSettlement: () => Promise.resolve(undefined),
+      }).outstanding(),
+    ).resolves.toBeUndefined();
+  } finally {
+    fixture.close();
+  }
+});
 
 it("createdBy is immutable creation identity, never the human credential owner", () => {
   const fixture = createNativeSqliteOwnerFixture();
@@ -395,13 +617,13 @@ it("resolves an old settled delegation after its terminal leaves the page and th
 it("admits an authorized ancestor as a peer while refusing self-delegation", async () => {
   const { createFleetDelegation } = await import("../src/fleet.js");
   const store = createNativeSqliteOwnerFixture();
-  const delivered: string[] = [];
+  const delivered: import("@fungi.computer/bird-dog").BirdDogMail[] = [];
   const fleet = createFleetDelegation({
     storage: store.owner,
     open: () => Promise.reject(new Error("An addressed Session needs no open")),
     readSettlement: () => Promise.resolve(undefined),
     deliver: (mail) => {
-      delivered.push(mail.to.agentId);
+      delivered.push(mail);
       return Promise.resolve({ status: "accepted", commandId: "child-work" });
     },
   });
@@ -428,7 +650,8 @@ it("admits an authorized ancestor as a peer while refusing self-delegation", asy
       commandId: "child-work",
       sessionId: "new-a-session",
     });
-    expect(delivered).toEqual(["a"]);
+    expect(delivered.map(({ to }) => to.agentId)).toEqual(["a"]);
+    expect(delivered[0]?.replyTo).toEqual([]);
     await expect(
       fleet.start(grant, {
         requestId: "b-to-self",
@@ -449,7 +672,10 @@ it("admits an authorized ancestor as a peer while refusing self-delegation", asy
       commandId: "child-work",
       sessionId: "c-session",
     });
-    expect(delivered).toEqual(["a", "c"]);
+    expect(delivered.map(({ to }) => to.agentId)).toEqual(["a", "c"]);
+    expect(delivered[1]?.replyTo).toEqual([
+      { kind: "agent", agentId: "b", sessionId: "b-session" },
+    ]);
   } finally {
     store.close();
   }

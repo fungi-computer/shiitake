@@ -31,7 +31,7 @@ new AgentArchiveRefused(reason, message): AgentArchiveRefused;
 
 | Parameter | Type                                                                                           |
 | --------- | ---------------------------------------------------------------------------------------------- |
-| `reason`  | \| `"running"` \| `"pending"` \| `"archived"` \| `"not_creator"` \| `"self"` \| `"unreadable"` |
+| `reason`  | \| `"archived"` \| `"running"` \| `"pending"` \| `"not_creator"` \| `"self"` \| `"unreadable"` |
 | `message` | `string`                                                                                       |
 
 ###### Returns
@@ -62,9 +62,9 @@ Error.name;
 
 ```ts
 readonly reason:
+  | "archived"
   | "running"
   | "pending"
-  | "archived"
   | "not_creator"
   | "self"
   | "unreadable";
@@ -235,6 +235,7 @@ type AgentDelegationInput = Readonly<{
   | Readonly<{
   sessionId?: string;
   delivery: "followUp";
+  goal?: string | false;
 }>;
 ```
 

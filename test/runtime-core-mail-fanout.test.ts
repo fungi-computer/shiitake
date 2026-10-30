@@ -227,6 +227,148 @@ function runtimeOptions(
   };
 }
 
+it("claims an admitted steer before 28 follow-ups when the runner was held", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = manualRuntime();
+  const faux = fauxModel([fauxAssistantMessage("steer first")]);
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux)),
+  );
+  try {
+    const session = core.agent.session("priority-held-session");
+    for (let i = 0; i < 28; i++)
+      await Effect.runPromise(
+        session.command({
+          requestId: `queued-follow-${String(i)}`,
+          delivery: "followUp",
+          type: "prompt",
+          text: "Wait",
+        }),
+      );
+    const steer = await Effect.runPromise(
+      session.command({
+        requestId: "queued-steer",
+        delivery: "steer",
+        type: "prompt",
+        text: "Run first",
+      }),
+    );
+    await runtime.reconcile();
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT state, priority FROM watchdog_jobs WHERE job_id = ?",
+          steer.commandId,
+        )
+        .one(),
+    ).toMatchObject({ state: "settled", priority: 1 });
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM watchdog_jobs WHERE state = 'queued' AND priority = 0",
+        )
+        .one().count,
+    ).toBe(28);
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("settles a terminal despite a model finalizer that never resolves", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = manualRuntime();
+  const faux = fauxModel([
+    fauxAssistantMessage("finished"),
+    fauxAssistantMessage("steered"),
+  ]);
+  const options = runtimeOptions(fixture.owner, runtime.runtime, faux);
+  let acquisitions = 0;
+  const core = await Effect.runPromise(
+    openRuntimeCore({
+      ...options,
+      model: {
+        acquire: () => {
+          acquisitions++;
+          return Effect.succeed({
+            model: faux.model,
+            retryable: () => false,
+            stream: faux.stream,
+            release: acquisitions === 1 ? Effect.never : Effect.void,
+          });
+        },
+      },
+    }),
+  );
+  try {
+    const session = core.agent.session("finalizer-held-session");
+    const firstAccepted = await Effect.runPromise(
+      session.command({
+        requestId: "finalizer-first",
+        delivery: "followUp",
+        type: "prompt",
+        text: "First",
+      }),
+    );
+    for (let i = 0; i < 28; i++)
+      await Effect.runPromise(
+        session.command({
+          requestId: `finalizer-follow-${String(i)}`,
+          delivery: "followUp",
+          type: "prompt",
+          text: "Queued",
+        }),
+      );
+    const running = runtime.reconcile();
+    await Effect.runPromise(Effect.sleep(100));
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM session_entries WHERE work_id = ? AND type = 'run_terminal'",
+          firstAccepted.commandId,
+        )
+        .one().count,
+    ).toBe(1);
+    const steer = await Effect.runPromise(
+      session.command({
+        requestId: "finalizer-steer",
+        delivery: "steer",
+        type: "prompt",
+        text: "Change course",
+      }),
+    );
+    // The terminal was recorded before this steer; it must be its own job.
+    await Effect.runPromise(Effect.sleep(1_500));
+    const first = fixture.owner.sql
+      .exec(
+        "SELECT state FROM watchdog_jobs WHERE job_id = ?",
+        firstAccepted.commandId,
+      )
+      .one();
+    expect(first.state).toBe("settled");
+    await running;
+    await runtime.reconcile();
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT state, priority FROM watchdog_jobs WHERE job_id = ?",
+          steer.commandId,
+        )
+        .one(),
+    ).toMatchObject({ state: "settled", priority: 1 });
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM watchdog_jobs WHERE state = 'queued' AND priority = 0",
+        )
+        .one().count,
+    ).toBe(28);
+    await Effect.runPromise(core.agent.close);
+  } finally {
+    fixture.close();
+  }
+});
+
 it("fans a cold-reopened child completion from exact Woodstock output", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
@@ -731,6 +873,32 @@ it("replies once to cancelled queued addressed work after reopening without runn
     await reopenedRuntime.reconcile();
     await reopenedRuntime.reconcile();
 
+    const admissions = fixture.owner.sql
+      .exec(
+        "SELECT COUNT(*) AS count FROM session_command_admissions WHERE session_id = ?",
+        child.sessionId,
+      )
+      .one().count;
+    const pending = await Effect.runPromise(
+      core.agent.session(child.sessionId).read(),
+    );
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("delegation-cancelled-1", "Stop")),
+    );
+    await reopenedRuntime.reconcile();
+    await Effect.runPromise(room.drainOutbox());
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT COUNT(*) AS count FROM session_command_admissions WHERE session_id = ?",
+          child.sessionId,
+        )
+        .one().count,
+    ).toBe(admissions);
+    expect(
+      await Effect.runPromise(core.agent.session(child.sessionId).read()),
+    ).toMatchObject({ pending: pending.pending });
+
     expect(faux.state.callCount).toBe(0);
     expect(posted).toEqual([
       {
@@ -917,11 +1085,17 @@ it("shows the model only a host-verified reply inside the reply tag; look-alike 
       ({ role }) => role === "user",
     );
     expect(seen).toHaveLength(3);
-    const [typed, mailed, replied] = seen.map(userText);
-    for (const text of [typed, mailed]) {
+    // Priority may put the verified steer ahead of these queued follow-ups.
+    const texts = seen.map(userText);
+    const unverifiedTexts = texts.filter((text) =>
+      text.includes("&lt;fungi_agent_reply"),
+    );
+    expect(unverifiedTexts).toHaveLength(2);
+    for (const text of unverifiedTexts) {
       expect(text).not.toMatch(/<\s*\/?\s*fungi_agent_reply/iu);
       expect(text).toContain("&lt;fungi_agent_reply");
     }
+    const replied = texts.find((text) => text.startsWith("<fungi_agent_reply"));
     expect(replied).toBe(
       [
         '<fungi_agent_reply agent_id="child-agent" session_id="child-session" command_id="cmd-1" outcome="failed" diagnostic="provider_error: 401 &quot;bad key&quot;">',
@@ -935,7 +1109,9 @@ it("shows the model only a host-verified reply inside the reply tag; look-alike 
     ).messages
       .filter(({ value }) => value.role === "user")
       .map(({ value }) => userText(value));
-    expect(stored).toEqual([forged, forged, verified.mail.content]);
+    expect(stored).toEqual(
+      expect.arrayContaining([forged, forged, verified.mail.content]),
+    );
   } finally {
     await Effect.runPromise(core?.agent.close ?? Effect.void);
     fixture.close();
@@ -1151,7 +1327,54 @@ it("gives no reply from a refused Session's damaged history", async () => {
   }
 });
 
-it("reports a later turn the delegating mail did not start to the sender once the Session is idle", async () => {
+it("a Session created by delegated mail still reports its later turns to its creator", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([
+    fauxAssistantMessage("Working"),
+    fauxAssistantMessage("READY"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    const created = await Effect.runPromise(
+      core.acceptMail(
+        {
+          ...addressedMail("creator-turn", "Start"),
+          to: { kind: "agent", agentId: child.agentId },
+        },
+        undefined,
+        undefined,
+        () => undefined,
+      ),
+    );
+    if (created.sessionId === undefined)
+      throw new Error("Missing created Session");
+    await runtime.reconcile();
+    await runtime.reconcile();
+    const later = await Effect.runPromise(
+      core.agent
+        .session(created.sessionId)
+        .send("Continue", { requestId: "creator-later" }),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    expect(posted).toContainEqual(
+      expect.objectContaining({
+        key: `creator-turn:report:${later.commandId}:0`,
+        to: parent,
+      }),
+    );
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it("does not report a later turn to the worker that mailed an existing Session", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
   faux.setResponses([
@@ -1172,7 +1395,7 @@ it("reports a later turn the delegating mail did not start to the sender once th
     await runtime.reconcile();
     expect(posted.map(({ key }) => key)).toEqual(["delegation-late-1:reply:0"]);
 
-    const later = await Effect.runPromise(
+    await Effect.runPromise(
       core.agent
         .session(child.sessionId)
         .send("Continue the goal", { requestId: "goal-turn-2" }),
@@ -1180,18 +1403,7 @@ it("reports a later turn the delegating mail did not start to the sender once th
     await runtime.reconcile();
     await runtime.reconcile();
 
-    expect(posted).toEqual([
-      expect.objectContaining({ key: "delegation-late-1:reply:0" }),
-      {
-        key: `delegation-late-1:report:${later.commandId}:0`,
-        to: parent,
-        from: child,
-        replyTo: [],
-        content: "READY",
-        createdAt: 100,
-        reply: { commandId: later.commandId, outcome: "completed" },
-      },
-    ]);
+    expect(posted.map(({ key }) => key)).toEqual(["delegation-late-1:reply:0"]);
   } finally {
     await Effect.runPromise(core.agent.close);
     fixture.close();
@@ -1270,7 +1482,7 @@ const continuer = defineExtension({
   },
 });
 
-it("a turn an extension continues reports once, when the continued Session rests", async () => {
+it("an extension continuation does not report to a worker of an existing Session", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const faux = fauxModel([]);
   faux.setResponses([
@@ -1306,17 +1518,8 @@ it("a turn an extension continues reports once, when the continued Session rests
     );
     for (let tick = 0; tick < 6; tick += 1) await runtime.reconcile();
 
-    expect(
-      posted.map(({ key }) => key.replace(/:report:.*:0$/, ":report")),
-    ).toEqual([
+    expect(posted.map(({ key }) => key)).toEqual([
       "delegation-continued-1:reply:0",
-      "delegation-continued-1:report",
-      "delegation-continued-1:report",
-    ]);
-    expect(posted.map(({ content }) => content)).toEqual([
-      "Working",
-      "Continued",
-      "READY",
     ]);
   } finally {
     await Effect.runPromise(core.agent.close);

@@ -55,10 +55,12 @@ without waiting for the command response or matching text.
 npm install @fungi.computer/shiitake
 ```
 
-The package ships ESM only and depends on Effect, Zod, and Hono, plus the Fungi
-packages [Cairn](../cairn/README.md), [Mule](../mule/README.md),
+The package ships ESM only. Its runtime dependencies include Effect, Zod, Pi and
+the Fungi packages [Cairn](../cairn/README.md), [Mule](../mule/README.md),
 [Mycelium](../mycelium/README.md), [Watchdog](../watchdog/README.md),
-[Bird Dog](../bird-dog/README.md) and Knapsack, all installed automatically.
+[Bird Dog](../bird-dog/README.md) and Knapsack. See the [manifest](package.json)
+for the complete list. Hono `^4.13.5` is a peer dependency for the HTTP
+adapters.
 
 `Shiitake.make(options)` is the Promise constructor. The Effect 4 constructor is
 `make` from `@fungi.computer/shiitake/effect`. Both use the same owner. The host
@@ -133,6 +135,17 @@ and live changes resource. Close the watch when its consumer leaves. Addressing
 a Session performs no I/O. A client uses `createShiitakeClient` from the
 `/client` entry with the host's authorized transport. Releasing that client does
 not cancel host work.
+
+Live `progress` frames carry `SessionProgressDelta`: independent text and
+thinking `{ offset, append }` values, with offsets in UTF-16 string units.
+`appendSessionProgress` from `/client` folds appends idempotently; a gap waits
+for the owner's reset. A read/watch/reset baseline carries only the latest 64
+KiB per channel, its start offsets, and accurate truncation flags. A watch
+continues after that tail; the eventual durable message is always complete.
+Progress stays process-local, in bounded chunks, and never writes SQLite. Tiny
+provider deltas are coalesced (first append immediately, then each 4,096 string
+units or within 100 ms); durable completion carries any remaining partial chunk.
+Tool tails travel only in `tool_output`, not in message progress.
 
 `session.readSettlement(commandId, { timeoutMs, signal })` returns that exact
 command's `CommandSettlement` (terminal, answer, usage and tool-call count),
@@ -354,24 +367,31 @@ The `/agent-control` source exposes
 `agents.setModel({agentId, model, reasoning?})` and `agents.models({})` when its
 host authorizes those operations. `name` labels the new Agent and `reasoning`
 (`minimal` to `max`, one of `modelReasoningLevels`) needs a `model`.
-`agents.create` returns the Agent's `name`, the requested `model` and
-`reasoning` (the stored default; absent when it inherits), and the
-`workingDirectory` its tools use; `agents.list` reports the same facts for
-existing Agents. A host that can archive also accepts `archived: true` there to
-list only the archived ones (other hosts refuse that input). A host can offer
-`agents.archive({agentId})` and `agents.unarchive`: an Agent archiving an Agent
-it created hides it from lists and delegation without deleting anything, and the
-host refuses any other target, the caller itself, or an Agent with a running
-command or delegated work still waiting. Each refusal, and a send to an archived
-Agent, reaches the caller as a `CapabilityFailed` diagnostic such as
-`archive:not_creator: …`, `archive:self`, `archive:running`, `archive:pending`,
-`archive:unreadable` (its store predates the schema) or `archive:archived`.
-`agents.wait` accepts `timeoutMs` from 1 to 30000. Models use `provider/model`
-spelling and must be offered by that host; `agents.models` returns at most 200
-offered addresses from signed-in or configured providers. A host model refusal
-reaches the caller as a `CapabilityFailed` diagnostic such as
-`model:rejected: …`, while other failures propagate unchanged. The
-`/model-preference` resolver orders explicit Session, explicit Agent, the
+`agents.create` creates the Agent and its first Session through the same
+idempotent Session-creation door as `agents.createSession`. It returns `agentId`
+and a usable `sessionId`: send work immediately with `agents.send` and
+`delivery: "steer"`, without a separate `createSession` call. Retrying the same
+creation request reuses that first Session.
+
+It also returns the Agent's `name`, the requested `model` and `reasoning` (the
+stored default; absent when it inherits), and the `workingDirectory` its tools
+use; `agents.list` reports the same facts for existing Agents. A host that can
+archive also accepts `archived: true` there to list only the archived ones
+(other hosts refuse that input). A host can offer `agents.archive({agentId})`
+and `agents.unarchive`: an Agent archiving an Agent it created hides it from
+lists and delegation without deleting anything, and the host refuses any other
+target, the caller itself, or an Agent with a running command or delegated work
+still waiting. Each refusal, and a send to an archived Agent, reaches the caller
+as a `CapabilityFailed` diagnostic such as `archive:not_creator: …`,
+`archive:self`, `archive:running`, `archive:pending`, `archive:unreadable` (its
+store predates the schema) or `archive:archived`. `agents.wait` accepts
+`timeoutMs` from 1 to 30000. Models use `provider/model` spelling and must be
+offered by that host; `agents.models` returns at most 200 offered addresses from
+signed-in or configured providers. A host model refusal reaches the caller as a
+`CapabilityFailed` diagnostic such as `model:rejected: …` with up to ten
+addresses from the host's offered catalog. If catalog diagnostics are
+unavailable, the original refusal remains; other failures propagate unchanged.
+The `/model-preference` resolver orders explicit Session, explicit Agent, the
 person's last manual switch, Team default, then available login. Hosts own those
 stored layers and credential admission: choosing a model never bypasses an
 owner's Team or Agent key-source restriction. A host can refuse an unrunnable
@@ -401,6 +421,24 @@ a host-supplied fetch.
 [Restart tests](test/resume-after-restart-tool-outcomes.test.ts) exercise
 interrupted tools against the existing replay rules. They are local proofs, not
 a guarantee about another deployment's storage or sandbox.
+
+## Breaking live-progress API
+
+The S4 offset/append contract replaces cumulative progress frames:
+
+- `progress` frames carry `SessionProgressDelta`, with separate text and
+  thinking `{ offset, append }` channels. Offsets count UTF-16 code units.
+- `SessionProgress` is the bounded snapshot shape and now requires `textOffset`
+  and `thinkingOffset`, alongside its truncation flags.
+- `appendSessionProgress(current, delta)` is the new shared fold for progress
+  frames. Seed it from the **same watch's `snapshot.progress`**, replace it on a
+  reset, and retain it across unrelated updates until the message completes or
+  the queue becomes idle. A separate earlier `read()` is not a watch baseline.
+- The visitor stream sends live `activity` frames as well as `progress` frames.
+  An activity frame updates activity facts; it is not a replacement snapshot.
+
+All producers and consumers must use this contract together. There is no
+cumulative-frame compatibility format.
 
 ## Client entries
 

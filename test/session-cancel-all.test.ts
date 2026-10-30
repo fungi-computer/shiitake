@@ -75,7 +75,7 @@ it("a fresh client can see then cancel the running turn and every queued prompt"
     const fresh = client.session("cancel-all");
     expect(
       (await fresh.read()).pending.prompts.map(({ text }) => text),
-    ).toEqual(["queued follow-up", "queued steer"]);
+    ).toEqual(["queued steer", "queued follow-up"]);
     await fresh.abort();
     expect(signal?.aborted).toBe(true);
     expect((await fresh.read()).pending.prompts).toEqual([]);
@@ -92,7 +92,7 @@ it("a fresh client can see then cancel the running turn and every queued prompt"
       snapshot.messages
         .filter(({ value }) => value.role === "user")
         .map(({ value }) => value.content),
-    ).toEqual(["active instruction", "queued follow-up", "queued steer"]);
+    ).toEqual(["active instruction", "queued steer", "queued follow-up"]);
     expect(faux.state.callCount).toBe(1);
   } finally {
     releaseRun();

@@ -7,11 +7,13 @@ import {
   commandSettlementSchema,
   createAgentDirectory,
   createFleetCorrespondence,
+  createFleetDelegation,
   agentDelegationRequestKey,
   delegationProvenance,
   delegationReplyMeta,
   delegationSendMeta,
   settlementReadableBy,
+  type AgentDelegationTask,
   type AgentGrant,
 } from "./fleet.js";
 import type { WatchdogSqliteOwner } from "@fungi.computer/watchdog";
@@ -102,6 +104,27 @@ export class AgentDelegation {
     }));
   }
 
+  /** Best-effort remote refresh before an owner-local archive transaction.
+   * Confirmed settlements are recorded by Shiitake; unreadable targets leave
+   * their local accepted receipt outstanding for busySync to refuse.
+   */
+  async refreshOutstanding(
+    readSettlement: (
+      agentId: string,
+      sessionId: string,
+      commandId: string,
+    ) => Promise<CommandSettlement | undefined>,
+  ): Promise<void> {
+    const fleet = createFleetDelegation({
+      storage: this.deps.storage,
+      deliver: this.deps.deliver,
+      open: (agentId) =>
+        this.deps.directory().open(agentId, new AbortController().signal),
+      readSettlement,
+    });
+    await fleet.outstanding();
+  }
+
   private async scope(signal: AbortSignal) {
     const agents = await this.deps.directory().list(signal);
     const identity = await this.deps.identity();
@@ -162,6 +185,15 @@ export class AgentDelegation {
       invocation.meta,
     );
     signal.throwIfAborted();
+    let task: AgentDelegationTask = {
+      agentId: input.agentId,
+      sessionId: input.sessionId,
+      delivery: input.delivery,
+      text: input.text,
+      requestId,
+    };
+    if (input.delivery === "followUp" && input.goal !== undefined)
+      task = { ...task, goal: input.goal };
     const accepted = await this.fleet().start(
       {
         agents: scope.agents.map(({ agentId }) => agentId),
@@ -170,13 +202,7 @@ export class AgentDelegation {
         provenance,
         meta,
       },
-      {
-        agentId: input.agentId,
-        sessionId: input.sessionId,
-        delivery: input.delivery,
-        text: input.text,
-        requestId,
-      },
+      task,
     );
     return accepted;
   }

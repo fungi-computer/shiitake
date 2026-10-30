@@ -366,10 +366,12 @@ it("reads a Session's context use only for updates that move its history", async
           statement.includes("SELECT id FROM walk") &&
           statement.includes("state != 'streaming'")
         ) {
-          const key = JSON.stringify([values[0], values[1]]);
+          // Both context query forms bind their Session owner last; the
+          // other bindings carry either the tip or its shared ancestry.
+          const key = JSON.stringify(values);
           const stack = new Error().stack ?? "";
           contextReads.push({
-            sessionId: values[0],
+            sessionId: values.at(-1),
             key,
             caller: stack.includes("readRunContextRows")
               ? "run-context"

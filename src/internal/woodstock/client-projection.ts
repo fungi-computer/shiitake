@@ -34,6 +34,7 @@ import {
   readPendingSessionCommands,
   readSessionCommandAdmission,
   readNewestPendingSessionCommand,
+  withSessionReadTransaction,
   type AdmissionIdentity,
   type StoredCommandAdmission,
   type SessionLineage,
@@ -531,7 +532,7 @@ export function readClientSnapshot(
   activity: ObservedActivity,
   projectExtensions: () => SessionExtensionSlots = () => ({}),
 ): SessionSnapshot {
-  return owner.transactionSync(() => {
+  return withSessionReadTransaction(owner, sessionId, () => {
     const pending = readPendingPrompts(owner, sessionId);
     const lineage = readSessionLineage(owner, { sessionId });
     if (lineage === undefined)
@@ -546,7 +547,7 @@ export function readClientSnapshot(
         compactionNotices: Object.freeze([]),
         pending,
         activity: activity.facts,
-        progress: activity.progress,
+        progress: activity.readProgress(),
         toolOutput: activity.toolOutput,
         extensions: projectExtensions(),
         attention: readSessionAttention(owner, sessionId),
@@ -594,7 +595,7 @@ export function readClientSnapshot(
       compactionNotices: compactionNoticesIn(consumedRows),
       pending,
       activity: activity.facts,
-      progress: options.before === undefined ? activity.progress : null,
+      progress: options.before === undefined ? activity.readProgress() : null,
       toolOutput: options.before === undefined ? activity.toolOutput : [],
       extensions: projectExtensions(),
       attention: readSessionAttention(owner, sessionId),
@@ -678,14 +679,6 @@ function replayFrames(
         : frame,
     ),
   ];
-  if (delivery === "live" && !page.hasMore && activity.progress !== null)
-    frames.push(
-      Object.freeze({
-        kind: "progress",
-        progress: activity.progress,
-        activity: activity.facts,
-      }),
-    );
   return Object.freeze({
     kind: "page" as const,
     frames: Object.freeze(
@@ -718,7 +711,7 @@ export function readClientReplayPage(
     after === undefined ? undefined : decodeWoodstockCursor(after);
   if (after !== undefined && position === undefined) return resetReplayPage;
 
-  return owner.transactionSync(() => {
+  return withSessionReadTransaction(owner, sessionId, () => {
     const pending = readPendingPrompts(owner, sessionId);
     const lineage = readSessionLineage(owner, { sessionId });
     if (lineage === undefined) {

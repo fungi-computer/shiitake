@@ -296,6 +296,167 @@ it("keeps the earliest requested wake when a later one arrives", async () => {
   }
 });
 
+it("caps far-future wake chunks and reconciles only after the original deadline", async () => {
+  vi.useFakeTimers({
+    toFake: [
+      "setTimeout",
+      "clearTimeout",
+      "setImmediate",
+      "clearImmediate",
+      "Date",
+    ],
+  });
+  const timeout = vi.spyOn(globalThis, "setTimeout");
+  const failure = vi.fn();
+  const reconcile = vi.fn(() => Promise.resolve());
+  const host = nodeRuntimeHost(failure);
+  const maximumDelay = 2_147_483_647;
+  try {
+    await host.runtime.bind({
+      reconcile,
+      pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
+    });
+    await settlePass();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    host.scheduleWake(Date.now() + maximumDelay * 2 + 60_000);
+    expect(timeout).toHaveBeenLastCalledWith(
+      expect.any(Function),
+      maximumDelay,
+    );
+    for (let chunk = 0; chunk < 2; chunk += 1) {
+      await vi.advanceTimersByTimeAsync(maximumDelay);
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+    }
+    expect(timeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settlePass();
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(failure).not.toHaveBeenCalled();
+  } finally {
+    await host.close();
+    timeout.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
+it("cancels an unbound host's wake timer and ignores later hints after close", async () => {
+  vi.useFakeTimers({
+    toFake: ["setTimeout", "clearTimeout", "Date"],
+  });
+  const failure = vi.fn();
+  const host = nodeRuntimeHost(failure);
+  const maximumDelay = 2_147_483_647;
+  try {
+    host.scheduleWake(Date.now() + maximumDelay * 2 + 60_000);
+    expect(vi.getTimerCount()).toBe(1);
+    await host.close();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(maximumDelay);
+    expect(vi.getTimerCount()).toBe(0);
+
+    host.scheduleWake(Date.now() + 1_000);
+    expect(vi.getTimerCount()).toBe(0);
+    await host.close();
+    host.scheduleWake(Date.now() + maximumDelay * 2 + 60_000);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(maximumDelay * 2 + 60_000);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(failure).not.toHaveBeenCalled();
+  } finally {
+    host.scheduleWake(null);
+    await host.close();
+    vi.useRealTimers();
+  }
+});
+
+it("cancels a rearmed far-future chunk when the bound host closes", async () => {
+  vi.useFakeTimers({
+    toFake: [
+      "setTimeout",
+      "clearTimeout",
+      "setImmediate",
+      "clearImmediate",
+      "Date",
+    ],
+  });
+  const failure = vi.fn();
+  const reconcile = vi.fn(() => Promise.resolve());
+  const host = nodeRuntimeHost(failure);
+  const maximumDelay = 2_147_483_647;
+  try {
+    await host.runtime.bind({
+      reconcile,
+      pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
+    });
+    await settlePass();
+    host.scheduleWake(Date.now() + maximumDelay * 2 + 60_000);
+    await vi.advanceTimersByTimeAsync(maximumDelay);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await host.close();
+    expect(vi.getTimerCount()).toBe(0);
+    host.scheduleWake(Date.now() + 1_000);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(maximumDelay * 2 + 60_000);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(failure).not.toHaveBeenCalled();
+  } finally {
+    await host.close();
+    vi.useRealTimers();
+  }
+});
+
+it("replaces a capped chunk with an earlier hint without postponing it for a later hint", async () => {
+  vi.useFakeTimers({
+    toFake: [
+      "setTimeout",
+      "clearTimeout",
+      "setImmediate",
+      "clearImmediate",
+      "Date",
+    ],
+  });
+  const timeout = vi.spyOn(globalThis, "setTimeout");
+  const failure = vi.fn();
+  const reconcile = vi.fn(() => Promise.resolve());
+  const host = nodeRuntimeHost(failure);
+  const maximumDelay = 2_147_483_647;
+  try {
+    await host.runtime.bind({
+      reconcile,
+      pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
+    });
+    await settlePass();
+    const farFuture = Date.now() + maximumDelay * 2 + 60_000;
+    host.scheduleWake(farFuture);
+    await vi.advanceTimersByTimeAsync(maximumDelay);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    host.scheduleWake(Date.now() + 1_000);
+    host.scheduleWake(farFuture + 60_000);
+    expect(timeout).toHaveBeenLastCalledWith(expect.any(Function), 1_000);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settlePass();
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(maximumDelay * 2 + 60_000);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(failure).not.toHaveBeenCalled();
+  } finally {
+    await host.close();
+    timeout.mockRestore();
+    vi.useRealTimers();
+  }
+});
+
 it("opens a store with one broken Session, refusing that Session by file", async () => {
   const path = storePath();
   const host = await openNodeShiitake(options(path, "kept"));

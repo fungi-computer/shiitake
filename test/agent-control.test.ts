@@ -2,9 +2,10 @@ import { directSandbox } from "@fungi.computer/mycelium/testing";
 import { idleActivity } from "./fixtures/client.fixture.js";
 import { Mycelium } from "@fungi.computer/mycelium";
 import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { expect, it } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import { z } from "zod";
 import type {
   Accepted,
@@ -180,7 +181,8 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
           return Promise.resolve();
         },
         open: (agentId) => {
-          if (agentId !== "agent-a") throw new Error("Agent is not authorized");
+          if (agentId !== "agent-a" && agentId !== "agent-new")
+            throw new Error("Agent is not authorized");
           return Promise.resolve({ agent, release: () => Promise.resolve() });
         },
       }),
@@ -307,7 +309,7 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
         model: { providerId: "openai", modelId: "gpt-6-sol" },
       },
     ]);
-    expect(createdSessions).toEqual(["session-request"]);
+    expect(createdSessions).toEqual(["agent-request", "session-request"]);
     expect(JSON.stringify(parts[0])).toContain(
       '\\"oversizedRequestRejected\\":true',
     );
@@ -913,6 +915,48 @@ async function captureRejection(pending: Promise<unknown>): Promise<Rejection> {
 }
 
 it.each(["create", "setModel"] as const)(
+  "%s model:rejected lists at most ten offered addresses",
+  async (operation) => {
+    const failures: Rejection[] = [];
+    await runAgentCode(
+      {
+        list: () => Promise.resolve([]),
+        create: unregistered,
+        setModel: unregistered,
+        models: () =>
+          Promise.resolve(
+            Array.from({ length: 12 }, (_, index) => ({
+              address: `openai/offered-${String(index)}`,
+              name: `Offered ${String(index)}`,
+            })),
+          ),
+        open: () => Promise.reject(new Error("unused")),
+      },
+      async (tools) => {
+        const call = tools[operation];
+        if (call === undefined) throw new Error("Model operation missing");
+        failures.push(
+          await captureRejection(
+            call(
+              operation === "create"
+                ? { requestId: "agent-request", model: "openai/luna" }
+                : { agentId: "agent-a", model: "openai/luna" },
+            ),
+          ),
+        );
+        return null;
+      },
+    );
+    const message = failures[0]?.cause?.message;
+    expect(message).toContain("model:rejected:");
+    for (let index = 0; index < 10; index += 1)
+      expect(message).toContain(`openai/offered-${String(index)}`);
+    expect(message).not.toContain("openai/offered-10");
+    expect(message).not.toContain("openai/offered-11");
+  },
+);
+
+it.each(["create", "setModel"] as const)(
   "%s admits a host model refusal as a typed capability failure",
   async (operation) => {
     const failures: Rejection[] = [];
@@ -974,6 +1018,140 @@ it("keeps unexpected setModel failures out of the model refusal path", async () 
   );
   expect(failures).toHaveLength(1);
   expect(failures[0]).not.toMatchObject({ _tag: "CapabilityFailed" });
+});
+
+it("reports a failed model catalog privately without replacing the model refusal", async () => {
+  const marker = "synthetic-private-model-catalog-marker";
+  const catalogFailure = new Error(`Catalog unavailable ${marker}`);
+  const report = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  onTestFinished(() => {
+    report.mockRestore();
+  });
+  const failures: Rejection[] = [];
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      setModel: unregistered,
+      models: () => Promise.reject(catalogFailure),
+      open: () => Promise.reject(new Error("unused")),
+    },
+    async (tools) => {
+      const setModel = tools.setModel;
+      if (setModel === undefined) throw new Error("Model control missing");
+      failures.push(
+        await captureRejection(
+          setModel({ agentId: "agent-a", model: "openai/luna" }),
+        ),
+      );
+      return null;
+    },
+  );
+  expect(failures[0]).toMatchObject({
+    _tag: "CapabilityFailed",
+    namespace: "agents",
+    operation: "setModel",
+    cause: {
+      kind: "OperationFailed",
+      message: "model:rejected: Local model is not registered: openai/luna",
+    },
+  });
+  await vi.waitFor(() => {
+    const retained = report.mock.calls
+      .flatMap((args: unknown[]) => args)
+      .filter(Redacted.isRedacted)
+      .map(Redacted.value);
+    expect(retained).toContain(catalogFailure);
+  });
+  const logged = JSON.stringify(report.mock.calls);
+  expect(logged).toContain("agent-control.model-catalog");
+  expect(logged).not.toContain(marker);
+  expect(JSON.stringify(failures)).not.toContain(marker);
+});
+
+it("create returns a usable sessionId", async () => {
+  const sessions = new Set<string>();
+  const creationRequests: string[] = [];
+  const sends: string[] = [];
+  let released = 0;
+  const session = testSession((text) => sends.push(text));
+  const agent: ShiitakeAgent = {
+    createSession: (requestId) => {
+      creationRequests.push(requestId);
+      sessions.add("session-first");
+      return Promise.resolve("session-first");
+    },
+    deleteSession: () => Promise.resolve(false),
+    listSessions: () => Promise.resolve({ sessions: [], next: undefined }),
+    extensions: {
+      list: () => Promise.resolve([]),
+      resume: () => Promise.reject(new Error("unused")),
+      call: () => Promise.reject(new Error("unused")),
+    },
+    session: (sessionId) => {
+      if (!sessions.has(sessionId)) throw new Error("Session does not exist");
+      return session;
+    },
+    close: () => Promise.resolve(),
+  };
+  const directory: Parameters<typeof createAgentControlSource>[0] = {
+    list: () => Promise.resolve([]),
+    create: () => Promise.resolve({ agentId: "agent-new", name: "New Agent" }),
+    send: (request, sourceSessionId) => {
+      expect(sourceSessionId).toBe("parent-session");
+      if (request.sessionId === undefined)
+        return Promise.reject(new Error("steer needs the returned Session"));
+      return agent.session(request.sessionId).send(request.text, {
+        requestId: request.requestId,
+        delivery: request.delivery,
+      });
+    },
+    open: (agentId: string) => {
+      expect(agentId).toBe("agent-new");
+      return Promise.resolve({
+        agent,
+        release: () => {
+          released += 1;
+          return Promise.resolve();
+        },
+      });
+    },
+  };
+  const created: z.core.util.JSONType[] = [];
+  await runAgentCode(
+    directory,
+    async (tools) => {
+      if (tools.create === undefined) throw new Error("create missing");
+      created.push(z.json().parse(await tools.create({ requestId: "spawn" })));
+      created.push(z.json().parse(await tools.create({ requestId: "spawn" })));
+      return null;
+    },
+    "parent-session",
+  );
+  expect(created[0]).toMatchObject({
+    agentId: "agent-new",
+    sessionId: "session-first",
+  });
+  expect(created[1]).toEqual(created[0]);
+  const target = z
+    .object({ agentId: z.string(), sessionId: z.string() })
+    .parse(created[0]);
+  await runAgentCode(
+    directory,
+    async (tools) => {
+      if (tools.send === undefined) throw new Error("send missing");
+      await tools.send({
+        ...target,
+        requestId: "work",
+        text: "start work",
+        delivery: "steer",
+      });
+      return null;
+    },
+    "parent-session",
+  );
+  expect(creationRequests).toEqual(["spawn", "spawn"]);
+  expect(sends).toEqual(["start work"]);
+  expect(released).toBe(2);
 });
 
 it("lists only host-offered models and keeps valid setModel a null result", async () => {
@@ -1202,7 +1380,7 @@ it("read pages back with before through a full Woodstock history", async () => {
             fixture.owner,
             "session-a",
             decodeClientReadOptions(options),
-            { facts: idleActivity, toolOutput: [], progress: null },
+            { facts: idleActivity, toolOutput: [], readProgress: () => null },
           ),
         );
       },

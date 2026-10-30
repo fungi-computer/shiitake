@@ -152,7 +152,7 @@ export class ExtensionStateError extends Data.TaggedError(
 
 /** The door refused an extension admission. */
 export class AdmissionError extends Data.TaggedError("AdmissionError")<{
-  reason: "invalid" | "conflict" | "closed";
+  reason: "invalid" | "conflict" | "closed" | "archived";
   message: string;
 }> {}
 

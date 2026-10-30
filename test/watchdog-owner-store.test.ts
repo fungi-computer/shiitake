@@ -103,7 +103,9 @@ it("commits a Woodstock command and its opaque Watchdog job together", async () 
       {
         contract,
         enqueue: (work) => {
-          runtime.transactional.enqueueAcceptedJob(BirdDog.agentJob({ work }));
+          runtime.transactional.enqueueAcceptedJob(
+            BirdDog.agentJob({ work, delivery: work.delivery }),
+          );
         },
       },
     );
@@ -135,7 +137,9 @@ it("commits a Woodstock command and its opaque Watchdog job together", async () 
       {
         contract,
         enqueue: (work) => {
-          runtime.transactional.enqueueAcceptedJob(BirdDog.agentJob({ work }));
+          runtime.transactional.enqueueAcceptedJob(
+            BirdDog.agentJob({ work, delivery: work.delivery }),
+          );
         },
       },
     );

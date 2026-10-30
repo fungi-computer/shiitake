@@ -28,6 +28,8 @@ const ShiitakeErrorCauseSchema = Schema.Literals([
   "state_reset_required",
   /** Owner storage is near its budget; new Sessions and prompts wait. */
   "storage_pressure",
+  /** This Agent is archived; new Sessions and prompts require restoration. */
+  "archived",
 ]);
 const requestIdSchema = Schema.String.pipe(
   Schema.check(Schema.isMinLength(1)),

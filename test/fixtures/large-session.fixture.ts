@@ -76,8 +76,11 @@ function columnsFor(entry: StoredSessionEntry) {
   return { role: null, requestId: null } as const;
 }
 
-const decodeLeaf = Schema.decodeUnknownSync(
-  Schema.Struct({ leaf_id: Schema.NullOr(Schema.String) }),
+const decodePosition = Schema.decodeUnknownSync(
+  Schema.Struct({
+    leaf_id: Schema.NullOr(Schema.String),
+    sequence: Schema.Number,
+  }),
 );
 
 /**
@@ -86,39 +89,57 @@ const decodeLeaf = Schema.decodeUnknownSync(
  * tens of thousands of entries cheaply. Every read decodes and checks these
  * columns against the data, so a drifted fixture fails loudly.
  */
-function append(
-  owner: SqliteOwner,
-  sessionId: string,
-  entry: StoredSessionEntry,
-  id: string = sessionIds.fact.generate(),
-): string {
+function appendWriter(owner: SqliteOwner, sessionId: string) {
   const raw = owner.sql
-    .exec("SELECT leaf_id FROM sessions WHERE id = ?", sessionId)
+    .exec(
+      `SELECT leaf_id,
+              (SELECT COALESCE(MAX(sequence), 0) FROM session_entries
+                WHERE session_id = ?) AS sequence
+         FROM sessions WHERE id = ?`,
+      sessionId,
+      sessionId,
+    )
     .toArray()[0];
-  if (raw === undefined)
-    return appendSessionEntry(owner, { sessionId, id, entry }).id;
-  const leaf = decodeLeaf(raw).leaf_id;
-  const { role, requestId } = columnsFor(entry);
-  owner.sql.exec(
-    `INSERT INTO session_entries
+  let position = raw === undefined ? undefined : decodePosition(raw);
+  return {
+    append(
+      entry: StoredSessionEntry,
+      id: string = sessionIds.fact.generate(),
+    ): string {
+      if (position === undefined) {
+        const row = appendSessionEntry(owner, { sessionId, id, entry });
+        position = { leaf_id: row.id, sequence: row.sequence };
+        return row.id;
+      }
+      const { role, requestId } = columnsFor(entry);
+      const sequence = position.sequence + 1;
+      owner.sql.exec(
+        `INSERT INTO session_entries
        (id, session_id, parent_id, sequence, type, role, state,
         request_id, work_id, data_json, timestamp, completed_at)
-     VALUES (?, ?, ?,
-             (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_entries
-               WHERE session_id = ?),
-             ?, ?, 'complete', ?, ?, ?, 1, 1)`,
-    id,
-    sessionId,
-    leaf,
-    sessionId,
-    entry.kind,
-    role,
-    requestId,
-    entry.workId,
-    encodeStoredSessionEntry(entry),
-  );
-  owner.sql.exec("UPDATE sessions SET leaf_id = ? WHERE id = ?", id, sessionId);
-  return id;
+     VALUES (?, ?, ?, ?, ?, ?, 'complete', ?, ?, ?, 1, 1)`,
+        id,
+        sessionId,
+        position.leaf_id,
+        sequence,
+        entry.kind,
+        role,
+        requestId,
+        entry.workId,
+        encodeStoredSessionEntry(entry),
+      );
+      position = { leaf_id: id, sequence };
+      return id;
+    },
+    finish() {
+      if (position !== undefined)
+        owner.sql.exec(
+          "UPDATE sessions SET leaf_id = ? WHERE id = ?",
+          position.leaf_id,
+          sessionId,
+        );
+    },
+  };
 }
 
 /**
@@ -135,6 +156,9 @@ export function writeLargeSession(
   const compactions: { id: string; keptTurn: number }[] = [];
   let entries = 0;
   owner.transactionSync(() => {
+    // No reader can observe intermediate rows in this transaction. Seed the
+    // append position once and publish the final leaf after all rows exist.
+    const writer = appendWriter(owner, options.sessionId);
     for (let index = 0; index < options.turns; index += 1) {
       const workId = sessionIds.work.generate();
       const run = { kind: "run", value: `run-${String(index)}` } as const;
@@ -143,7 +167,7 @@ export function writeLargeSession(
         value: `turn-${String(index)}`,
         parent: run,
       } as const;
-      const commandId = append(owner, options.sessionId, {
+      const commandId = writer.append({
         kind: "command",
         workId,
         requestId: `request-${workId}`,
@@ -156,9 +180,7 @@ export function writeLargeSession(
         contract,
       });
       const assistantId = sessionIds.fact.generate();
-      append(
-        owner,
-        options.sessionId,
+      writer.append(
         {
           kind: "message",
           workId,
@@ -169,7 +191,7 @@ export function writeLargeSession(
         },
         assistantId,
       );
-      const terminalId = append(owner, options.sessionId, {
+      const terminalId = writer.append({
         kind: "run_terminal",
         workId,
         run,
@@ -187,9 +209,7 @@ export function writeLargeSession(
         const keptTurn = Math.max(0, index + 1 - keepTurns);
         const kept = turns[keptTurn];
         if (kept === undefined) throw new Error("kept turn is missing");
-        const id = append(
-          owner,
-          options.sessionId,
+        const id = writer.append(
           compactionEntryFixture({
             workId,
             head: kept.commandId,
@@ -203,6 +223,7 @@ export function writeLargeSession(
         compactions.push({ id, keptTurn });
       }
     }
+    writer.finish();
   });
   return Object.freeze({
     sessionId: options.sessionId,

@@ -4,7 +4,11 @@ import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import type * as Scope from "effect/Scope";
 
-import type { SessionProgress, SessionToolOutput } from "../../client.js";
+import type {
+  SessionProgress,
+  SessionProgressDelta,
+  SessionToolOutput,
+} from "../../client.js";
 import { ShiitakeError } from "../../errors.js";
 import type { SqliteOwner } from "../contracts.js";
 import { publishOwnerObservation } from "../observation-kernel.js";
@@ -12,9 +16,125 @@ import type { AcceptedCommand } from "./session-store.js";
 
 type ProcessProgress = {
   workId: string;
-  value: SessionProgress | null;
+  value: LiveMessage | null;
   slots: Map<string, SessionToolOutput | null>;
 };
+
+type Tail = {
+  chunks: { offset: number; text: string; bytes: number }[];
+  length: number;
+  bytes: number;
+};
+type LiveMessage = {
+  messageId: string;
+  revision: number;
+  text: Tail;
+  thinking: Tail;
+};
+const tailBytes = 65_536;
+const chunkUnits = 2048;
+const encoder = new TextEncoder();
+const emptyTail = (): Tail => ({ chunks: [], length: 0, bytes: 0 });
+
+/** Bounded chunks: no concatenation or encoding of the reply-so-far. */
+function appendTail(tail: Tail, append: string): void {
+  for (let index = 0; index < append.length;) {
+    let end = Math.min(index + chunkUnits, append.length);
+    // Do not cut a Unicode scalar when bounding a provider's large delta.
+    const code = append.charCodeAt(end - 1);
+    if (end < append.length && code >= 0xd800 && code <= 0xdbff) end--;
+    const text = append.slice(index, end);
+    const bytes = encoder.encode(text).byteLength;
+    const last = tail.chunks.at(-1);
+    if (last !== undefined && last.text.length + text.length <= chunkUnits) {
+      last.text += text;
+      last.bytes += bytes;
+    } else {
+      tail.chunks.push({ offset: tail.length, text, bytes });
+    }
+    tail.length += text.length;
+    tail.bytes += bytes;
+    index = end;
+    while (tail.bytes > tailBytes && tail.chunks.length > 1) {
+      const dropped = tail.chunks.shift();
+      if (dropped !== undefined) tail.bytes -= dropped.bytes;
+    }
+  }
+}
+
+function tailOffset(tail: Tail): number {
+  return tail.chunks[0]?.offset ?? 0;
+}
+
+function tailAfter(tail: Tail, offset: number): string {
+  return tail.chunks
+    .flatMap((chunk) =>
+      chunk.offset + chunk.text.length <= offset
+        ? []
+        : [chunk.text.slice(Math.max(0, offset - chunk.offset))],
+    )
+    .join("");
+}
+
+function snapshot(value: LiveMessage | null): SessionProgress | null {
+  return value === null
+    ? null
+    : {
+        messageId: value.messageId,
+        revision: value.revision,
+        text: tailAfter(value.text, tailOffset(value.text)),
+        thinking: tailAfter(value.thinking, tailOffset(value.thinking)),
+        textOffset: tailOffset(value.text),
+        thinkingOffset: tailOffset(value.thinking),
+        textTruncated: tailOffset(value.text) > 0,
+        thinkingTruncated: tailOffset(value.thinking) > 0,
+      };
+}
+
+/** Per-watch position; a gap in the retained tail requires a fresh baseline. */
+export type ProgressPosition = Readonly<{
+  messageId: string;
+  revision: number;
+  text: number;
+  thinking: number;
+}>;
+
+export function progressPosition(
+  value: SessionProgress | null,
+): ProgressPosition | null {
+  return value === null
+    ? null
+    : {
+        messageId: value.messageId,
+        revision: value.revision,
+        text: value.textOffset + value.text.length,
+        thinking: value.thinkingOffset + value.thinking.length,
+      };
+}
+
+/** Undefined means continuity was lost; null means no new model progress. */
+export function readProcessProgressDelta(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+  after: ProgressPosition | null,
+): SessionProgressDelta | null | undefined {
+  const current = progressByOwner.get(owner)?.get(sessionId);
+  const value = current?.workId === workId ? current.value : null;
+  if (value === null) return null;
+  const position = after?.messageId === value.messageId ? after : null;
+  if (position !== null && position.revision >= value.revision) return null;
+  const text = position?.text ?? 0;
+  const thinking = position?.thinking ?? 0;
+  if (text < tailOffset(value.text) || thinking < tailOffset(value.thinking))
+    return undefined;
+  return {
+    messageId: value.messageId,
+    revision: value.revision,
+    text: { offset: text, append: tailAfter(value.text, text) },
+    thinking: { offset: thinking, append: tailAfter(value.thinking, thinking) },
+  };
+}
 
 const progressByOwner = new WeakMap<
   SqliteOwner,
@@ -135,7 +255,7 @@ export function readProcessProgress(
   owner: SqliteOwner,
   sessionId: string,
 ): SessionProgress | null {
-  return progressFor(owner).get(sessionId)?.value ?? null;
+  return snapshot(progressFor(owner).get(sessionId)?.value ?? null);
 }
 
 /** Read progress only when it belongs to the current durable work head. */
@@ -145,7 +265,7 @@ export function readProcessProgressForWork(
   workId: string,
 ): SessionProgress | null {
   const current = progressFor(owner).get(sessionId);
-  return current?.workId === workId ? current.value : null;
+  return snapshot(current?.workId === workId ? current.value : null);
 }
 
 export type ProgressMessageStart = Extract<
@@ -164,16 +284,6 @@ export type ProgressController = Readonly<{
   terminal: (event: ProgressMessageEnd) => Effect.Effect<void, ShiitakeError>;
 }>;
 
-function textFor(event: ProgressMessageUpdate) {
-  let text = "";
-  let thinking = "";
-  for (const content of event.value.content) {
-    if (content.type === "text") text += content.text;
-    if (content.type === "thinking") thinking += content.thinking;
-  }
-  return { text, thinking };
-}
-
 /**
  * Keep live model progress in the current process only.
  *
@@ -188,8 +298,22 @@ export function openProgress(
   return Effect.gen(function* () {
     const current = yield* openProcessProgress(owner, accepted);
     let started: ProgressMessageStart | undefined;
+    let publishedLength = 0;
+    let flushTimer: ReturnType<typeof setTimeout> | undefined;
+    const cancelFlush = () => {
+      if (flushTimer !== undefined) clearTimeout(flushTimer);
+      flushTimer = undefined;
+    };
+    const publish = () => {
+      cancelFlush();
+      const value = current.value;
+      if (value === null) return;
+      publishedLength = value.text.length + value.thinking.length;
+      publishOwnerObservation(owner, accepted.sessionId, "progress");
+    };
 
     const clear = Effect.sync(() => {
+      cancelFlush();
       const hadProgress = current.value !== null;
       current.value = null;
       if (hadProgress)
@@ -201,8 +325,10 @@ export function openProgress(
     return Object.freeze({
       started: (event) =>
         Effect.sync(() => {
+          cancelFlush();
           started = event;
           current.value = null;
+          publishedLength = 0;
         }),
       update: (event) =>
         Effect.suspend(() => {
@@ -218,23 +344,31 @@ export function openProgress(
           )
             return Effect.fail(rejected("Mule progress identity conflicts"));
 
-          const previous = current.value;
-          const content = textFor(event);
+          const delta = event.event;
           if (
-            previous?.text === content.text &&
-            previous.thinking === content.thinking
+            (delta.type !== "text_delta" && delta.type !== "thinking_delta") ||
+            delta.delta.length === 0
           )
             return Effect.void;
-
-          current.value = Object.freeze({
+          const first = current.value === null;
+          const value = current.value ?? {
             messageId: event.message.value,
-            revision: (previous?.revision ?? 0) + 1,
-            text: content.text,
-            thinking: content.thinking,
-            textTruncated: false,
-            thinkingTruncated: false,
-          });
-          publishOwnerObservation(owner, accepted.sessionId, "progress");
+            revision: 0,
+            text: emptyTail(),
+            thinking: emptyTail(),
+          };
+          appendTail(
+            delta.type === "text_delta" ? value.text : value.thinking,
+            delta.delta,
+          );
+          value.revision++;
+          current.value = value;
+          const length = value.text.length + value.thinking.length;
+          // Coalesce tiny tokens, but flush a paused provider within 100 ms.
+          // One scope-owned timer holds no reply text and never writes SQLite.
+          if (first || length - publishedLength >= 4096) {
+            publish();
+          } else flushTimer ??= setTimeout(publish, 100);
           return Effect.void;
         }),
       terminal: (event) => clear.pipe(Effect.andThen(complete(event))),

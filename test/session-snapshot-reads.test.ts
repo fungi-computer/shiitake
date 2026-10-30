@@ -20,7 +20,7 @@ import {
 
 const activity = {
   facts: idleActivity,
-  progress: null,
+  readProgress: () => null,
   toolOutput: [],
 } satisfies ObservedActivity;
 const contract = { core: "a".repeat(64), extensions: [] } as const;

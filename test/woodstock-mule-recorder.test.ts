@@ -129,7 +129,7 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
               {
                 facts: runningActivity,
                 toolOutput: [],
-                progress: liveProgress,
+                readProgress: () => liveProgress,
               },
             ),
           ).toMatchObject({
@@ -159,7 +159,7 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
             fixture.owner,
             sessionId,
             { limit: 200 },
-            { facts: idleActivity, toolOutput: [], progress: null },
+            { facts: idleActivity, toolOutput: [], readProgress: () => null },
           );
           expect(snapshot.progress).toBeNull();
           expect(snapshot.activity.queue.state).toBe("idle");

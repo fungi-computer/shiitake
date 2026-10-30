@@ -16,10 +16,10 @@ import {
   readLastModelChoiceSequence,
 } from "./woodstock/index.js";
 
-/** Public activity facts plus the process-local progress read with them. */
+/** Activity facts plus an explicit, on-demand bounded progress read. */
 export type ObservedActivity = Readonly<{
   facts: SessionActivity;
-  progress: SessionProgress | null;
+  readProgress: () => SessionProgress | null;
   toolOutput: readonly SessionToolOutput[];
 }>;
 
@@ -41,7 +41,7 @@ export function readSessionActivity(
         lastModelChoiceSequence,
         compaction: null,
       },
-      progress: null,
+      readProgress: () => null,
       toolOutput: [],
     };
   if (head.state === "queued")
@@ -56,7 +56,7 @@ export function readSessionActivity(
         lastModelChoiceSequence,
         compaction: null,
       },
-      progress: null,
+      readProgress: () => null,
       toolOutput: [],
     };
 
@@ -80,7 +80,10 @@ export function readSessionActivity(
       lastModelChoiceSequence,
       compaction: readProcessCompaction(owner, sessionId),
     },
-    progress: readProcessProgressForWork(owner, sessionId, head.jobId),
+    // Only baselines need a flattened bounded tail. Live subscribers read
+    // appends directly and must not materialize it on every token.
+    readProgress: () =>
+      readProcessProgressForWork(owner, sessionId, head.jobId),
     toolOutput: readProcessToolOutputForWork(owner, sessionId, head.jobId),
   };
 }

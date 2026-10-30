@@ -41,6 +41,16 @@ What a visitor may see of their own conversation Session.
 
 ---
 
+### VisitorLine
+
+```ts
+type VisitorLine = VisitorView["lines"][number];
+```
+
+One visitor-visible line without internal attribution or tool metadata.
+
+---
+
 ### VisitorPendingPrompt
 
 ```ts
@@ -404,6 +414,7 @@ type AgentRunningWork =
       kind: "session";
       sessionId: string;
       commandId: string;
+      title: string;
     }>
   | Readonly<{
       kind: "host";
@@ -412,8 +423,8 @@ type AgentRunningWork =
     }>;
 ```
 
-Work occupying the executor partition that this queued command requires, without
-message or provider data.
+Blocking executor identity and Session display metadata, never messages or
+provider data.
 
 ---
 
@@ -469,7 +480,7 @@ Encoded extension slots keyed by extension identity; absent means unavailable.
 
 ```ts
 type SessionExtensionControls = Readonly<{
-  call: (command, input) => Promise<Json>;
+  call: (command, input, caller?) => Promise<Json>;
 }>;
 ```
 
@@ -515,12 +526,35 @@ type SessionProgress = Readonly<{
   revision: number;
   text: string;
   thinking: string;
+  textOffset: number;
+  thinkingOffset: number;
   textTruncated: boolean;
   thinkingTruncated: boolean;
 }>;
 ```
 
 Process-local assistant progress; never a durable Session fact.
+
+---
+
+### SessionProgressDelta
+
+```ts
+type SessionProgressDelta = Readonly<{
+  messageId: string;
+  revision: number;
+  text: Readonly<{
+    offset: number;
+    append: string;
+  }>;
+  thinking: Readonly<{
+    offset: number;
+    append: string;
+  }>;
+}>;
+```
+
+Append-only progress on the wire. Offsets count JavaScript string units.
 
 ---
 
@@ -679,7 +713,7 @@ type SessionFrame =
     }>
   | Readonly<{
       kind: "progress";
-      progress: SessionProgress;
+      progress: SessionProgressDelta;
       activity: SessionActivity;
     }>
   | Readonly<{
@@ -1102,10 +1136,10 @@ operator replies.
 
 #### Parameters
 
-| Parameter   | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `snapshot`  | \| `Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly `Readonly`\<\{ `requestId?`: `string`; `meta?`: [`Json`](extensions.md#json); `data?`: [`Json`](extensions.md#json); `origin?`: `Readonly`\<\{ `extensionId`: `string`; `correlation`: `string` \| `null`; \}\>; `id`: `string`; `sequence`: `number`; `commandId`: `string` \| `null`; `value`: [`ModelMessage`](#modelmessage); \}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`; `diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `tokensBefore`: `number`; `tokensAfter`: `number` \| `null`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger) \| `null`; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger); `result`: `"failed"` \| `"nothing_to_compact"` \| `"stale"` \| `"insufficient"`; `diagnostic`: `string` \| `null`; \}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`: [`SessionPendingPrompts`](#sessionpendingprompts); `activity`: [`SessionActivity`](#sessionactivity); `progress`: \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`; `revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`: `number`; \}\>[]; `extensions`: [`SessionExtensionSlots`](#sessionextensionslots); `attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`: `number` \| `null`; \}\>; \}\> \| `null` |
-| `visitorId` | `string`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Parameter   | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot`  | \| `Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly `Readonly`\<\{ `requestId?`: `string`; `meta?`: [`Json`](extensions.md#json); `data?`: [`Json`](extensions.md#json); `origin?`: `Readonly`\<\{ `extensionId`: `string`; `correlation`: `string` \| `null`; \}\>; `id`: `string`; `sequence`: `number`; `commandId`: `string` \| `null`; `value`: [`ModelMessage`](#modelmessage); \}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"`; `sequence`: `number`; `diagnostic`: `string` \| `null`; `meta?`: [`Json`](extensions.md#json); \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `tokensBefore`: `number`; `tokensAfter`: `number` \| `null`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger) \| `null`; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: `string`; `sequence`: `number`; `at`: `number`; `trigger`: [`SessionCompactionTrigger`](#sessioncompactiontrigger); `result`: `"failed"` \| `"nothing_to_compact"` \| `"stale"` \| `"insufficient"`; `diagnostic`: `string` \| `null`; \}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`: [`SessionPendingPrompts`](#sessionpendingprompts); `activity`: [`SessionActivity`](#sessionactivity); `progress`: \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textOffset`: `number`; `thinkingOffset`: `number`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`; `revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`: `number`; \}\>[]; `extensions`: [`SessionExtensionSlots`](#sessionextensionslots); `attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`: `number` \| `null`; \}\>; \}\> \| `null` |
+| `visitorId` | `string`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 #### Returns
 
@@ -1265,6 +1299,41 @@ Decode the existing bounded saved-conversation projection.
 #### Returns
 
 [`SessionSummaryPage`](#sessionsummarypage)
+
+---
+
+### appendSessionProgress()
+
+```ts
+function appendSessionProgress(
+  current,
+  delta,
+): Readonly<{
+  messageId: string;
+  revision: number;
+  text: string;
+  thinking: string;
+  textOffset: number;
+  thinkingOffset: number;
+  textTruncated: boolean;
+  thinkingTruncated: boolean;
+}> | null;
+```
+
+Fold a decoded append once; a missing prefix waits for an owner reset.
+
+#### Parameters
+
+| Parameter | Type                                                                                                                                                                                                                                  |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `current` | \| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`: `string`; `textOffset`: `number`; `thinkingOffset`: `number`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null` |
+| `delta`   | [`SessionProgressDelta`](#sessionprogressdelta)                                                                                                                                                                                       |
+
+#### Returns
+
+\| `Readonly`\<\{ `messageId`: `string`; `revision`: `number`; `text`: `string`;
+`thinking`: `string`; `textOffset`: `number`; `thinkingOffset`: `number`;
+`textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`
 
 ---
 

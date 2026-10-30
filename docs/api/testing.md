@@ -200,6 +200,8 @@ function memoryHost(options?): Promise<Readonly<{
         revision: number;
         text: string;
         thinking: string;
+        textOffset: number;
+        thinkingOffset: number;
         textTruncated: boolean;
         thinkingTruncated: boolean;
       }>
@@ -253,10 +255,10 @@ privileges. No submitted JavaScript is evaluated by this helper.
 [`SessionPendingPrompts`](client.md#sessionpendingprompts); `activity`:
 [`SessionActivity`](client.md#sessionactivity); `progress`: \| `Readonly`\<\{
 `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`:
-`string`; `textTruncated`: `boolean`; `thinkingTruncated`: `boolean`; \}\> \|
-`null`; `toolOutput`: readonly `Readonly`\<\{ `toolCallId`: `string`;
-`revision`: `number`; `tail`: `string`; `droppedBytes`: `number`; `totalBytes`:
-`number`; \}\>[]; `extensions`:
-[`SessionExtensionSlots`](client.md#sessionextensionslots); `attention`:
-readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`; `window`:
-... \| ...; \}\>; \}\>\>; `close`: () => `Promise`\<`void`\>; \}\>\>
+`string`; `textOffset`: `number`; `thinkingOffset`: `number`; `textTruncated`:
+`boolean`; `thinkingTruncated`: `boolean`; \}\> \| `null`; `toolOutput`:
+readonly `Readonly`\<\{ `toolCallId`: `string`; `revision`: `number`; `tail`:
+`string`; `droppedBytes`: `number`; `totalBytes`: `number`; \}\>[];
+`extensions`: [`SessionExtensionSlots`](client.md#sessionextensionslots);
+`attention`: readonly `object`[]; `context?`: `Readonly`\<\{ `tokens`: `number`;
+`window`: ... \| ...; \}\>; \}\>\>; `close`: () => `Promise`\<`void`\>; \}\>\>

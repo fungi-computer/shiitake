@@ -54,8 +54,10 @@ binding and a migration that creates the class with SQLite:
 
 Route requests to one object per Agent, for example with
 `env.AGENT.getByName(agentId)`. Authenticate and authorize each request before
-it reaches the Agent: Shiitake records who sent a prompt when you supply
-`commandAuthor`, but it does not decide who may send one.
+it reaches the Agent. Supply the authenticated sender through host metadata
+(`withMeta` or the HTTP routes' `shiitakeMeta` variable), with
+`meta.identityPath` selecting its stable identity. Shiitake records that
+metadata; it does not decide who may send a prompt.
 
 ## Serve clients
 

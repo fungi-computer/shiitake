@@ -253,6 +253,8 @@ function liftOptions(
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
   if (options.storagePressure !== undefined)
     Object.assign(base, { storagePressure: options.storagePressure });
+  if (options.admission !== undefined)
+    Object.assign(base, { admission: options.admission });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
   const toolSource = options.tools;

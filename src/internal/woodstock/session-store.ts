@@ -424,9 +424,9 @@ function selectedLineageFirstPromptId(
          UNION
          SELECT parent.id, parent.parent_id, parent.sequence,
                 parent.type, parent.role, parent.state, parent.work_id
-           FROM session_entries AS parent
-           JOIN branch AS child ON parent.id = child.parent_id
-          WHERE parent.session_id = ?
+           FROM branch AS child
+           CROSS JOIN session_entries AS parent
+          WHERE parent.id = child.parent_id AND parent.session_id = ?
        )
        SELECT
          (SELECT command.id FROM branch AS command
@@ -636,6 +636,7 @@ export type EnqueueAcceptedWork = (
     jobId: string;
     sessionId: string;
     commandFactId: string;
+    delivery: "steer" | "followUp";
   }>,
 ) => void;
 
@@ -934,6 +935,23 @@ const pendingAdmissions = `FROM session_command_admissions AS a
          AND e.type IN ('command', 'cancellation', 'run_terminal', 'work_terminal')
     )`;
 
+/** A written run terminal closes the window for attaching another steer. */
+export function hasRecordedRunTerminal(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+): boolean {
+  return (
+    owner.sql
+      .exec(
+        "SELECT 1 FROM session_entries WHERE session_id = ? AND work_id = ? AND type = 'run_terminal' LIMIT 1",
+        sessionId,
+        workId,
+      )
+      .toArray().length > 0
+  );
+}
+
 /** Host-owned metadata identity, interpreted by SQLite's JSON decoder only. */
 export type AdmissionIdentity = Readonly<{ path: string; value: string }>;
 
@@ -1035,7 +1053,8 @@ export function readPendingSessionCommands(
   const commands = owner.sql
     .exec(
       `SELECT ${admissionColumns("a.")} ${pendingAdmissions} ${filter}
-     ORDER BY a.sequence ASC LIMIT ?`,
+     ORDER BY (json_extract(a.data_json, '$.delivery') = 'steer') DESC,
+              a.sequence ASC LIMIT ?`,
       sessionId,
       limit,
     )
@@ -1161,6 +1180,7 @@ export function settleSessionControls(
           jobId: row.entry.workId,
           sessionId: input.sessionId,
           commandFactId: row.id,
+          delivery: "steer",
         });
         continue;
       }
@@ -1843,8 +1863,22 @@ export function prepareSessionStore(owner: SqliteOwner): void {
       session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id)
     )
   `);
+    // Preview admissions could have mistaken a later worker for the creator.
+    owner.sql.exec(`DELETE FROM session_delegators
+      WHERE NOT EXISTS (
+        SELECT 1 FROM session_creation_receipts AS creation
+        WHERE creation.session_id = session_delegators.session_id
+          AND creation.request_id = session_delegators.mail_key
+      )`);
     owner.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_entries_parent ON session_entries(parent_id)",
+    );
+    // Replace the preview index, not its payload-length expression: preparing
+    // identity lookup must never read every stored message's payload.
+    owner.sql.exec("DROP INDEX IF EXISTS idx_session_entries_lineage");
+    owner.sql.exec(
+      `CREATE INDEX IF NOT EXISTS idx_session_entries_ancestry
+       ON session_entries(id, session_id, parent_id, sequence, state, type)`,
     );
     owner.sql.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_entries_session ON session_entries(session_id, sequence)",
@@ -2155,6 +2189,8 @@ const lineageByteLimit = 4 * 1_048_576;
  * selected walk steps only to an older parent, so it ends without
  * deduplicating; the fork walk keeps every link for its whole-lineage check.
  */
+// Keep each recursive step child-first: SQLite must look up that child's
+// parent, not scan every entry of the Session before joining the walk.
 const lineageWalks = {
   selected: `WITH RECURSIVE branch (id, parent_id, sequence, state) AS (
        SELECT id, parent_id, sequence, state
@@ -2162,9 +2198,10 @@ const lineageWalks = {
         WHERE session_id = ? AND id = ?
        UNION ALL
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state
-         FROM session_entries AS parent
-         JOIN branch AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ? AND child.sequence > ?
+         FROM branch AS child
+         CROSS JOIN session_entries AS parent
+        WHERE parent.id = child.parent_id AND parent.session_id = ?
+          AND child.sequence > ?
           AND +parent.sequence < child.sequence
      )`,
   fork: `WITH RECURSIVE branch (id, parent_id, sequence, state) AS (
@@ -2173,9 +2210,10 @@ const lineageWalks = {
         WHERE session_id = ? AND id = ? AND state != 'streaming'
        UNION
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state
-         FROM session_entries AS parent
-         JOIN branch AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ? AND child.sequence > ?
+         FROM branch AS child
+         CROSS JOIN session_entries AS parent
+        WHERE parent.id = child.parent_id AND parent.session_id = ?
+          AND child.sequence > ?
           AND parent.state != 'streaming'
      )`,
 } as const;
@@ -2192,6 +2230,170 @@ const lineageFailures = {
     invalid: "Fork path is invalid",
   },
 } as const;
+
+const decodeAncestryRow = Schema.decodeUnknownResult(
+  Schema.Struct({
+    id: boundedId,
+    parent_id: Schema.NullOr(Schema.String),
+    sequence,
+    state: Schema.Literals(["complete", "streaming"]),
+  }),
+  closed,
+);
+type AncestryRow = Readonly<{
+  id: string;
+  parent_id: string | null;
+  sequence: number;
+  state: "complete" | "streaming";
+}>;
+type SessionRead = {
+  sessionId: string;
+  before: number;
+  ancestry?: readonly AncestryRow[];
+  encoded: Map<string, string>;
+};
+type AncestryRange = Readonly<{ floor: number; ceiling?: number }>;
+const sessionReads = new WeakMap<SqliteOwner, SessionRead>();
+
+/**
+ * One synchronous, transaction-consistent Session baseline. Activity, timeline,
+ * extension projections and context figures share its identity-only ancestry;
+ * asynchronous model description runs after this scope has ended. Nothing is
+ * retained between reads, and payload windows keep their row and byte bounds.
+ */
+export function withSessionRead<A>(
+  owner: SqliteOwner,
+  sessionId: string,
+  read: () => A,
+  before = Number.MAX_SAFE_INTEGER,
+): A {
+  const previous = sessionReads.get(owner);
+  sessionReads.set(owner, { sessionId, before, encoded: new Map() });
+  try {
+    return owner.transactionSync(read);
+  } finally {
+    if (previous === undefined) sessionReads.delete(owner);
+    else sessionReads.set(owner, previous);
+  }
+}
+
+/** Join the shared Session baseline, or keep a direct projection atomic. */
+export function withSessionReadTransaction<A>(
+  owner: SqliteOwner,
+  sessionId: string,
+  read: () => A,
+): A {
+  return sessionReads.get(owner)?.sessionId === sessionId
+    ? read()
+    : owner.transactionSync(read);
+}
+
+/**
+ * Walk identities once to the kept context boundary and the requested page's
+ * row lookahead, whichever needs the older floor. Only compactions need their
+ * payload to identify that boundary. A historical page's intervening gap is
+ * traversed in SQL, not materialized into this request's identity cache.
+ *
+ * A context's kept entry can reuse the suffix starting at that ancestor. A later
+ * tip may share only if it is the seed or an ancestor retained in that suffix;
+ * another valid leaf uses its own walk instead of becoming an unavailable read.
+ * A query crossing an omitted gap or asking below the cached floor also uses
+ * its existing bounded walk. Nothing is retained between requests.
+ */
+function readAncestry(
+  owner: SqliteOwner,
+  sessionId: string,
+  tipId: string,
+  range?: AncestryRange,
+): string | undefined {
+  const read = sessionReads.get(owner);
+  if (read?.sessionId !== sessionId) return undefined;
+  read.ancestry ??= owner.sql
+    .exec(
+      `WITH RECURSIVE read_window (before_sequence, rows) AS (VALUES (?, ?)),
+       ancestry (id, parent_id, sequence, state, head, context_closed, taken) AS (
+         SELECT id, parent_id, sequence, state,
+                ${compactionHead("session_entries")}, 0,
+                CASE WHEN state != 'streaming'
+                           AND sequence < (SELECT before_sequence FROM read_window)
+                     THEN 1 ELSE 0 END
+           FROM session_entries INDEXED BY idx_session_entries_ancestry
+          WHERE session_id = ? AND id = ?
+         UNION ALL
+         SELECT parent.id, parent.parent_id, parent.sequence, parent.state,
+                COALESCE(child.head, ${compactionHead("parent")}),
+                child.context_closed OR
+                  (child.head IS child.id AND child.state != 'streaming'),
+                child.taken + CASE WHEN parent.state != 'streaming'
+                         AND parent.sequence < (SELECT before_sequence FROM read_window)
+                     THEN 1 ELSE 0 END
+           FROM ancestry AS child
+           CROSS JOIN session_entries AS parent INDEXED BY idx_session_entries_ancestry
+          WHERE parent.id = child.parent_id AND parent.session_id = ?
+            AND +parent.sequence < child.sequence
+            AND (child.taken < (SELECT rows FROM read_window)
+                 OR (child.context_closed = 0
+                     AND (child.head IS NOT child.id OR child.state = 'streaming')))
+       )
+       SELECT id, parent_id, sequence, state FROM ancestry
+        WHERE context_closed = 0
+           OR sequence <= (SELECT before_sequence FROM read_window)
+        ORDER BY sequence DESC`,
+      read.before,
+      lineageRowLimit + 1,
+      sessionId,
+      tipId,
+      sessionId,
+    )
+    .toArray()
+    .map((raw) => {
+      const decoded = decodeAncestryRow(raw);
+      if (decoded._tag === "Failure")
+        throw unavailable("Stored Session ancestry is invalid");
+      return decoded.success;
+    });
+  const start = read.ancestry.findIndex(({ id }) => id === tipId);
+  if (start === -1) return undefined;
+  const rows = read.ancestry.slice(start);
+  if (range !== undefined) {
+    const deepest = rows.at(-1);
+    if (
+      deepest !== undefined &&
+      deepest.parent_id !== null &&
+      deepest.sequence > range.floor + 1
+    )
+      return undefined;
+    const ceiling = range.ceiling ?? Number.MAX_SAFE_INTEGER;
+    for (let index = 1; index < rows.length; index += 1) {
+      const child = rows[index - 1];
+      const parent = rows[index];
+      if (
+        child !== undefined &&
+        parent !== undefined &&
+        child.parent_id !== parent.id &&
+        range.floor < child.sequence - 1 &&
+        ceiling > parent.sequence
+      )
+        return undefined;
+    }
+  }
+  const encoded = read.encoded.get(tipId);
+  if (encoded !== undefined) return encoded;
+  const value = JSON.stringify(rows);
+  read.encoded.set(tipId, value);
+  return value;
+}
+
+/** A table over already-walked identities, decoded by SQLite's JSON reader. */
+function ancestryTable(name: "ancestors" | "branch"): string {
+  return `${name} AS MATERIALIZED (
+    SELECT json_extract(value, '$.id') AS id,
+           json_extract(value, '$.parent_id') AS parent_id,
+           json_extract(value, '$.sequence') AS sequence,
+           json_extract(value, '$.state') AS state
+      FROM json_each(?)
+  )`;
+}
 
 const count = Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(0)));
 const decodeLineageCheck = Schema.decodeUnknownResult(
@@ -2243,17 +2445,25 @@ export type SessionLineage = Readonly<{
 function lineageQuery(
   owner: SqliteOwner,
   lineage: SessionLineage,
-  floor: number,
+  range: AncestryRange,
   query: string,
   ...bindings: SqliteValue[]
 ): readonly RawRow[] {
+  const ancestry =
+    lineage.walk === "selected"
+      ? readAncestry(owner, lineage.sessionId, lineage.tipId, range)
+      : undefined;
+  if (ancestry !== undefined)
+    return owner.sql
+      .exec(`WITH ${ancestryTable("branch")} ${query}`, ancestry, ...bindings)
+      .toArray();
   return owner.sql
     .exec(
       `${lineageWalks[lineage.walk]} ${query}`,
       lineage.sessionId,
       lineage.tipId,
       lineage.sessionId,
-      floor,
+      range.floor,
       ...bindings,
     )
     .toArray();
@@ -2390,7 +2600,7 @@ function readLineageRange(
     lineageQuery(
       owner,
       lineage,
-      oldest - 1,
+      { floor: oldest - 1, ceiling: newest },
       `SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND state != 'streaming'
@@ -2453,7 +2663,10 @@ const decodeWindowSizes = Schema.decodeUnknownResult(
  * walk visits the rows from the tip down to the window, never the history
  * below it. The deepest walked row comes back with the sizes, so a walk that
  * ended at a missing parent above where it meant to stop is refused, never
- * read as the end of history.
+ * read as the end of history. When a read already owns the ancestry, choose
+ * the same bounded candidate identities before consulting their record sizes.
+ * SQLite's octet_length(column) reads the byte count from record metadata,
+ * without loading the text's overflow pages or a payload-length index.
  */
 function readWindowSizes(
   owner: SqliteOwner,
@@ -2463,15 +2676,36 @@ function readWindowSizes(
   before: number,
   rows: number,
 ): readonly Readonly<{ sequence: number; bytes: number }>[] {
+  let ancestry =
+    lineage.walk === "selected"
+      ? readAncestry(owner, lineage.sessionId, lineage.tipId)
+      : undefined;
+  if (ancestry !== undefined) {
+    const candidates = sessionReads
+      .get(owner)
+      ?.ancestry?.filter(
+        (row) =>
+          row.sequence <= lineage.newestSequence &&
+          row.state !== "streaming" &&
+          row.sequence > after &&
+          row.sequence < before,
+      );
+    const last = from === "newest" ? candidates?.[rows - 1] : undefined;
+    ancestry = readAncestry(owner, lineage.sessionId, lineage.tipId, {
+      floor: last === undefined ? after : last.sequence - 1,
+      ceiling: before - 1,
+    });
+  }
+  const direction = from === "newest" ? "DESC" : "ASC";
   const ends = `SELECT
          (SELECT json_group_array(json_array(sequence, bytes)) FROM (
-            SELECT sequence, LENGTH(CAST(data_json AS BLOB)) AS bytes
+            SELECT sequence, octet_length(data_json) AS bytes
               FROM session_entries
              WHERE ${from === "newest" ? "" : "session_id = ? AND"}
                    state != 'streaming'
                AND sequence > ? AND sequence < ?
-               AND id IN (SELECT id FROM branch)
-             ORDER BY sequence ${from === "newest" ? "DESC" : "ASC"}
+               AND id IN (SELECT id FROM ${ancestry === undefined ? "branch" : "candidates"})
+             ORDER BY sequence ${direction}
              LIMIT ?)) AS sizes,
          (SELECT parent_id FROM branch ORDER BY sequence ASC LIMIT 1)
            AS deepest_parent,
@@ -2482,10 +2716,29 @@ function readWindowSizes(
                AND ${row}.sequence < ? AND ${row}.sequence > ?
           THEN 1 ELSE 0 END`;
   const raw =
-    from === "newest"
+    ancestry !== undefined
       ? owner.sql
           .exec(
-            `WITH RECURSIVE branch (id, parent_id, sequence, state, taken) AS (
+            `WITH ${ancestryTable("branch")},
+             candidates AS MATERIALIZED (
+               SELECT id FROM branch
+                WHERE state != 'streaming' AND sequence > ? AND sequence < ?
+                ORDER BY sequence ${direction} LIMIT ?
+             ) ${ends}`,
+            ancestry,
+            after,
+            before,
+            rows,
+            ...(from === "newest" ? [] : [lineage.sessionId]),
+            after,
+            before,
+            rows,
+          )
+          .toArray()
+      : from === "newest"
+        ? owner.sql
+            .exec(
+              `WITH RECURSIVE branch (id, parent_id, sequence, state, taken) AS (
                SELECT id, parent_id, sequence, state,
                       ${counts("session_entries")}
                  FROM session_entries
@@ -2493,36 +2746,37 @@ function readWindowSizes(
                UNION ALL
                SELECT parent.id, parent.parent_id, parent.sequence, parent.state,
                       child.taken + ${counts("parent")}
-                 FROM session_entries AS parent
-                 JOIN branch AS child ON parent.id = child.parent_id
-                WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+                 FROM branch AS child
+                 CROSS JOIN session_entries AS parent
+                WHERE parent.id = child.parent_id AND parent.session_id = ?
+                  AND +parent.sequence < child.sequence
                   AND child.taken < ? AND child.sequence > ?
              )
              ${ends}`,
-            before,
-            after,
+              before,
+              after,
+              lineage.sessionId,
+              lineage.tipId,
+              before,
+              after,
+              lineage.sessionId,
+              rows,
+              after,
+              after,
+              before,
+              rows,
+            )
+            .toArray()
+        : lineageQuery(
+            owner,
+            lineage,
+            { floor: after },
+            ends,
             lineage.sessionId,
-            lineage.tipId,
-            before,
-            after,
-            lineage.sessionId,
-            rows,
-            after,
             after,
             before,
             rows,
-          )
-          .toArray()
-      : lineageQuery(
-          owner,
-          lineage,
-          after,
-          ends,
-          lineage.sessionId,
-          after,
-          before,
-          rows,
-        );
+          );
   const decoded = decodeWindowSizes(raw[0]);
   if (decoded._tag === "Failure")
     throw unavailable("Stored Session entry size is invalid");
@@ -2594,7 +2848,7 @@ export function lineageHasSequence(
     lineageQuery(
       owner,
       lineage,
-      rowSequence - 1,
+      { floor: rowSequence - 1, ceiling: rowSequence },
       `SELECT 1 AS present
          FROM session_entries
         WHERE session_id = ? AND state != 'streaming' AND sequence = ?
@@ -2643,22 +2897,15 @@ function newestLineagePreference(
   const continues = (row: string) =>
     `${row}.id NOT IN (SELECT id FROM targets)
      AND ${row}.sequence > (SELECT MIN(sequence) FROM targets)`;
-  const [newest] = walkedTargets(
-    owner.sql
-      .exec(
-        `WITH RECURSIVE targets AS MATERIALIZED (
-           SELECT id, sequence FROM session_entries
+  const [newest] = readTargetIds(
+    owner,
+    sessionId,
+    tipId,
+    `SELECT id, sequence FROM session_entries
             WHERE session_id = ? AND type = 'model_preference'
-              AND state != 'streaming'
-         ),
-         ${targetWalk(continues("child"))}
-         ${walkSteps(continues("walk"))}`,
-        sessionId,
-        sessionId,
-        tipId,
-        sessionId,
-      )
-      .toArray(),
+              AND state != 'streaming'`,
+    [sessionId],
+    continues,
   );
   return newest === undefined
     ? undefined
@@ -2686,7 +2933,7 @@ function readLineageDocument(
   const raw = lineageQuery(
     owner,
     lineage,
-    0,
+    { floor: 0 },
     `SELECT ${entryColumns}
        FROM session_entries
       WHERE session_id = ? AND state != 'streaming' AND type = 'document'
@@ -2710,8 +2957,11 @@ function readLineageDocument(
   return entry.valueJson;
 }
 
-const decodeOldestWorkRow = Schema.decodeUnknownResult(
-  Schema.Struct({ sequence: Schema.NullOr(sequence) }),
+const decodeWorkBounds = Schema.decodeUnknownResult(
+  Schema.Struct({
+    oldest: Schema.NullOr(sequence),
+    newest: Schema.NullOr(sequence),
+  }),
   closed,
 );
 
@@ -2743,16 +2993,16 @@ export function readLineageWorkFacts(
       cancellations: new Map<string, Json>(),
     });
   const works = JSON.stringify([...workIds]);
-  const oldest = decodeOldestWorkRow(
+  const bounds = decodeWorkBounds(
     owner.sql
       .exec(
-        `SELECT MIN(sequence) AS sequence FROM (
-           SELECT MIN(sequence) AS sequence
+        `SELECT MIN(oldest) AS oldest, MAX(newest) AS newest FROM (
+           SELECT MIN(sequence) AS oldest, MAX(sequence) AS newest
              FROM session_entries INDEXED BY idx_session_entries_work
             WHERE work_id IN (SELECT value FROM json_each(?))
               AND session_id = ?
            UNION ALL
-           SELECT MIN(sequence) FROM session_entries
+           SELECT MIN(sequence), MAX(sequence) FROM session_entries
                   INDEXED BY idx_session_entries_cancellation_target
             WHERE session_id = ? AND type = 'cancellation'
               AND json_extract(data_json, '$.targetWorkId')
@@ -2765,20 +3015,21 @@ export function readLineageWorkFacts(
       )
       .one(),
   );
-  if (oldest._tag === "Failure")
+  if (bounds._tag === "Failure")
     throw unavailable("Stored Session work order is invalid");
-  if (oldest.success.sequence === null)
+  if (bounds.success.oldest === null || bounds.success.newest === null)
     return Object.freeze({
       commands: new Set<string>(),
       diagnostics: new Map<string, string>(),
       cancellations: new Map<string, Json>(),
     });
-  const floor = oldest.success.sequence - 1;
+  const floor = bounds.success.oldest - 1;
+  const range = { floor, ceiling: bounds.success.newest };
   const commands = new Set(
     lineageQuery(
       owner,
       lineage,
-      floor,
+      range,
       `SELECT DISTINCT work_id
          FROM session_entries
         WHERE session_id = ? AND sequence > ? AND state != 'streaming' AND type = 'command'
@@ -2798,7 +3049,7 @@ export function readLineageWorkFacts(
   for (const raw of lineageQuery(
     owner,
     lineage,
-    floor,
+    range,
     `SELECT work_id, diagnostic FROM (
        SELECT work_id, sequence,
               json_extract(data_json, '$.diagnostic') AS diagnostic
@@ -2823,7 +3074,7 @@ export function readLineageWorkFacts(
   for (const { entry } of lineageQuery(
     owner,
     lineage,
-    floor,
+    range,
     `SELECT ${entryColumns}
        FROM session_entries
       WHERE session_id = ? AND sequence > ? AND state != 'streaming' AND type = 'cancellation'
@@ -2862,18 +3113,92 @@ export function readSelectedPath(
  * steps past it; a statement without targets reads only its starting row,
  * so a missing one is still refused.
  */
-function targetWalk(continues: string): string {
-  return `walk (id, parent_id, sequence, state) AS (
+function targetWalk(
+  sessionId: string,
+  tipId: string,
+  continues: string,
+  ancestry: string | undefined,
+) {
+  if (ancestry !== undefined)
+    return {
+      sql: `${ancestryTable("ancestors")},
+        stopped AS (
+          SELECT child.*,
+                 COALESCE(SUM(CASE WHEN ${continues} THEN 0 ELSE 1 END)
+                   OVER (ORDER BY child.sequence DESC
+                     ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING), 0) AS stops
+            FROM ancestors AS child
+        ),
+        walk AS (
+          SELECT id, parent_id, sequence, state FROM stopped WHERE stops = 0
+        )`,
+      bindings: [ancestry],
+      recursive: false,
+    };
+  return {
+    sql: `walk (id, parent_id, sequence, state) AS (
        SELECT id, parent_id, sequence, state
          FROM session_entries
         WHERE session_id = ? AND id = ?
        UNION ALL
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state
-         FROM session_entries AS parent
-         JOIN walk AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+         FROM walk AS child
+         CROSS JOIN session_entries AS parent
+        WHERE parent.id = child.parent_id AND parent.session_id = ?
+          AND +parent.sequence < child.sequence
           AND ${continues}
-     )`;
+     )`,
+    bindings: [sessionId, tipId, sessionId],
+    recursive: true,
+  };
+}
+
+/**
+ * A shared prefix can answer a target read only if it reaches that read's
+ * stopping point without crossing an omitted gap. Otherwise run the original
+ * target-bounded walk; a cache horizon is not evidence of damaged history.
+ */
+function readTargetIds(
+  owner: SqliteOwner,
+  sessionId: string,
+  tipId: string,
+  targets: string,
+  bindings: readonly SqliteValue[],
+  continues: (row: string) => string,
+): readonly string[] {
+  const ancestry = readAncestry(owner, sessionId, tipId);
+  const run = (shared: string | undefined) => {
+    const walk = targetWalk(sessionId, tipId, continues("child"), shared);
+    return owner.sql
+      .exec(
+        `WITH ${walk.recursive ? "RECURSIVE " : ""}targets AS MATERIALIZED (
+           ${targets}
+         ),
+         ${walk.sql}
+         ${walkSteps(continues("walk"))}`,
+        ...bindings,
+        ...walk.bindings,
+      )
+      .toArray();
+  };
+  let raw = run(ancestry);
+  if (ancestry !== undefined) {
+    const last = raw.at(-1);
+    if (last !== undefined) {
+      const deepest = decodeWalkStep(last);
+      if (deepest._tag === "Failure")
+        throw unavailable("Stored Session walk row is invalid");
+      if (
+        (deepest.success.continues === 1 &&
+          deepest.success.parent_id !== null) ||
+        readAncestry(owner, sessionId, tipId, {
+          floor: deepest.success.sequence - 1,
+        }) === undefined
+      )
+        raw = run(undefined);
+    }
+  }
+  return walkedTargets(raw);
 }
 
 /**
@@ -2881,7 +3206,7 @@ function targetWalk(continues: string): string {
  * whether the walk meant to pass it. Only these rows reach JavaScript.
  */
 function walkSteps(continues: string): string {
-  return `SELECT id, parent_id, target, continues FROM (
+  return `SELECT id, parent_id, sequence, target, continues FROM (
              SELECT id, parent_id, sequence,
                     id IN (SELECT id FROM targets) AS target,
                     COALESCE((${continues}), 0) AS continues
@@ -2896,6 +3221,7 @@ const decodeWalkStep = Schema.decodeUnknownResult(
   Schema.Struct({
     id: boundedId,
     parent_id: Schema.NullOr(Schema.String),
+    sequence,
     target: flag,
     continues: flag,
   }),
@@ -2944,9 +3270,10 @@ const contextWalk = `WITH RECURSIVE walk (id, parent_id, sequence, state, head) 
        UNION ALL
        SELECT parent.id, parent.parent_id, parent.sequence, parent.state,
               COALESCE(child.head, ${compactionHead("parent")})
-         FROM session_entries AS parent
-         JOIN walk AS child ON parent.id = child.parent_id
-        WHERE parent.session_id = ? AND +parent.sequence < child.sequence
+         FROM walk AS child
+         CROSS JOIN session_entries AS parent
+        WHERE parent.id = child.parent_id AND parent.session_id = ?
+          AND +parent.sequence < child.sequence
           AND (child.head IS NOT child.id OR child.state = 'streaming')
      )`;
 
@@ -2970,11 +3297,11 @@ function readDecidingFacts(
   );
   const continues = (row: string) =>
     `${row}.sequence > (SELECT MIN(sequence) FROM targets)`;
-  const facts = walkedTargets(
-    owner.sql
-      .exec(
-        `WITH RECURSIVE targets AS MATERIALIZED (
-         SELECT id, sequence FROM session_entries
+  const facts = readTargetIds(
+    owner,
+    sessionId,
+    kept.id,
+    `SELECT id, sequence FROM session_entries
           WHERE session_id = ? AND type = 'compaction' AND work_id = ?
             AND sequence < ? AND state != 'streaming'
          UNION ALL
@@ -2984,21 +3311,9 @@ function readDecidingFacts(
           WHERE session_id = ? AND type = 'cancellation'
             AND json_extract(data_json, '$.targetWorkId')
                 IN (SELECT value FROM json_each(?))
-            AND sequence < ? AND state != 'streaming'
-       ),
-       ${targetWalk(continues("child"))}
-       ${walkSteps(continues("walk"))}`,
-        sessionId,
-        workId,
-        kept.sequence,
-        sessionId,
-        commands,
-        kept.sequence,
-        sessionId,
-        kept.id,
-        sessionId,
-      )
-      .toArray(),
+            AND sequence < ? AND state != 'streaming'`,
+    [sessionId, workId, kept.sequence, sessionId, commands, kept.sequence],
+    continues,
   );
   if (facts.length === 0) return Object.freeze([]);
   return Object.freeze(
@@ -3027,16 +3342,43 @@ function readContextWindow(
   tipId: string,
 ): Readonly<{ rows: readonly StoredSessionRow[]; compacted: boolean }> {
   const failures = lineageFailures.selected;
+  let ancestry = readAncestry(owner, sessionId, tipId);
+  // The seed owns this cache's compaction boundary. An ancestor tip can have an
+  // older boundary of its own (including one in an omitted historical gap).
+  if (sessionReads.get(owner)?.ancestry?.[0]?.id !== tipId)
+    ancestry = undefined;
+  const source =
+    ancestry === undefined
+      ? { sql: contextWalk, bindings: [sessionId, tipId, sessionId] }
+      : {
+          sql: `WITH ${ancestryTable("ancestors")},
+            boundary AS (
+              SELECT sequence, json_extract(data_json, '$.head') AS head
+                FROM session_entries
+               WHERE session_id = ? AND type = 'compaction'
+                 AND state != 'streaming'
+                 AND id IN (SELECT id FROM ancestors)
+               ORDER BY sequence DESC LIMIT 1
+            ),
+            walk AS (
+              SELECT * FROM ancestors
+               WHERE sequence >= COALESCE((
+                 SELECT ancestors.sequence FROM ancestors, boundary
+                  WHERE ancestors.id = boundary.head
+                    AND ancestors.state != 'streaming'
+                    AND ancestors.sequence <= boundary.sequence
+               ), 0)
+            )`,
+          bindings: [ancestry, sessionId],
+        };
   const rows = owner.sql
     .exec(
-      `${contextWalk}
+      `${source.sql}
        SELECT ${entryColumns}
          FROM session_entries
         WHERE id IN (SELECT id FROM walk) AND state != 'streaming'
         ORDER BY sequence ASC`,
-      sessionId,
-      tipId,
-      sessionId,
+      ...source.bindings,
     )
     .toArray()
     .map((raw) => parseEntryRow(owner, raw));
@@ -3122,7 +3464,7 @@ function readRunContextRows(
       : lineageQuery(
           owner,
           current,
-          command.sequence,
+          { floor: command.sequence },
           `SELECT ${entryColumns}
              FROM session_entries
             WHERE session_id = ? AND sequence > ? AND state != 'streaming'
@@ -3682,6 +4024,7 @@ export function acceptSessionCommandOwned(
     jobId: commandFactId,
     sessionId,
     commandFactId,
+    delivery: input.type === "prompt" ? input.delivery : "followUp",
   });
   return acceptanceFromAdmission(command, "new");
 }

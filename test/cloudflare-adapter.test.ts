@@ -177,6 +177,47 @@ it("runs one fixed Pi model through a Cloudflare-hosted Session", async () => {
   expect(instructionReleases).toBe(1);
 });
 
+it("reads an owner-local non-idle Session head synchronously in the caller's transaction", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const tasks: Promise<unknown>[] = [];
+  const state: CloudflareShiitakeState = {
+    storage: cloudflareStorageFixture(fixture.owner),
+    waitUntil: (task) => {
+      tasks.push(task);
+    },
+  };
+  const agent = await makeCloudflareShiitake(state, {
+    extensions: noExtensions,
+    model: fixedModelSource(fauxModel([])),
+    instructions: {
+      load: () => Promise.resolve({ revision: "busy-v1", text: "Test." }),
+    },
+    tools: [],
+  });
+  try {
+    expect(
+      fixture.owner.transactionSync(() => agent.busySync()),
+    ).toBeUndefined();
+    const sessionId = await agent.createSession("busy-test");
+    const admitted = await agent.session(sessionId).command({
+      type: "prompt",
+      requestId: "busy-prompt",
+      text: "Check the queue",
+      delivery: "followUp",
+    });
+    expect(fixture.owner.transactionSync(() => agent.busySync())).toEqual({
+      kind: "session",
+      sessionId,
+      commandId: admitted.commandId,
+    });
+  } finally {
+    await agent.close();
+    const settled = await Promise.allSettled(tasks);
+    expect(settled.every((task) => task.status === "fulfilled")).toBe(true);
+    fixture.close();
+  }
+});
+
 it("joins an extension timer onto the shared Durable Object alarm", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const tasks: Promise<unknown>[] = [];

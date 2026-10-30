@@ -452,7 +452,7 @@ it("keeps the existing delegation rows unchanged and stores Held custody separat
       state: "accepted",
       receipt: '{"status":"accepted","commandId":"legacy-command"}',
     });
-    expect(reopened.sent()).toHaveLength(1);
+    expect(reopened.unsettled()).toHaveLength(1);
     expect(
       fixture.owner.sql
         .exec("PRAGMA table_info(shiitake_fleet_delegations)")

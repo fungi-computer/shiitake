@@ -48,6 +48,78 @@ it("lends the machine link Shiitake's own Session-creation and receipt grammar",
   ).toThrow();
 });
 
+it.each([
+  { goal: "Tend the orchard", expected: "Tend the orchard" },
+  { goal: false, expected: false },
+  { goal: undefined, expected: undefined },
+] as const)(
+  "preserves a new-Session send's goal intent in frozen addressed mail ($expected)",
+  async ({ goal, expected }) => {
+    const fixture = createNativeSqliteOwnerFixture();
+    const delivered: BirdDogMail[] = [];
+    const directory: AgentControlDirectory = {
+      list: () =>
+        Promise.resolve([
+          { agentId: "sender", name: "Sender", createdBy: null },
+          { agentId: "recipient", name: "Recipient", createdBy: null },
+        ]),
+      open: () => Promise.reject(new Error("No recipient read is needed")),
+    };
+    const sender = new AgentDelegation({
+      storage: fixture.owner,
+      expiresAt: () => Date.now() + 60_000,
+      identity: () => ({ scopeId: "team", agentId: "sender" }),
+      directory: () => directory,
+      deliver: (mail) => {
+        delivered.push(mail);
+        return Promise.resolve({
+          status: "accepted",
+          sessionId: "recipient-session",
+          commandId: "recipient-command",
+        });
+      },
+      prepare: () => Promise.resolve(),
+      stageAcceptedNotice: () => undefined,
+      accept: () => Promise.reject(new Error("This Agent receives no replies")),
+    });
+    try {
+      const base = {
+        agentId: "recipient",
+        requestId: "new-session-goal",
+        text: "Start work",
+        delivery: "followUp",
+      } as const;
+      const input = goal === undefined ? base : { ...base, goal };
+      const first = await sender.send(
+        input,
+        "sender-session",
+        new AbortController().signal,
+        { toolCallId: "call-goal", sendIndex: 0 },
+      );
+      expect(first).toMatchObject({
+        status: "accepted",
+        sessionId: "recipient-session",
+      });
+      expect(delivered).toHaveLength(1);
+      const mail = delivered[0];
+      if (mail === undefined)
+        throw new Error("New-Session mail was not delivered");
+      expect(mail.to.sessionId).toBeUndefined();
+      const meta = Schema.decodeUnknownSync(BirdDogMailSchema)(mail).meta;
+      expect(meta).toMatchObject({
+        delegation: {
+          ancestors: ["sender"],
+        },
+      });
+      if (expected === undefined)
+        expect(meta).not.toHaveProperty("delegation.goal");
+      else expect(meta).toHaveProperty("delegation.goal", expected);
+    } finally {
+      fixture.close();
+    }
+  },
+);
+
 it("reserves one directory identity per enrollment receipt, created by the enrolling member", () => {
   const fixture = createNativeSqliteOwnerFixture();
   try {

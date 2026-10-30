@@ -47,26 +47,23 @@ it("publishes raw activity facts and decides no readout", () => {
       readSessionActivity(fixture.owner, sessionId, { state: "idle" }, null)
         .facts,
     ).toEqual(idle);
-    expect(
-      readSessionActivity(
-        fixture.owner,
-        sessionId,
-        {
-          state: "queued",
-          jobId: workId,
-          cancellationRequested: true,
-        },
-        null,
-      ),
-    ).toEqual({
-      facts: {
-        ...idle,
-        queue: { state: "queued", commandId: workId, runningWork: null },
+    const queued = readSessionActivity(
+      fixture.owner,
+      sessionId,
+      {
+        state: "queued",
+        jobId: workId,
         cancellationRequested: true,
       },
-      toolOutput: [],
-      progress: null,
+      null,
+    );
+    expect(queued.facts).toEqual({
+      ...idle,
+      queue: { state: "queued", commandId: workId, runningWork: null },
+      cancellationRequested: true,
     });
+    expect(queued.toolOutput).toEqual([]);
+    expect(queued.readProgress()).toBeNull();
 
     const running = {
       state: "running",

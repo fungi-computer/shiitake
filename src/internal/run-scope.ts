@@ -15,10 +15,11 @@ import type {
 } from "@fungi.computer/mycelium";
 import { make as makeMycelium } from "@fungi.computer/mycelium/effect";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
-import type * as Scope from "effect/Scope";
+import * as Scope from "effect/Scope";
 
 import { ShiitakeError } from "../errors.js";
 import type { InstructionSnapshot } from "./contracts.js";
@@ -50,6 +51,30 @@ import {
   type PreparedSessionRun,
   type RunContract,
 } from "./woodstock/index.js";
+
+// A run writes its terminal before scope release. Give each foreign release
+// one second to clean up without blocking the next Watchdog job indefinitely.
+const runFinalizerGraceMs = 1_000;
+
+function boundedRunFinalizer<E>(
+  name: "instructions" | "model" | "tools",
+  workId: string,
+  release: Effect.Effect<void, E>,
+): Effect.Effect<void, E> {
+  return Effect.gen(function* () {
+    // A detached release may finish later; interrupting a finalizer itself
+    // cannot bound an uninterruptible scope.
+    const fiber = yield* Effect.forkDetach(release);
+    const finished = yield* Effect.raceFirst(
+      Fiber.join(fiber).pipe(Effect.as(true)),
+      Effect.sleep(runFinalizerGraceMs).pipe(Effect.as(false)),
+    );
+    if (!finished)
+      yield* Effect.logError("shiitake_run_finalizer_hung").pipe(
+        Effect.annotateLogs({ workId, finalizer: name }),
+      );
+  });
+}
 
 const toolSetupMessages = {
   missing: "Instruction capabilities have no tool runtime",
@@ -193,14 +218,26 @@ function acquiredTools(
           readSessionGrants(options.store, sessionId)?.grants ?? {},
       },
     };
+    const toolScope = yield* Scope.make();
+    yield* Effect.addFinalizer(() =>
+      boundedRunFinalizer(
+        "tools",
+        workId,
+        Scope.close(toolScope, Exit.succeed(undefined)),
+      ),
+    );
     const runtime = yield* makeMycelium(
       toolSource.execution === undefined
         ? runtimeOptions
         : { ...runtimeOptions, execution: toolSource.execution },
-    ).pipe(Effect.mapError(() => new ToolSetupError("runtime")));
-    const lease = yield* runtime
-      .acquire()
-      .pipe(Effect.mapError(() => new ToolSetupError("lease")));
+    ).pipe(
+      Effect.provideService(Scope.Scope, toolScope),
+      Effect.mapError(() => new ToolSetupError("runtime")),
+    );
+    const lease = yield* runtime.acquire().pipe(
+      Effect.provideService(Scope.Scope, toolScope),
+      Effect.mapError(() => new ToolSetupError("lease")),
+    );
     return [lease.executeTool, ...lease.tools];
   });
 }
@@ -226,12 +263,29 @@ export function runAcceptedCommand(
       });
       const releaseInstructions = instructions.release;
       if (releaseInstructions !== undefined)
-        yield* Effect.addFinalizer(() => Effect.sync(releaseInstructions));
+        yield* Effect.addFinalizer(() =>
+          boundedRunFinalizer(
+            "instructions",
+            prepared.command.entry.workId,
+            Effect.sync(releaseInstructions),
+          ),
+        );
       const acquired = yield* acquireOwnedModel(
-        options.model.acquire({
-          sessionId: prepared.command.sessionId,
-          preference: prepared.modelPreference,
-        }),
+        options.model
+          .acquire({
+            sessionId: prepared.command.sessionId,
+            preference: prepared.modelPreference,
+          })
+          .pipe(
+            Effect.map((model) => ({
+              ...model,
+              release: boundedRunFinalizer(
+                "model",
+                prepared.command.entry.workId,
+                model.release,
+              ),
+            })),
+          ),
       );
       const tools = yield* acquiredTools(
         options,

@@ -273,22 +273,12 @@ it("a later turn's report to the delegator names what still waits on it", async 
     await open.reconcile();
     await open.reconcile();
     // A turn no Agent's mail started, such as a goal turn, has no sender of its own.
-    const later = await Effect.runPromise(
+    await Effect.runPromise(
       session.send("Keep going", { requestId: "later-turn" }),
     );
     await open.reconcile();
     await open.reconcile();
-    expect(open.posted.map(({ key }) => key)).toEqual([
-      "scout-3:reply:0",
-      `scout-3:report:${later.commandId}:0`,
-    ]);
-    expect(open.posted[1]?.reply).toEqual({
-      commandId: later.commandId,
-      outcome: "completed",
-      waitingOnYou: [
-        { itemId: "ask-3", kind: "question", summary: "Which branch?" },
-      ],
-    });
+    expect(open.posted.map(({ key }) => key)).toEqual(["scout-3:reply:0"]);
   } finally {
     await open.close();
   }

@@ -139,6 +139,66 @@ describe("storage pressure backpressure (Node, node:sqlite)", () => {
   });
 });
 
+describe("host archive admission (Node, node:sqlite)", () => {
+  it("refuses only new Sessions and prompts through the same door, including the HTTP wire", async () => {
+    const fixture = createNativeSqliteOwnerFixture();
+    const runtime = createCompatibilityRuntimeHost();
+    let archived = false;
+    const agent = await Shiitake.make({
+      ...compatibilityRunDependencies(),
+      store: fixture.owner,
+      runtime: runtime.runtime,
+      admission: {
+        assertOpen: () => {
+          if (archived)
+            throw new ShiitakeError(
+              "contract",
+              "archived",
+              "Agent is archived; unarchive it to work with it",
+            );
+        },
+      },
+    });
+    const routes = createShiitakeHttpRoutes(
+      (id) => agent.session(id),
+      agent.listSessions,
+      agent.createSession,
+      agent.deleteSession,
+      () => agent.extensions,
+    );
+    const client = createShiitakeClient({
+      baseUrl: "http://shiitake.test",
+      fetch: (input, init) =>
+        Promise.resolve(routes.request(new Request(input, init))),
+    });
+    try {
+      const sessionId = await agent.createSession("garden");
+      const accepted = await agent
+        .session(sessionId)
+        .command(prompt("first", "water the fern"));
+      archived = true;
+      const refusal = { boundary: "contract", cause: "archived" };
+      await expect(agent.createSession("new")).rejects.toMatchObject(refusal);
+      await expect(
+        agent.session(sessionId).command(prompt("new", "plant the oak")),
+      ).rejects.toMatchObject(refusal);
+      await expect(client.createSession("remote")).rejects.toMatchObject(
+        refusal,
+      );
+      expect(await agent.createSession("garden")).toBe(sessionId);
+      expect(
+        await agent
+          .session(sessionId)
+          .command(prompt("first", "water the fern")),
+      ).toEqual(accepted);
+    } finally {
+      await client.close();
+      await agent.close();
+      fixture.close();
+    }
+  });
+});
+
 describe("stored context size (Node, node:sqlite)", () => {
   it("prepares a run over a large stored context without a byte ceiling", () => {
     const fixture = createNativeSqliteOwnerFixture();

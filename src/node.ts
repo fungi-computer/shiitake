@@ -82,9 +82,14 @@ export function nodeRuntimeHost(
       () => {
         wakeTimer = undefined;
         wakeAt = undefined;
+        // A capped wait may finish before the actual deadline.
+        if (at > Date.now()) {
+          scheduleWake(at);
+          return;
+        }
         void bound?.requestWake().catch(reportFailure);
       },
-      Math.max(0, at - Date.now()),
+      Math.min(2_147_483_647, Math.max(0, at - Date.now())),
     );
   };
   const runtime: RuntimeHost = Object.freeze({
@@ -162,7 +167,11 @@ export function nodeRuntimeHost(
   return Object.freeze({
     runtime,
     scheduleWake,
-    close: () => bound?.close() ?? Promise.resolve(),
+    close: () => {
+      scheduleWake(null);
+      closed = true;
+      return bound?.close() ?? Promise.resolve();
+    },
   });
 }
 

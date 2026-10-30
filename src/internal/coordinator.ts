@@ -50,6 +50,7 @@ import type {
 import {
   mergeObservationSignals,
   openObservationKernel,
+  publishAgentExecutionChange,
   publishOwnerObservation,
   type ObservationKernel,
   type ObservationRegistration,
@@ -58,9 +59,15 @@ import {
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { AdmitRequest } from "./admission-door.js";
 import { checkHostMeta } from "./host-meta.js";
-import { readSessionActivity } from "./session-status.js";
-import { readSessionContext } from "./session-context.js";
 import {
+  readSessionActivity,
+  type ObservedActivity,
+} from "./session-status.js";
+import { prepareSessionContext } from "./session-context.js";
+import {
+  progressPosition,
+  readProcessProgressDelta,
+  type ProgressPosition,
   abortSession,
   cancelSession,
   branchSession,
@@ -105,11 +112,7 @@ function agentExtensions(runtime: RuntimeCoordinator) {
   });
 }
 
-function currentSessionActivity(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  sessionId: string,
-) {
+function currentSessionWork(runtime: RuntimeCoordinator, sessionId: string) {
   return runtime
     .readQueueHead(sessionId)
     .pipe(
@@ -117,13 +120,21 @@ function currentSessionActivity(
         (head.state === "queued"
           ? runtime.runningWork(head.jobId)
           : Effect.succeed(null)
-        ).pipe(
-          Effect.map((runningWork) =>
-            readSessionActivity(options.store, sessionId, head, runningWork),
-          ),
-        ),
+        ).pipe(Effect.map((runningWork) => ({ head, runningWork }))),
       ),
     );
+}
+
+function currentSessionActivity(
+  options: ShiitakeEffectOptions,
+  runtime: RuntimeCoordinator,
+  sessionId: string,
+) {
+  return currentSessionWork(runtime, sessionId).pipe(
+    Effect.map(({ head, runningWork }) =>
+      readSessionActivity(options.store, sessionId, head, runningWork),
+    ),
+  );
 }
 
 /** Carry the Session's context use on a baseline, when it has one. */
@@ -143,19 +154,27 @@ function readSessionWithContext(
   sessionId: string,
   input: Parameters<typeof readSession>[3],
 ): Effect.Effect<SessionSnapshot, ShiitakeError> {
-  return currentSessionActivity(options, runtime, sessionId).pipe(
-    Effect.flatMap((activity) =>
-      readSession(options.store, sessionId, activity, input, () =>
-        runtime.extensions.project(sessionId),
+  return currentSessionWork(runtime, sessionId).pipe(
+    Effect.flatMap(({ head, runningWork }) =>
+      readSession(
+        options.store,
+        sessionId,
+        () => readSessionActivity(options.store, sessionId, head, runningWork),
+        input,
+        () => runtime.extensions.project(sessionId),
+        (snapshot) => ({
+          snapshot,
+          context: prepareSessionContext(
+            options,
+            sessionId,
+            snapshot.cursor,
+            input?.before === undefined,
+          ),
+        }),
       ),
     ),
-    Effect.flatMap((snapshot) =>
-      readSessionContext(
-        options,
-        sessionId,
-        snapshot.cursor,
-        input?.before === undefined,
-      ).pipe(Effect.map((context) => withContext(snapshot, context))),
+    Effect.flatMap(({ snapshot, context }) =>
+      context.pipe(Effect.map((value) => withContext(snapshot, value))),
     ),
   );
 }
@@ -292,7 +311,59 @@ function subscriptionFrames(
   after: string | undefined,
   delivery: "replay" | "live",
   includeSandboxFailures = false,
+  baselineProgress: SessionSnapshot["progress"] = null,
 ): Stream.Stream<SessionFrame, ShiitakeError> {
+  let position: ProgressPosition | null = progressPosition(baselineProgress);
+  let toolOutput: ObservedActivity["toolOutput"] = [];
+  const reset = () =>
+    resetFrame(options, runtime, sessionId, includeSandboxFailures).pipe(
+      Effect.map((frame) => {
+        position = progressPosition(frame.baseline.progress);
+        toolOutput = frame.baseline.toolOutput;
+        return continueFromReset(frame);
+      }),
+    );
+  const liveFrames = (
+    activity: ObservedActivity,
+  ): readonly SessionFrame[] | undefined => {
+    const queue = activity.facts.queue;
+    const delta =
+      queue.state !== "running"
+        ? null
+        : readProcessProgressDelta(
+            options.store,
+            sessionId,
+            queue.commandId,
+            position,
+          );
+    if (delta === undefined) return undefined;
+    const frames: SessionFrame[] = [];
+    if (delta !== null) {
+      frames.push({
+        kind: "progress",
+        progress: delta,
+        activity: activity.facts,
+      });
+      position = {
+        messageId: delta.messageId,
+        revision: delta.revision,
+        text: delta.text.offset + delta.text.append.length,
+        thinking: delta.thinking.offset + delta.thinking.append.length,
+      };
+    }
+    if (
+      toolOutput.length !== activity.toolOutput.length ||
+      toolOutput.some((slot, index) => slot !== activity.toolOutput[index])
+    ) {
+      toolOutput = activity.toolOutput;
+      frames.push({
+        kind: "tool_output",
+        toolOutput,
+        activity: activity.facts,
+      });
+    }
+    return frames;
+  };
   const initial: SubscriptionState = {
     after,
     delivery,
@@ -321,13 +392,7 @@ function subscriptionFrames(
           ): Effect.Effect<SubscriptionStep, ShiitakeError> => {
             if (signal === "closed")
               return Effect.succeed([[], Option.none<SubscriptionState>()]);
-            if (signal === "reset")
-              return resetFrame(
-                options,
-                runtime,
-                sessionId,
-                includeSandboxFailures,
-              ).pipe(Effect.map(continueFromReset));
+            if (signal === "reset") return reset();
 
             return runtime.assertOpen.pipe(
               Effect.andThen(
@@ -335,28 +400,23 @@ function subscriptionFrames(
               ),
               Effect.flatMap((activity) => {
                 registration.setQueued(activity.facts.queue.state === "queued");
-                if (signal === "activity" && state.delivery === "live")
-                  return Effect.succeed<SubscriptionStep>([
-                    [{ kind: "activity", activity: activity.facts }],
-                    Option.some({ ...state, awaitSignal: true }),
-                  ]);
-                if (signal === "progress" && state.delivery === "live") {
+                if (
+                  (signal === "progress" || signal === "activity") &&
+                  state.delivery === "live"
+                ) {
+                  const frames = liveFrames(activity);
+                  if (frames === undefined) return reset();
                   return Effect.succeed<SubscriptionStep>([
                     [
-                      ...(activity.progress === null
-                        ? []
-                        : [
+                      ...(signal === "activity"
+                        ? [
                             {
-                              kind: "progress" as const,
-                              progress: activity.progress,
+                              kind: "activity" as const,
                               activity: activity.facts,
                             },
-                          ]),
-                      {
-                        kind: "tool_output",
-                        toolOutput: activity.toolOutput,
-                        activity: activity.facts,
-                      },
+                          ]
+                        : []),
+                      ...frames,
                     ],
                     Option.some({ ...state, awaitSignal: true }),
                   ]);
@@ -369,57 +429,70 @@ function subscriptionFrames(
                   activity,
                   () => runtime.extensions.project(sessionId),
                   includeSandboxFailures,
+                  (page) => {
+                    const latestCursor =
+                      page.kind === "page"
+                        ? page.frames
+                            .flatMap((frame) =>
+                              frame.kind === "progress" ||
+                              frame.kind === "activity" ||
+                              frame.kind === "tool_output"
+                                ? []
+                                : [frame.cursor],
+                            )
+                            .at(-1)
+                        : undefined;
+                    // Prepare a figure only for the final moving update,
+                    // while its cursor and stored context share the read.
+                    const context =
+                      page.kind === "page" &&
+                      !page.hasMore &&
+                      page.frames.some(
+                        (frame) =>
+                          frame.kind === "update" &&
+                          frame.cursor !== state.after,
+                      )
+                        ? prepareSessionContext(
+                            options,
+                            sessionId,
+                            latestCursor ?? null,
+                          )
+                        : Effect.succeed(undefined);
+                    return { page, latestCursor, context };
+                  },
                 ).pipe(
                   Effect.flatMap(
-                    (page): Effect.Effect<SubscriptionStep, ShiitakeError> => {
-                      if (page.kind === "reset")
-                        return resetFrame(
-                          options,
-                          runtime,
-                          sessionId,
-                          includeSandboxFailures,
-                        ).pipe(Effect.map(continueFromReset));
+                    ({
+                      page,
+                      latestCursor,
+                      context,
+                    }): Effect.Effect<SubscriptionStep, ShiitakeError> => {
+                      if (page.kind === "reset") return reset();
 
-                      const latestCursor = page.frames
-                        .flatMap((frame) =>
-                          frame.kind === "progress" ||
-                          frame.kind === "activity" ||
-                          frame.kind === "tool_output"
-                            ? []
-                            : [frame.cursor],
-                        )
-                        .at(-1);
+                      if (!page.hasMore) toolOutput = activity.toolOutput;
+                      const progressFrames = page.hasMore
+                        ? []
+                        : liveFrames(activity);
+                      if (progressFrames === undefined) return reset();
+
                       const next: SubscriptionState = {
                         after: latestCursor ?? state.after,
                         delivery: page.hasMore ? state.delivery : "live",
                         awaitSignal: !page.hasMore,
                       };
-                      // Only a final update that moves the cursor gets a
-                      // figure. A wake that moved nothing never re-reads the
-                      // whole kept window.
-                      const movedHistory = page.frames.some(
-                        (frame) =>
-                          frame.kind === "update" &&
-                          frame.cursor !== state.after,
-                      );
-                      return (
-                        movedHistory && !page.hasMore
-                          ? readSessionContext(
-                              options,
-                              sessionId,
-                              latestCursor ?? null,
-                            )
-                          : Effect.succeed(undefined)
-                      ).pipe(
+                      return context.pipe(
                         Effect.map((context): SubscriptionStep => [
-                          context === undefined
-                            ? page.frames
-                            : page.frames.map((frame) =>
-                                frame.kind === "update" &&
-                                frame.cursor === latestCursor
-                                  ? Object.freeze({ ...frame, context })
-                                  : frame,
-                              ),
+                          [
+                            ...(context === undefined
+                              ? page.frames
+                              : page.frames.map((frame) =>
+                                  frame.kind === "update" &&
+                                  frame.cursor === latestCursor
+                                    ? Object.freeze({ ...frame, context })
+                                    : frame,
+                                )),
+                            ...progressFrames,
+                          ],
                           Option.some(next),
                         ]),
                       );
@@ -523,6 +596,7 @@ function watchSession(
                     snapshot.cursor ?? undefined,
                     "live",
                     decoded.options.includeSandboxFailures === true,
+                    snapshot.progress,
                   ).pipe(Stream.ensuring(Effect.sync(registration.close))),
                   close: Effect.sync(registration.close),
                 });
@@ -807,7 +881,14 @@ function executeSessionCommand(
                   setSessionTitle(options.store, decoded, command.title);
                 }),
               )
-              .pipe(Effect.as(undefined));
+              .pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    publishAgentExecutionChange(options.store);
+                  }),
+                ),
+                Effect.as(undefined),
+              );
         }
       },
     ),
@@ -1140,6 +1221,10 @@ export function acceptAddressedMail(
       const result = admit(meta === undefined ? request : { ...request, meta });
       if (result.status !== "accepted")
         throw new Error("Sessionless addressed mail was not admitted");
+      runtime.recordCreatedSessionDelegatorWithinTransaction(
+        sessionId,
+        addressed,
+      );
       return {
         status: "accepted" as const,
         commandId: result.commandId,

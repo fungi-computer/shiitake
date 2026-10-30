@@ -161,6 +161,11 @@ export type ShiitakeEffectOptions = Readonly<{
   store: SqliteOwner;
   /** Host storage-pressure check; absent never refuses for storage pressure. */
   storagePressure?: StoragePressureCheck;
+  /** Host-owned synchronous new-work admission at the common door. */
+  admission?: Readonly<{
+    /** Check the host's current flag synchronously inside admission's transaction. */
+    assertOpen: () => void;
+  }>;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** One host lane in Shiitake's existing Watchdog, opened before recovery. */

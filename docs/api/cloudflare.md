@@ -405,6 +405,9 @@ type CloudflareShiitakeOptions = Readonly<{
   instructions: InstructionSource;
   tools?: readonly [] | CloudflareShiitakeTools;
   storagePressure?: StoragePressureCheck;
+  admission?: Readonly<{
+    assertOpen: () => void;
+  }>;
   compaction?: CompactionOptions;
   extensions: ExtensionRosterV0;
   initialize?: (agent) => Promise<void>;
@@ -424,6 +427,19 @@ Cloudflare host inputs; the model owner resolves one frozen run selection.
 ```ts
 type CloudflareShiitake = ShiitakeOwnerAgent &
   Readonly<{
+    busySync: () =>
+      | Readonly<{
+          kind: "session";
+          sessionId: string;
+          commandId: string;
+        }>
+      | Readonly<{
+          kind: "delegation";
+          agentId: string;
+          sessionId: string;
+          commandId: string;
+        }>
+      | undefined;
     readSettlement: (
       sessionId,
       commandId,

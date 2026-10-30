@@ -399,7 +399,7 @@ it("projects the selected lineage with the exact completed Pi message", () => {
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
 
     expect(snapshot.cursor).toEqual(expect.any(String));
@@ -437,7 +437,7 @@ it("projects the selected lineage with the exact completed Pi message", () => {
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: idleActivity,
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       }),
     ).toMatchObject({
       kind: "page",
@@ -479,7 +479,7 @@ it("projects the durable extension origin without attributing human text to an e
         fixture.owner,
         sessionId,
         { limit: 200 },
-        { facts: idleActivity, toolOutput: [], progress: null },
+        { facts: idleActivity, toolOutput: [], readProgress: () => null },
       );
       if (origin.kind === "extension") {
         expect(pending.pending.prompts[0]).toHaveProperty("origin", {
@@ -503,7 +503,7 @@ it("projects the durable extension origin without attributing human text to an e
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     const expected = { extensionId: "goal", correlation: "goal-revision" };
     expect(snapshot.messages[0]).toHaveProperty("origin", expected);
@@ -515,7 +515,7 @@ it("projects the durable extension origin without attributing human text to an e
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: idleActivity,
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       }),
     ).toMatchObject({
       kind: "page",
@@ -618,7 +618,7 @@ it("projects work terminals after intermediate tool messages without settling la
       {
         facts: queuedActivity("queued-command"),
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     expect(snapshot.messages.map(({ commandId }) => commandId)).toEqual([
@@ -637,7 +637,7 @@ it("projects work terminals after intermediate tool messages without settling la
       readClientReplayPage(fixture.owner, sessionId, undefined, "replay", {
         facts: queuedActivity("queued-command"),
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       }),
     ).toMatchObject({
       kind: "page",
@@ -681,7 +681,7 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     const compaction = woodstock.appendSessionEntry(fixture.owner, {
       sessionId,
@@ -709,7 +709,7 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       sessionId,
       preCompaction.cursor ?? undefined,
       "replay",
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     expect(replay.kind).toBe("page");
     if (replay.kind !== "page") throw new Error("expected page");
@@ -735,7 +735,7 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     expect(postCompaction.messages.map(({ value }) => value)).toEqual([
       { role: "user", content: "root", timestamp: 1 },
@@ -939,6 +939,7 @@ it("accepts one command entry as the exact replay and work identity", () => {
       jobId: string;
       sessionId: string;
       commandFactId: string;
+      delivery: "steer" | "followUp";
     }[] = [];
     let first!: woodstock.AcceptedSessionCommand;
 
@@ -963,6 +964,7 @@ it("accepts one command entry as the exact replay and work identity", () => {
         jobId: first.command.id,
         sessionId,
         commandFactId: first.command.id,
+        delivery: "followUp",
       },
     ]);
     expect(first.accepted).toEqual({
@@ -1018,7 +1020,7 @@ it("bounds the waiting view without limiting command acceptance", () => {
         {
           facts: queuedActivity("queued-command"),
           toolOutput: [],
-          progress: null,
+          readProgress: () => null,
         },
       );
     const first = read();
@@ -1050,7 +1052,7 @@ it("bounds the waiting view without limiting command acceptance", () => {
       {
         facts: queuedActivity("queued-command"),
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     expect(replay).toMatchObject({
@@ -1104,7 +1106,7 @@ it("withdraws cancelled follow-ups before their scheduler terminal is written", 
       {
         facts: queuedActivity(kept.command.id),
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     expect(snapshot.pending.total).toBe(1);
@@ -1145,7 +1147,7 @@ it("keeps large waiting prompt projection within the existing byte bound", () =>
       {
         facts: queuedActivity("queued-command"),
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     expect(snapshot.pending.total).toBe(9);
@@ -1197,7 +1199,7 @@ it("keeps a preference changed during streaming on the completed message lineage
       {
         facts: runningActivity,
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     const value = assistant("finished on the original model");
@@ -1221,7 +1223,7 @@ it("keeps a preference changed during streaming on the completed message lineage
       {
         facts: idleActivity,
         toolOutput: [],
-        progress: null,
+        readProgress: () => null,
       },
     );
     expect(replay).toMatchObject({
@@ -1276,7 +1278,7 @@ it("durably admits image prompts and includes images in retry identity and pendi
       fixture.owner,
       "images",
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     expect(snapshot.pending.prompts[0]?.images).toEqual(prompt.images);
     const prepared = woodstock.prepareSessionRun(fixture.owner, {
@@ -1411,12 +1413,12 @@ it("settles an orphan admission without blocking the rest of cancel-all", () => 
       fixture.owner,
       sessionId,
       { limit: 200 },
-      { facts: idleActivity, toolOutput: [], progress: null },
+      { facts: idleActivity, toolOutput: [], readProgress: () => null },
     );
     expect(snapshot.messages.map(({ value }) => value.content)).toEqual([
+      "steer",
       "orphan",
       "queued",
-      "steer",
     ]);
     expect(snapshot.terminals).toEqual(
       expect.arrayContaining([

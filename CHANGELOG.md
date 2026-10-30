@@ -1,5 +1,41 @@
 # @fungi.computer/shiitake
 
+## 0.7.0
+
+### Minor Changes
+
+- Changes since 0.6.0:
+
+  - fix(shiitake): settle hung runs and route ancestor reports one-way
+  - fix(shiitake): release unbound Node host wake timers
+  - fix(shiitake): bound far-future open Agent wake timers
+  - fix(shiitake): keep watch context atomic with its replay page
+  - fix(shiitake): keep direct snapshot projections atomic
+  - feat(local): expose private retained schedule controls
+  - fix(shiitake): bound and share Session read ancestry
+  - feat(agents): adopt delegated goals on recipient admission
+  - fix(shiitake): retain private catalog diagnostic failures
+  - fix(shiitake): correct refusal test and Session guidance
+  - fix(agents): open first Sessions and admit bounded exec environments
+  - fix(shiitake): clarify queued-title invalidation effect
+  - fix(shiitake): name work blocking queued conversations
+  - fix(shiitake): keep progress through CLI watch updates
+  - fix(shiitake): classify unreadable delegation settlement
+  - feat(oyster): archive agents without deleting their work
+  - fix(shiitake): preserve visitor append continuity across activity frames
+  - fix(shiitake): bound progress flush latency and strengthen delta proofs
+  - fix(shiitake): stream bounded offset append progress across all clients
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.6.0
+  - @fungi.computer/bird-dog@0.3.1
+  - @fungi.computer/mycelium@0.3.0
+  - @fungi.computer/knapsack@0.4.1
+
 ## 0.6.0
 
 ### Minor Changes

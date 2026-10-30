@@ -74,6 +74,7 @@ export {
   visitorSnapshot,
   visitorView,
   type ParticipantPolicy,
+  type VisitorLine,
   type VisitorPendingPrompt,
   type VisitorView,
 } from "./client-visitor.js";
@@ -209,9 +210,15 @@ export type SessionTerminal = Readonly<{
   meta?: Json;
 }>;
 
-/** Work occupying the executor partition that this queued command requires, without message or provider data. */
+/** Blocking executor identity and Session display metadata, never messages or provider data. */
 export type AgentRunningWork =
-  | Readonly<{ kind: "session"; sessionId: string; commandId: string }>
+  | Readonly<{
+      kind: "session";
+      sessionId: string;
+      commandId: string;
+      /** Owner-issued display title; empty when no title is known. */
+      title: string;
+    }>
   | Readonly<{ kind: "host"; lane: string; jobId: string }>;
 
 /**
@@ -290,9 +297,51 @@ export type SessionProgress = Readonly<{
   revision: number;
   text: string;
   thinking: string;
+  /** UTF-16 offsets of the retained tails, not byte offsets. */
+  textOffset: number;
+  thinkingOffset: number;
   textTruncated: boolean;
   thinkingTruncated: boolean;
 }>;
+
+/** Append-only progress on the wire. Offsets count JavaScript string units. */
+export type SessionProgressDelta = Readonly<{
+  messageId: string;
+  revision: number;
+  text: Readonly<{ offset: number; append: string }>;
+  thinking: Readonly<{ offset: number; append: string }>;
+}>;
+
+/** Fold a decoded append once; a missing prefix waits for an owner reset. */
+export function appendSessionProgress(
+  current: SessionProgress | null,
+  delta: SessionProgressDelta,
+): SessionProgress | null {
+  const previous = current?.messageId === delta.messageId ? current : null;
+  if (previous !== null && previous.revision >= delta.revision) return current;
+  const textEnd =
+    previous === null ? 0 : previous.textOffset + previous.text.length;
+  const thinkingEnd =
+    previous === null ? 0 : previous.thinkingOffset + previous.thinking.length;
+  if (delta.text.offset > textEnd || delta.thinking.offset > thinkingEnd)
+    return current;
+  return {
+    messageId: delta.messageId,
+    revision: delta.revision,
+    text:
+      (previous?.text ?? "") +
+      delta.text.append.slice(Math.max(0, textEnd - delta.text.offset)),
+    thinking:
+      (previous?.thinking ?? "") +
+      delta.thinking.append.slice(
+        Math.max(0, thinkingEnd - delta.thinking.offset),
+      ),
+    textOffset: previous?.textOffset ?? 0,
+    thinkingOffset: previous?.thinkingOffset ?? 0,
+    textTruncated: previous?.textTruncated ?? false,
+    thinkingTruncated: previous?.thinkingTruncated ?? false,
+  };
+}
 
 /** Accepted prompt waiting to enter the conversation, not a scheduling command. */
 export type SessionPendingPrompt = Readonly<{
@@ -459,9 +508,9 @@ export type SessionFrame =
       context?: SessionContext;
     }>
   | Readonly<{
-      /** Bounded process-local assistant progress. */
+      /** Only new text/thinking; snapshots, not frames, carry retained tails. */
       kind: "progress";
-      progress: SessionProgress;
+      progress: SessionProgressDelta;
       /** Raw facts about the Session's activity read with this progress. */
       activity: SessionActivity;
     }>

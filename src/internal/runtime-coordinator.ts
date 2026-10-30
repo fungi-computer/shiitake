@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
 
 import type { AgentRunningWork } from "../client.js";
+import { readOutstandingDelegationSync } from "../fleet.js";
 import type { GrantsDelivery } from "./contracts.js";
 import { publishAgentExecutionChange } from "./observation-kernel.js";
 import { ShiitakeError } from "../errors.js";
@@ -38,18 +39,33 @@ import {
   createSessionWithinTransaction,
   deliverSessionGrants,
   prepareExtensionStore,
+  recordSessionDelegator,
   projectSessionRun,
   openStorageAdmission,
   readCursor,
+  readSessionInboxPage,
+  readSessionSummary,
   type RecordAcceptedCancellation,
   type RunContract,
   type StorageAdmission,
 } from "./woodstock/index.js";
 
+/** Owner-local archive blocker read within the caller's SQLite transaction. */
+export type OwnerBusy =
+  | Readonly<{ kind: "session"; sessionId: string; commandId: string }>
+  | Readonly<{
+      kind: "delegation";
+      agentId: string;
+      sessionId: string;
+      commandId: string;
+    }>;
+
 /** Bound lifecycle and owner-transaction doors used by the public coordinator. */
 export type RuntimeCoordinator = Readonly<{
   prepareConfiguration: import("./effect-contracts.js").ShiitakeEffectOwner["prepareConfiguration"];
   activeSessions: Effect.Effect<readonly string[]>;
+  /** No awaits: use inside the same transaction as the host's archive flag. */
+  busySync: () => OwnerBusy | undefined;
   runningWork: (
     jobId: string,
   ) => Effect.Effect<AgentRunningWork | null, ShiitakeError>;
@@ -61,6 +77,10 @@ export type RuntimeCoordinator = Readonly<{
   door: AdmissionDoor;
   /** Reserve a Session within the admission door's enclosing transaction. */
   createSessionWithinTransaction: (requestId: string) => string;
+  recordCreatedSessionDelegatorWithinTransaction: (
+    sessionId: string,
+    mail: import("@fungi.computer/bird-dog").BirdDogMail,
+  ) => void;
   /** Write new-Session grants through the enclosing admission transaction. */
   stageSessionGrantsWithinTransaction: (
     sessionId: string,
@@ -87,6 +107,11 @@ export type RuntimeCoordinator = Readonly<{
 }>;
 
 type CoordinatorLifecycleState = "open" | "closing" | "closed";
+
+/** Executor identity stays live here; display metadata stays with Woodstock. */
+type ExecutorWork =
+  | Omit<Extract<AgentRunningWork, { kind: "session" }>, "title">
+  | Extract<AgentRunningWork, { kind: "host" }>;
 
 type HostExecutorCell = {
   current:
@@ -150,7 +175,7 @@ export function openRuntimeCoordinator(
     );
     const hostExecutor: HostExecutorCell = { current: undefined };
     const activeSessions = new Set<string>();
-    const runningSlots = new Map<"serial" | "host", AgentRunningWork>();
+    const runningSlots = new Map<"serial" | "host", ExecutorWork>();
     const watchdogOptions: EffectWatchdogOptions = {
       owner: options.store,
       // Each Watchdog slot serializes ticks and inspects only its partition. A claim
@@ -161,7 +186,7 @@ export function openRuntimeCoordinator(
         execute: (job) =>
           Effect.acquireUseRelease(
             Effect.sync(() => {
-              const runningWork: AgentRunningWork =
+              const runningWork: ExecutorWork =
                 job.lane === options.hostJobs?.lane
                   ? { kind: "host", lane: job.lane, jobId: job.jobId }
                   : {
@@ -261,13 +286,46 @@ export function openRuntimeCoordinator(
           ? error
           : runtimeFailure("Storage budget is unavailable"),
     });
+    const admitNew = () => {
+      options.admission?.assertOpen();
+      storage.admitNew();
+    };
+    const busySync = (): OwnerBusy | undefined => {
+      let after: string | undefined;
+      do {
+        const page = readSessionInboxPage(options.store, after);
+        for (const session of page.sessions) {
+          if (session.state === "unavailable")
+            throw new ShiitakeError(
+              "store",
+              "unavailable",
+              `Session ${session.sessionId} is unreadable`,
+            );
+          const head = watchdog.transactional.readQueueHead(session.sessionId);
+          if (head.state !== "idle")
+            return {
+              kind: "session",
+              sessionId: session.sessionId,
+              commandId: head.jobId,
+            };
+        }
+        after = page.next;
+      } while (after !== undefined);
+      const outstanding = readOutstandingDelegationSync(options.store);
+      return outstanding === undefined
+        ? undefined
+        : { kind: "delegation", ...outstanding };
+    };
     const door = openAdmissionDoor({
       owner: options.store,
-      admitNew: storage.admitNew,
+      admitNew,
       hostMeta: options.meta,
       contract,
       enqueue: (work, mail) => {
-        const input = { work: { ...work, recovery: agentTurnRecovery } };
+        const input = {
+          work: { ...work, recovery: agentTurnRecovery },
+          delivery: work.delivery,
+        };
         watchdog.transactional.enqueueAcceptedJob(
           agentJobFromInput(mail === undefined ? input : { ...input, mail }),
         );
@@ -441,16 +499,28 @@ export function openRuntimeCoordinator(
           };
         }),
       activeSessions: Effect.sync(() => [...activeSessions]),
+      busySync,
       runningWork: (jobId) =>
         watchdog.read(jobId).pipe(
-          Effect.map((result) =>
-            result.status === "found"
-              ? (runningSlots.get(
-                  result.job.lane === options.hostJobs?.lane
-                    ? "host"
-                    : "serial",
-                ) ?? null)
-              : null,
+          Effect.flatMap(
+            (result): Effect.Effect<AgentRunningWork | null, ShiitakeError> => {
+              const work =
+                result.status === "found"
+                  ? runningSlots.get(
+                      result.job.lane === options.hostJobs?.lane
+                        ? "host"
+                        : "serial",
+                    )
+                  : undefined;
+              if (work === undefined || work.kind === "host")
+                return Effect.succeed(work ?? null);
+              return readSessionSummary(options.store, work.sessionId).pipe(
+                Effect.map((summary) => ({
+                  ...work,
+                  title: summary?.title ?? "",
+                })),
+              );
+            },
           ),
           Effect.mapError(
             (cause) =>
@@ -475,15 +545,14 @@ export function openRuntimeCoordinator(
       beginClose,
       door,
       createSessionWithinTransaction: (requestId) =>
-        createSessionWithinTransaction(
-          options.store,
-          requestId,
-          storage.admitNew,
-        ),
+        createSessionWithinTransaction(options.store, requestId, admitNew),
+      recordCreatedSessionDelegatorWithinTransaction: (sessionId, mail) => {
+        recordSessionDelegator(options.store, sessionId, mail);
+      },
       stageSessionGrantsWithinTransaction: (sessionId, delivery) => {
         deliverSessionGrants(options.store, sessionId, delivery);
       },
-      storage,
+      storage: { admitNew },
       recordAcceptedCancellation: ({ jobId, cancellationId, onlyIfPending }) =>
         watchdog.transactional.recordCancellationIntent({
           jobId,

@@ -65,6 +65,7 @@ const SessionActivitySchema: Schema.Codec<SessionActivity> = Schema.Struct({
             kind: Schema.Literal("session"),
             sessionId: Schema.NonEmptyString,
             commandId: Schema.NonEmptyString,
+            title: Schema.String,
           }),
           Schema.Struct({
             kind: Schema.Literal("host"),
@@ -155,11 +156,19 @@ const SessionCompactionNoticeSchema: Schema.Codec<SessionCompactionNotice> =
     diagnostic: Schema.NullOr(Schema.String),
   });
 
+const ProgressTailSchema = Schema.String.check(
+  Schema.makeFilter(
+    (value) => new TextEncoder().encode(value).byteLength <= 65_536,
+  ),
+);
+
 const SessionProgressSchema: Schema.Codec<SessionProgress> = Schema.Struct({
   messageId: Schema.String,
   revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  text: Schema.String,
-  thinking: Schema.String,
+  text: ProgressTailSchema,
+  thinking: ProgressTailSchema,
+  textOffset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  thinkingOffset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   textTruncated: Schema.Boolean,
   thinkingTruncated: Schema.Boolean,
 });
@@ -257,7 +266,18 @@ export const SessionFrameSchema: Schema.Codec<SessionFrame> = Schema.Union([
   }),
   Schema.Struct({
     kind: Schema.Literal("progress"),
-    progress: SessionProgressSchema,
+    progress: Schema.Struct({
+      messageId: Schema.String,
+      revision: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+      text: Schema.Struct({
+        offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+        append: ProgressTailSchema,
+      }),
+      thinking: Schema.Struct({
+        offset: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+        append: ProgressTailSchema,
+      }),
+    }),
     activity: SessionActivitySchema,
   }),
   Schema.Struct({

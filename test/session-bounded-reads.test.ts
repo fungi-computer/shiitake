@@ -24,7 +24,7 @@ import {
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
-const activity = { facts: idleFacts, toolOutput: [], progress: null };
+const activity = { facts: idleFacts, toolOutput: [], readProgress: () => null };
 const contract = { core: "a".repeat(64), extensions: [] } as const;
 const usage = {
   input: 1,

@@ -236,6 +236,11 @@ export type ShiitakeOptions = Readonly<{
   store: SqliteOwner;
   /** Host storage-pressure check; absent never refuses for storage pressure. */
   storagePressure?: StoragePressureCheck;
+  /** Host-owned, synchronous admission for new Sessions and prompts only. */
+  admission?: Readonly<{
+    /** Check the host's current flag synchronously inside admission's transaction. */
+    assertOpen: () => void;
+  }>;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** Runtime host that schedules the opaque durable reconciler. */

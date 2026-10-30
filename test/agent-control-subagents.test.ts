@@ -72,7 +72,20 @@ const hostDirectory: AgentControlDirectory = {
     };
     return Promise.resolve(model === undefined ? agent : { ...agent, model });
   },
-  open: refusing,
+  open: () =>
+    Promise.resolve({
+      agent: {
+        createSession: () => Promise.resolve("session-new"),
+        deleteSession: refusing,
+        listSessions: refusing,
+        extensions: { list: refusing, resume: refusing, call: refusing },
+        session: () => {
+          throw new Error("unused");
+        },
+        close: () => Promise.resolve(),
+      },
+      release: () => Promise.resolve(),
+    }),
 };
 
 it("finds the Agent operations by the words subagent and spawn", async () => {
@@ -104,6 +117,7 @@ it("labels Agents on create and lists name, model and working directory", async 
   expect(seen).toEqual({
     created: {
       agentId: "agent-new",
+      sessionId: "session-new",
       name: "scout",
       workingDirectory: project,
     },
@@ -128,20 +142,6 @@ it("accepts a thinking level on create and setModel and echoes the requested mod
         changes.push(input);
         return Promise.resolve();
       },
-      open: () =>
-        Promise.resolve({
-          agent: {
-            createSession: () => Promise.resolve("session-new"),
-            deleteSession: refusing,
-            listSessions: refusing,
-            extensions: { list: refusing, resume: refusing, call: refusing },
-            session: () => {
-              throw new Error("unused");
-            },
-            close: () => Promise.resolve(),
-          },
-          release: () => Promise.resolve(),
-        }),
     },
     async ({ agents }) => {
       if (
@@ -179,6 +179,7 @@ it("accepts a thinking level on create and setModel and echoes the requested mod
   expect(seen).toEqual({
     created: {
       agentId: "agent-new",
+      sessionId: "session-new",
       name: "agent-new",
       model: "openai/gpt-6-astra",
       reasoning: "xhigh",

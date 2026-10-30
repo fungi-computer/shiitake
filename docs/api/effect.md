@@ -120,6 +120,9 @@ type ShiitakeEffectOptions = Readonly<{
   meta?: HostMetaOptions;
   store: SqliteOwner;
   storagePressure?: StoragePressureCheck;
+  admission?: Readonly<{
+    assertOpen: () => void;
+  }>;
   compaction?: CompactionOptions;
   hostJobs?: Readonly<{
     lane: string;
@@ -348,7 +351,7 @@ Effect-native addressable Session handle.
 
 ```ts
 type ShiitakeEffectSessionExtension = Readonly<{
-  call: (command, input) => Effect.Effect<Json, ShiitakeError>;
+  call: (command, input, caller?) => Effect.Effect<Json, ShiitakeError>;
 }>;
 ```
 
@@ -490,10 +493,16 @@ function openHost(options, mailRoom): Effect<Readonly<{
   readSettlement: (sessionId, commandId) => Effect<
      | Readonly<{
      acceptedSender: string | null;
+     delegator: string | null;
      terminal: SessionTerminal;
      content: string;
      usage: readonly Pick<AssistantMessage, ... | ... | ...>[];
      toolCalls: number;
+     waitingOnYou: readonly Readonly<{
+        itemId: ...;
+        kind: ...;
+        summary: ...;
+     }>[];
    }>
     | undefined, ShiitakeError>;
   agent: ShiitakeEffectOwner;
@@ -517,12 +526,14 @@ Open the Effect-native host composition with addressed mail.
 #### Returns
 
 `Effect`\<`Readonly`\<\{ `readSettlement`: (`sessionId`, `commandId`) =>
-`Effect`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
-[`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
-readonly `Pick`\<`AssistantMessage`, ... \| ... \| ...\>[]; `toolCalls`:
-`number`; \}\> \| `undefined`, [`ShiitakeError`](index.md#shiitakeerror)\>;
-`agent`: [`ShiitakeEffectOwner`](#shiitakeeffectowner); `acceptMail`: (`mail`,
-`meta?`, `reply?`, `stageAcceptedNotice?`) => `Effect`\<`Readonly`\<\{ `status`:
+`Effect`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
+`string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
+`content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, ... \| ... \|
+...\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly `Readonly`\<\{
+`itemId`: ...; `kind`: ...; `summary`: ...; \}\>[]; \}\> \| `undefined`,
+[`ShiitakeError`](index.md#shiitakeerror)\>; `agent`:
+[`ShiitakeEffectOwner`](#shiitakeeffectowner); `acceptMail`: (`mail`, `meta?`,
+`reply?`, `stageAcceptedNotice?`) => `Effect`\<`Readonly`\<\{ `status`:
 `"accepted"`; `commandId`: `string`; `sessionId?`: `string`; \}\>,
 [`ShiitakeError`](index.md#shiitakeerror)\>; \}\>,
 [`ShiitakeError`](index.md#shiitakeerror)\>
@@ -561,6 +572,67 @@ for it. An unreadable Session is its own `unavailable` row.
 `Effect`\<`Readonly`\<\{ `sessions`: readonly
 [`StoredSessionSummaryRow`](#storedsessionsummaryrow)[]; `next`: `string` \|
 `undefined`; \}\>, [`ShiitakeError`](index.md#shiitakeerror), `never`\>
+
+---
+
+### readStoredSessionStates()
+
+```ts
+function readStoredSessionStates(
+  owner,
+  after?,
+): Effect<
+  Readonly<{
+    sessions: readonly SessionSummaryRow[];
+    next: string | undefined;
+  }>,
+  ShiitakeError,
+  never
+>;
+```
+
+One page of saved conversations with their stored run state (needs_you, running,
+errored, done), in tier then newest-activity order, read from the store alone:
+no Agent runtime starts. The state is as the runtime last wrote it, so it can
+lag work a stopped runtime left behind.
+
+#### Parameters
+
+| Parameter | Type                                  |
+| --------- | ------------------------------------- |
+| `owner`   | [`SqliteOwner`](index.md#sqliteowner) |
+| `after?`  | `string`                              |
+
+#### Returns
+
+`Effect`\<`Readonly`\<\{ `sessions`: readonly
+[`SessionSummaryRow`](client.md#sessionsummaryrow)[]; `next`: `string` \|
+`undefined`; \}\>, [`ShiitakeError`](index.md#shiitakeerror), `never`\>
+
+---
+
+### readStoredAttention()
+
+```ts
+function readStoredAttention(
+  owner,
+  sessionId,
+): Effect<readonly object[], ShiitakeError, never>;
+```
+
+One saved conversation's open attention items, read from the store alone.
+
+#### Parameters
+
+| Parameter   | Type                                  |
+| ----------- | ------------------------------------- |
+| `owner`     | [`SqliteOwner`](index.md#sqliteowner) |
+| `sessionId` | `string`                              |
+
+#### Returns
+
+`Effect`\<readonly `object`[], [`ShiitakeError`](index.md#shiitakeerror),
+`never`\>
 
 ## References
 
@@ -657,6 +729,12 @@ Re-exports [SessionMessage](client.md#sessionmessage)
 ### SessionProgress
 
 Re-exports [SessionProgress](client.md#sessionprogress)
+
+---
+
+### SessionProgressDelta
+
+Re-exports [SessionProgressDelta](client.md#sessionprogressdelta)
 
 ---
 

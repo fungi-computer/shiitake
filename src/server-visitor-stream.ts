@@ -76,30 +76,19 @@ export function visitorStream(
         });
       }, 30_000);
   };
-  const publish = async (snapshot: SessionSnapshot, progressOnly: boolean) => {
+  const publish = async (snapshot: SessionSnapshot) => {
     if (!(await admitted())) return false;
     const baseline = visitorSnapshot(
       options.filter(snapshot),
       options.visitorId,
     );
-    await stream.writeSSE(
-      progressOnly
-        ? {
-            event: "frame",
-            data: JSON.stringify({
-              kind: "progress",
-              progress: baseline.progress,
-              activity: baseline.activity,
-            }),
-          }
-        : { event: "session", data: JSON.stringify(baseline) },
-    );
+    await stream.writeSSE({ event: "session", data: JSON.stringify(baseline) });
     return !ending;
   };
   const pump = async () => {
     try {
       let snapshot = options.watch.snapshot;
-      if (!(await publish(snapshot, false))) return;
+      if (!(await publish(snapshot))) return;
       heartbeat = setTimeout(() => {
         void beat().catch((cause: unknown) => {
           options.onError("channel_visitor_stream_heartbeat_failed", cause);
@@ -111,19 +100,41 @@ export function visitorStream(
       for await (const frame of options.watch.changes) {
         if (ending) break;
         if (frame.kind === "tool_output") continue;
+        if (frame.kind === "progress" || frame.kind === "activity") {
+          if (!(await admitted())) break;
+          snapshot = { ...snapshot, activity: frame.activity };
+          const baseline = visitorSnapshot(
+            options.filter(snapshot),
+            options.visitorId,
+          );
+          if (baseline.activity.queue.state === "idle") {
+            if (frame.kind === "activity")
+              await stream.writeSSE({
+                event: "session",
+                data: JSON.stringify(baseline),
+              });
+            continue;
+          }
+          await stream.writeSSE({
+            event: "frame",
+            data: JSON.stringify(
+              frame.kind === "activity"
+                ? { kind: "activity", activity: baseline.activity }
+                : {
+                    ...frame,
+                    progress: {
+                      ...frame.progress,
+                      thinking: { offset: 0, append: "" },
+                    },
+                    activity: baseline.activity,
+                  },
+            ),
+          });
+          continue;
+        }
         snapshot =
-          frame.kind === "progress"
-            ? {
-                ...snapshot,
-                progress: frame.progress,
-                activity: frame.activity,
-              }
-            : frame.kind === "activity"
-              ? { ...snapshot, activity: frame.activity }
-              : frame.kind === "reset"
-                ? frame.baseline
-                : await options.read();
-        if (!(await publish(snapshot, frame.kind === "progress"))) break;
+          frame.kind === "reset" ? frame.baseline : await options.read();
+        if (!(await publish(snapshot))) break;
       }
     } finally {
       await close();

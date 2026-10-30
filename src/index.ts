@@ -39,6 +39,7 @@ export type {
   SessionFrame,
   SessionMessage,
   SessionProgress,
+  SessionProgressDelta,
   SessionToolOutput,
   SessionContext,
   SessionSnapshot,

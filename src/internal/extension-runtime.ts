@@ -701,9 +701,11 @@ export function openExtensionRuntime(
                       error instanceof ShiitakeError
                         ? error.cause === "conflict"
                           ? "conflict"
-                          : error.cause === "closed"
-                            ? "closed"
-                            : "invalid"
+                          : error.cause === "archived"
+                            ? "archived"
+                            : error.cause === "closed"
+                              ? "closed"
+                              : "invalid"
                         : "invalid",
                     message:
                       error instanceof ShiitakeError

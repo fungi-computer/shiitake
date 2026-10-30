@@ -63,6 +63,9 @@ export type VisitorView = Readonly<{
   progress: string | null;
 }>;
 
+/** One visitor-visible line without internal attribution or tool metadata. */
+export type VisitorLine = VisitorView["lines"][number];
+
 /** Public pending facts exclude the host's private metadata and admission origin. */
 export type VisitorPendingPrompt = Pick<
   SessionPendingPrompt,
@@ -250,7 +253,12 @@ export function visitorSnapshot(
     progress:
       !ownWork || snapshot.progress === null
         ? null
-        : { ...snapshot.progress, thinking: "", thinkingTruncated: false },
+        : {
+            ...snapshot.progress,
+            thinking: "",
+            thinkingOffset: 0,
+            thinkingTruncated: false,
+          },
     extensions: {},
     attention: [],
   };

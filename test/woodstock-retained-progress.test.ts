@@ -7,6 +7,8 @@ import { openObservationKernel } from "../src/internal/observation-kernel.js";
 import {
   openProgress,
   readProcessProgress,
+  readProcessProgressDelta,
+  progressPosition,
 } from "../src/internal/woodstock/progress.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
@@ -90,6 +92,83 @@ it("keeps model progress process-local without per-update SQLite writes", async 
             text: "partial answer",
           });
           expect(yield* observation.pollSignal).toBe("progress");
+          expect(fixture.ownerWrites()).toBe(writesBefore);
+          const initial = readProcessProgressDelta(
+            fixture.owner,
+            accepted.sessionId,
+            accepted.commandId,
+            null,
+          );
+          expect(initial).toMatchObject({
+            text: { offset: 0, append: "partial answer" },
+            thinking: { offset: 0, append: "" },
+          });
+          const position = progressPosition(
+            readProcessProgress(fixture.owner, accepted.sessionId),
+          );
+          expect(
+            readProcessProgressDelta(
+              fixture.owner,
+              accepted.sessionId,
+              accepted.commandId,
+              position,
+            ),
+          ).toBeNull();
+
+          // Pi already supplies the append. Its cumulative partial is not the
+          // progress source (reading it on every token is quadratic).
+          yield* progress.update({
+            ...updated,
+            event: {
+              ...updated.event,
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "!",
+              partial,
+            },
+          });
+          expect(
+            readProcessProgress(fixture.owner, accepted.sessionId)?.text,
+          ).toBe("partial answer!");
+          expect(
+            readProcessProgressDelta(
+              fixture.owner,
+              accepted.sessionId,
+              accepted.commandId,
+              position,
+            ),
+          ).toMatchObject({ text: { offset: 14, append: "!" } });
+          expect(yield* observation.pollSignal).toBeUndefined();
+          // A provider may pause before filling the next wire chunk. The
+          // small append must still become visible without another token.
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => setTimeout(resolve, 150)),
+          );
+          expect(yield* observation.pollSignal).toBe("progress");
+          for (let index = 0; index < 40; index++)
+            yield* progress.update({
+              ...updated,
+              event: {
+                type: "text_delta",
+                contentIndex: 0,
+                delta: "🌱".repeat(1024),
+                partial,
+              },
+            });
+          const tail = readProcessProgress(fixture.owner, accepted.sessionId);
+          expect(tail?.textTruncated).toBe(true);
+          expect(
+            new TextEncoder().encode(tail?.text).byteLength,
+          ).toBeLessThanOrEqual(65_536);
+          expect(tail?.textOffset).toBeGreaterThan(0);
+          expect(
+            readProcessProgressDelta(
+              fixture.owner,
+              accepted.sessionId,
+              accepted.commandId,
+              position,
+            ),
+          ).toBeUndefined();
           expect(fixture.ownerWrites()).toBe(writesBefore);
         }),
       ),

@@ -69,7 +69,9 @@ async function openAgent(responses: readonly (() => Promise<Reply>)[]) {
   };
 }
 
-it("the owner issues the queued command id while another conversation runs", async () => {
+it("the owner issues the queued command id and current blocker title", async ({
+  onTestFinished,
+}) => {
   const first = gatedReply("first reply");
   const host = await openAgent([
     first.respond,
@@ -77,6 +79,10 @@ it("the owner issues the queued command id while another conversation runs", asy
   ]);
   let running: Promise<void> | undefined;
   try {
+    await host.agent.session("conversation-a").command({
+      type: "title",
+      title: "Lanes tick",
+    });
     const firstCommand = await host.agent
       .session("conversation-a")
       .send("first", {
@@ -92,6 +98,7 @@ it("the owner issues the queued command id while another conversation runs", asy
 
     const waitingSession = host.agent.session("conversation-b");
     const watch = await waitingSession.watch();
+    onTestFinished(() => watch.close());
     const waiting = watch.snapshot;
     expect(waiting.activity.queue).toEqual({
       state: "queued",
@@ -100,12 +107,30 @@ it("the owner issues the queued command id while another conversation runs", asy
         kind: "session",
         sessionId: "conversation-a",
         commandId: firstCommand.commandId,
+        title: "Lanes tick",
       },
     });
     // The conversation that is actually running is not the waiting one.
     expect(
       (await host.agent.session("conversation-a").read()).activity.queue.state,
     ).toBe("running");
+    await host.agent.session("conversation-a").command({
+      type: "title",
+      title: "Release check",
+    });
+    await expect(
+      watch.changes[Symbol.asyncIterator]().next(),
+    ).resolves.toMatchObject({
+      value: {
+        kind: "activity",
+        activity: {
+          queue: {
+            state: "queued",
+            runningWork: { kind: "session", title: "Release check" },
+          },
+        },
+      },
+    });
     await watch.close();
   } finally {
     first.release();
@@ -342,6 +367,7 @@ it("publishes the executor identity to a queued Session when another Session sta
               kind: "session",
               sessionId: "conversation-a",
               commandId: a.commandId,
+              title: "first",
             },
           },
         },

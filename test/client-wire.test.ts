@@ -10,6 +10,7 @@ import {
   parseSessionSnapshot,
   parseSessionFrame,
   parseSessionSummaryPage,
+  appendSessionProgress,
 } from "../src/client.js";
 import {
   emptyMessageSnapshotArbitrary,
@@ -17,6 +18,97 @@ import {
   runningActivity,
   sessionSnapshot,
 } from "./fixtures/client.fixture.js";
+
+it("accepts only offset/append progress frames, never cumulative text", () => {
+  const frame = {
+    kind: "progress",
+    activity: runningActivity,
+    progress: {
+      messageId: "reply",
+      revision: 1,
+      text: { offset: 0, append: "hello" },
+      thinking: { offset: 0, append: "" },
+    },
+  };
+  expect(parseSessionFrame(JSON.stringify(frame))).toEqual(frame);
+  expect(() =>
+    parseSessionFrame(
+      JSON.stringify({
+        ...frame,
+        progress: {
+          messageId: "reply",
+          revision: 1,
+          text: "hello",
+          thinking: "",
+          textTruncated: false,
+          thinkingTruncated: false,
+          textOffset: 0,
+          thinkingOffset: 0,
+        },
+      }),
+    ),
+  ).toThrow();
+  for (const offset of [-1, 0.5])
+    expect(() =>
+      parseSessionFrame(
+        JSON.stringify({
+          ...frame,
+          progress: { ...frame.progress, text: { offset, append: "hello" } },
+        }),
+      ),
+    ).toThrow();
+});
+
+it("appends progress once across overlaps, gaps and a truncated baseline", () => {
+  const initial = {
+    messageId: "reply",
+    revision: 1,
+    text: { offset: 0, append: "hel" },
+    thinking: { offset: 0, append: "hmm" },
+  };
+  const first = appendSessionProgress(null, initial);
+  expect(first?.text).toBe("hel");
+  expect(appendSessionProgress(first, initial)).toBe(first);
+  const next = appendSessionProgress(first, {
+    ...initial,
+    revision: 2,
+    text: { offset: 3, append: "lo" },
+    thinking: { offset: 3, append: "!" },
+  });
+  expect(next).toMatchObject({ text: "hello", thinking: "hmm!" });
+  expect(
+    appendSessionProgress(next, {
+      ...initial,
+      revision: 3,
+      text: { offset: 8, append: "gap" },
+    }),
+  ).toBe(next);
+  expect(
+    appendSessionProgress(next, {
+      ...initial,
+      revision: 3,
+      text: { offset: 3, append: "lo!" },
+    }),
+  ).toMatchObject({ text: "hello!", thinking: "hmm!" });
+  const tail = {
+    messageId: "reply",
+    revision: 5,
+    text: "tail",
+    textOffset: 100,
+    thinking: "",
+    thinkingOffset: 0,
+    textTruncated: true,
+    thinkingTruncated: false,
+  };
+  expect(
+    appendSessionProgress(tail, {
+      ...initial,
+      revision: 6,
+      text: { offset: 104, append: "!" },
+      thinking: { offset: 0, append: "" },
+    }),
+  ).toMatchObject({ text: "tail!", textOffset: 100, textTruncated: true });
+});
 
 it("decodes an activity-only Session frame", () => {
   const frame = { kind: "activity", activity: runningActivity };
@@ -197,7 +289,13 @@ it("requires the owner-issued id on a queued activity", () => {
   ).toEqual({ state: "queued", commandId: "command-1", runningWork: null });
   expect(() => parseSessionSnapshot(snapshot({ state: "queued" }))).toThrow();
   for (const runningWork of [
-    { kind: "session", sessionId: "a", commandId: "running" },
+    {
+      kind: "session",
+      sessionId: "a",
+      commandId: "running",
+      title: "Lanes tick",
+    },
+    { kind: "session", sessionId: "a", commandId: "running", title: "" },
     { kind: "host", lane: "delivery", jobId: "mail-1" },
   ]) {
     const queue = { state: "queued", commandId: "command-1", runningWork };
@@ -211,7 +309,16 @@ it("requires the owner-issued id on a queued activity", () => {
       snapshot({
         state: "queued",
         commandId: "command-1",
-        runningWork: { kind: "session", sessionId: "a" },
+        runningWork: { kind: "session", sessionId: "a", title: "" },
+      }),
+    ),
+  ).toThrow();
+  expect(() =>
+    parseSessionSnapshot(
+      snapshot({
+        state: "queued",
+        commandId: "command-1",
+        runningWork: { kind: "session", sessionId: "a", commandId: "running" },
       }),
     ),
   ).toThrow();

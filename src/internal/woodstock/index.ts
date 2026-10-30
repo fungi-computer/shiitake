@@ -36,6 +36,7 @@ import {
   type ClientReplayPage,
 } from "./client-projection.js";
 import { sessionIds } from "./identities.js";
+import { decodeWoodstockCursor } from "./cursor.js";
 import { openProgress, openToolProgress } from "./progress.js";
 import {
   encodeStoredSessionEntry,
@@ -74,6 +75,7 @@ import {
   createStoredSessionWithinTransaction,
   deleteStoredSession,
   appendOperatorEntry,
+  withSessionRead,
 } from "./session-store.js";
 import {
   readSessionInboxPage,
@@ -424,22 +426,29 @@ export function readSettlementDiagnostic(
 }
 
 /** Read one bounded public Session snapshot. */
-export function readSession(
+export function readSession<A>(
   owner: SqliteOwner,
   sessionId: string,
-  activity: ObservedActivity,
-  input?: ReadOptions,
-  projectExtensions: () => SessionExtensionSlots = () => ({}),
-): Effect.Effect<SessionSnapshot, ShiitakeError> {
-  return storeEffect(() =>
-    readClientSnapshot(
+  activity: () => ObservedActivity,
+  input: ReadOptions | undefined,
+  projectExtensions: () => SessionExtensionSlots,
+  complete: (snapshot: SessionSnapshot) => A,
+): Effect.Effect<A, ShiitakeError> {
+  return storeEffect(() => {
+    const id = decodeClientSessionId(sessionId);
+    const options = decodeClientReadOptions(input);
+    return withSessionRead(
       owner,
-      decodeClientSessionId(sessionId),
-      decodeClientReadOptions(input),
-      activity,
-      projectExtensions,
-    ),
-  );
+      id,
+      () =>
+        complete(
+          readClientSnapshot(owner, id, options, activity(), projectExtensions),
+        ),
+      options.before === undefined
+        ? undefined
+        : decodeWoodstockCursor(options.before)?.sequence,
+    );
+  });
 }
 
 /** Read one bounded folder-resume summary through Woodstock's Effect boundary. */
@@ -548,27 +557,33 @@ export function readStoredSessionAttention(
   return storeEffect(() => readSessionAttention(owner, sessionId));
 }
 
-/** Read one strict-after page from Woodstock's selected lineage. */
-export function readSessionReplayPage(
+/** Read and complete one strict-after page in the same Session transaction. */
+export function readSessionReplayPage<A>(
   owner: SqliteOwner,
   sessionId: string,
   after: string | undefined,
   delivery: "replay" | "live",
   activity: ObservedActivity,
-  projectExtensions: () => SessionExtensionSlots = () => ({}),
-  includeSandboxFailures = false,
-): Effect.Effect<ClientReplayPage, ShiitakeError> {
-  return storeEffect(() =>
-    readClientReplayPage(
-      owner,
-      decodeClientSessionId(sessionId),
-      after,
-      delivery,
-      activity,
-      projectExtensions,
-      includeSandboxFailures,
-    ),
-  );
+  projectExtensions: () => SessionExtensionSlots,
+  includeSandboxFailures: boolean,
+  complete: (page: ClientReplayPage) => A,
+): Effect.Effect<A, ShiitakeError> {
+  return storeEffect(() => {
+    const id = decodeClientSessionId(sessionId);
+    return withSessionRead(owner, id, () =>
+      complete(
+        readClientReplayPage(
+          owner,
+          id,
+          after,
+          delivery,
+          activity,
+          projectExtensions,
+          includeSandboxFailures,
+        ),
+      ),
+    );
+  });
 }
 
 function sameEntry(left: StoredSessionEntry, right: StoredSessionEntry) {

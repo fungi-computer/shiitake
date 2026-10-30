@@ -24,9 +24,9 @@ import {
   withdrawSessionRequestOwned,
   assertSessionRequestNotWithdrawn,
   hasStoredSession,
+  hasRecordedRunTerminal,
   readWorkSender,
   recordWorkSender,
-  recordSessionDelegator,
   type AdmissionOrigin,
   type EnqueueAcceptedWork,
   type RunContract,
@@ -62,7 +62,7 @@ export type AdmitRequest = Readonly<{
    * host passes it, after checking the reply against the mail it sent.
    */
   reply?: VerifiedAgentReply;
-  /** Synchronous owner-local side effect committed with a mail admission. */
+  /** Synchronous owner-local side effect on first admission, in its transaction. */
   onAccepted?: (sessionId: string, commandId: string) => void;
   /**
    * New work that continues earlier work in this Session (for example, the
@@ -282,7 +282,8 @@ export function openAdmissionDoor(
       command.type === "prompt" &&
       command.delivery === "steer" &&
       head.state === "running" &&
-      !head.cancellationRequested
+      !head.cancellationRequested &&
+      !hasRecordedRunTerminal(input.owner, sessionId, head.jobId)
         ? head.jobId
         : undefined;
     const accepted = acceptSessionCommandOwned(
@@ -310,8 +311,11 @@ export function openAdmissionDoor(
           sender,
         );
     }
-    recordSessionDelegator(input.owner, sessionId, request.mail);
-    request.onAccepted?.(sessionId, accepted.accepted.commandId);
+    // The mail notice is staged in the same transaction as the first command.
+    // Replaying that admission must not stage a new notice with a different
+    // createdAt under the original Post key.
+    if (accepted.delivery === "new")
+      request.onAccepted?.(sessionId, accepted.accepted.commandId);
     touched.set(
       sessionId,
       (touched.get(sessionId) ?? false) || accepted.delivery === "new",

@@ -225,6 +225,7 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
         kind: "session",
         sessionId: "Agent-A",
         commandId: running.commandId,
+        title: "Hold",
       },
     };
     expect((await waiting.read()).activity.queue).toEqual(expected);

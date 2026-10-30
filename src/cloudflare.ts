@@ -188,6 +188,11 @@ export type CloudflareShiitakeOptions = Readonly<{
    * refuses for storage pressure. The budget and thresholds are the host's.
    */
   storagePressure?: StoragePressureCheck;
+  /** Host-owned synchronous check at the single new-work admission door. */
+  admission?: Readonly<{
+    /** Check the host's current flag synchronously inside admission's transaction. */
+    assertOpen: () => void;
+  }>;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
   /** The host's explicit extension roster and grants; there is no default. */
@@ -530,6 +535,8 @@ function effectOptions(
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
   if (options.storagePressure !== undefined)
     Object.assign(base, { storagePressure: options.storagePressure });
+  if (options.admission !== undefined)
+    Object.assign(base, { admission: options.admission });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
   return tools === undefined ? base : { ...base, tools };
@@ -538,6 +545,20 @@ function effectOptions(
 /** Cloudflare host lifecycle; alarm forwarding stays outside the neutral client. */
 export type CloudflareShiitake = ShiitakeOwnerAgent &
   Readonly<{
+    /** Read durable queued/running Session or unresolved delegated work in the
+     * host's SQLite transaction, immediately before changing archived state.
+     * A confirmed remote settlement must be recorded locally first; unavailable
+     * remote settlement remains busy, not idle. Never use an in-memory counter.
+     */
+    busySync: () =>
+      | Readonly<{ kind: "session"; sessionId: string; commandId: string }>
+      | Readonly<{
+          kind: "delegation";
+          agentId: string;
+          sessionId: string;
+          commandId: string;
+        }>
+      | undefined;
     /** Exact settled command facts, outside the neutral Session transport. */
     readSettlement: (
       sessionId: string,
@@ -607,7 +628,13 @@ export function makeCloudflareShiitake(
       runShiitakePromise(openRuntimeCore(coreOptions, options.mailRoom)),
     )
     .then(
-      async ({ agent, activeSessions, acceptMail, readSettlement }) => {
+      async ({
+        agent,
+        activeSessions,
+        busySync,
+        acceptMail,
+        readSettlement,
+      }) => {
         const handle = toPromiseOwner(agent);
         try {
           await options.initialize?.(handle);
@@ -644,6 +671,7 @@ export function makeCloudflareShiitake(
           },
           alarm: host.alarm,
           activeSessions: () => runShiitakePromise(activeSessions),
+          busySync,
           abortActive: async () => {
             for (const sessionId of await runShiitakePromise(activeSessions))
               await runShiitakePromise(agent.session(sessionId).abort);

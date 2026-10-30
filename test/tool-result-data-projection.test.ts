@@ -50,7 +50,7 @@ it("retains real tool data through persistence, wire, replay and reopen without 
   const meta = { error: "host attribution" };
   const observation = {
     facts: idleActivity,
-    progress: null,
+    readProgress: () => null,
     toolOutput: [],
   };
   try {

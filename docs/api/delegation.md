@@ -34,6 +34,26 @@ new AgentDelegation(deps): AgentDelegation;
 
 #### Methods
 
+##### refreshOutstanding()
+
+```ts
+refreshOutstanding(readSettlement): Promise<void>;
+```
+
+Best-effort remote refresh before an owner-local archive transaction. Confirmed
+settlements are recorded by Shiitake; unreadable targets leave their local
+accepted receipt outstanding for busySync to refuse.
+
+###### Parameters
+
+| Parameter        | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `readSettlement` | (`agentId`, `sessionId`, `commandId`) => `Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`: `string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, `"model"` \| `"provider"` \| `"usage"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly `Readonly`\<\{ `itemId`: `string`; `kind`: `string`; `summary`: `string`; \}\>[]; \}\> \| `undefined`\> |
+
+###### Returns
+
+`Promise`\<`void`\>
+
 ##### settlement()
 
 ```ts
@@ -45,10 +65,16 @@ settlement(
 ): Promise<
   | Readonly<{
   acceptedSender: string | null;
+  delegator: string | null;
   terminal: SessionTerminal;
   content: string;
   usage: readonly Pick<AssistantMessage, "model" | "provider" | "usage">[];
   toolCalls: number;
+  waitingOnYou: readonly Readonly<{
+     itemId: string;
+     kind: string;
+     summary: string;
+  }>[];
 }>
 | undefined>;
 ```
@@ -66,10 +92,12 @@ Recipient-local disclosure through the public host, never another Agent's RPC.
 
 ###### Returns
 
-`Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `terminal`:
-[`SessionTerminal`](client.md#sessionterminal); `content`: `string`; `usage`:
-readonly `Pick`\<`AssistantMessage`, `"model"` \| `"provider"` \| `"usage"`\>[];
-`toolCalls`: `number`; \}\> \| `undefined`\>
+`Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
+`string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
+`content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, `"model"` \|
+`"provider"` \| `"usage"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
+`Readonly`\<\{ `itemId`: `string`; `kind`: `string`; `summary`: `string`;
+\}\>[]; \}\> \| `undefined`\>
 
 ##### send()
 
@@ -82,8 +110,8 @@ send(
 ): Promise<DelegationReceipt>;
 ```
 
-Delegate work to an in-scope Agent: steer its Session, or start fleet
-correspondence.
+Delegate work to an in-scope Agent through fleet correspondence; a steer rides
+the mail.
 
 ###### Parameters
 
@@ -366,6 +394,7 @@ function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress,
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
+     waitingOnYou?: readonly object[];
    }
      | {
      outcome: "accepted";
@@ -416,6 +445,7 @@ function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress,
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
+     waitingOnYou?: readonly object[];
    }
      | {
      outcome: "accepted";
@@ -466,6 +496,7 @@ function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress,
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
+     waitingOnYou?: readonly object[];
    }
      | {
      outcome: "accepted";
@@ -516,6 +547,7 @@ function agentMailRoute(namespace, replySettlement): PostRoute<AgentMailAddress,
      commandId: string;
      outcome: "completed" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
      diagnostic?: string;
+     waitingOnYou?: readonly object[];
    }
      | {
      outcome: "accepted";
@@ -595,7 +627,33 @@ retries.
 `PostRoute`\<`AgentMailAddress`, \| \{ `from`: \{ `kind`: `"agent"`; `agentId`:
 `string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`: `string`;
 `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \|
-`"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{ `outcome`: `"accepted"`;
+`"outcome_unknown"`; `diagnostic?`: `string`; `waitingOnYou?`: readonly
+`object`[]; \} \| \{ `outcome`: `"accepted"`; `commandId`: `string`; \} \| \{
+`outcome`: `"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`;
+`to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
+`replyTo`: readonly `object`[]; `content`: `string`; `createdAt`: `number`;
+`meta?`: Json \| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`:
+`"hub"`; \}; `reply`: \{ `outcome`: `"undeliverable"`; `reason`:
+`"recipient_offline"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`;
+`agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[];
+`content`: `string`; `createdAt`: `number`; `meta?`: Json \| undefined; \}, \|
+\{ `from`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId`: `string`; \};
+`reply?`: \| \{ `commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \|
+`"cancelled"` \| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`:
+`string`; `waitingOnYou?`: readonly `object`[]; \} \| \{ `outcome`:
+`"accepted"`; `commandId`: `string`; \} \| \{ `outcome`: `"undeliverable"`;
+`reason`: `"recipient_left"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`;
+`agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[];
+`content`: `string`; `createdAt`: `number`; `meta?`: Json \| undefined; \} \| \{
+`from`: \{ `kind`: `"system"`; `systemId`: `"hub"`; \}; `reply`: \{ `outcome`:
+`"undeliverable"`; `reason`: `"recipient_offline"`; \}; `key`: `string`; `to`:
+\{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
+`replyTo`: readonly `object`[]; `content`: `string`; `createdAt`: `number`;
+`meta?`: Json \| undefined; \}, `AgentMailAddress`, \| \{ `from`: \{ `kind`:
+`"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `reply?`: \| \{
+`commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"`
+\| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`;
+`waitingOnYou?`: readonly `object`[]; \} \| \{ `outcome`: `"accepted"`;
 `commandId`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
 `"recipient_left"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`:
 `string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[]; `content`:
@@ -607,50 +665,26 @@ retries.
 `meta?`: Json \| undefined; \}, \| \{ `from`: \{ `kind`: `"agent"`; `agentId`:
 `string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`: `string`;
 `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \| `"interrupted"` \|
-`"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{ `outcome`: `"accepted"`;
-`commandId`: `string`; \} \| \{ `outcome`: `"undeliverable"`; `reason`:
-`"recipient_left"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`:
-`string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[]; `content`:
-`string`; `createdAt`: `number`; `meta?`: Json \| undefined; \} \| \{ `from`: \{
-`kind`: `"system"`; `systemId`: `"hub"`; \}; `reply`: \{ `outcome`:
-`"undeliverable"`; `reason`: `"recipient_offline"`; \}; `key`: `string`; `to`:
-\{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
+`"outcome_unknown"`; `diagnostic?`: `string`; `waitingOnYou?`: readonly
+`object`[]; \} \| \{ `outcome`: `"accepted"`; `commandId`: `string`; \} \| \{
+`outcome`: `"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`;
+`to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \};
 `replyTo`: readonly `object`[]; `content`: `string`; `createdAt`: `number`;
-`meta?`: Json \| undefined; \}, `AgentMailAddress`, \| \{ `from`: \{ `kind`:
-`"agent"`; `agentId`: `string`; `sessionId`: `string`; \}; `reply?`: \| \{
-`commandId`: `string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"`
-\| `"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{
-`outcome`: `"accepted"`; `commandId`: `string`; \} \| \{ `outcome`:
-`"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`; `to`: \{
-`kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`:
-readonly `object`[]; `content`: `string`; `createdAt`: `number`; `meta?`: Json
-\| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`: `"hub"`; \};
-`reply`: \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`; \};
-`key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`:
-`string`; \}; `replyTo`: readonly `object`[]; `content`: `string`; `createdAt`:
-`number`; `meta?`: Json \| undefined; \}, \| \{ `from`: \{ `kind`: `"agent"`;
-`agentId`: `string`; `sessionId`: `string`; \}; `reply?`: \| \{ `commandId`:
-`string`; `outcome`: `"completed"` \| `"failed"` \| `"cancelled"` \|
-`"interrupted"` \| `"outcome_unknown"`; `diagnostic?`: `string`; \} \| \{
-`outcome`: `"accepted"`; `commandId`: `string`; \} \| \{ `outcome`:
-`"undeliverable"`; `reason`: `"recipient_left"`; \}; `key`: `string`; `to`: \{
-`kind`: `"agent"`; `agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`:
-readonly `object`[]; `content`: `string`; `createdAt`: `number`; `meta?`: Json
-\| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`: `"hub"`; \};
-`reply`: \{ `outcome`: `"undeliverable"`; `reason`: `"recipient_offline"`; \};
-`key`: `string`; `to`: \{ `kind`: `"agent"`; `agentId`: `string`; `sessionId?`:
-`string`; \}; `replyTo`: readonly `object`[]; `content`: `string`; `createdAt`:
-`number`; `meta?`: Json \| undefined; \}\> & `Omit`\<`Readonly`\<\{
-`addressKind`: `string`; `deadlineMs?`: `number`; `address`: `Codec`\<`unknown`,
-`unknown`\>; `event`: `Codec`\<`unknown`, `unknown`\>; `encodeEnvelope`:
-(`envelope`) => `object`; `parseDelivery`: (`envelope`) => `object`;
-`prepareEnvelope?`: (`envelope`, `signal`) => `Promise`\<\{ `key`: `string`;
-`kind`: `string`; `address`: `unknown`; `event`: `unknown`; \}\>;
-`recordDelivered?`: (`envelope`) => `void`; `nameOf`: (`envelope`) => `string`;
-`namespace`: `Readonly`\<\{ `getByName`: (`name`) => `Readonly`\<\{ `deliver`:
-(`envelope`) => `Promise`\<...\>; \}\>; \}\>; `recordCursor?`: (`envelope`,
-`cursor`) => `void`; `recordRefused?`: (`envelope`) => `void`; \}\>, `"event"`
-\| `"address"`\>
+`meta?`: Json \| undefined; \} \| \{ `from`: \{ `kind`: `"system"`; `systemId`:
+`"hub"`; \}; `reply`: \{ `outcome`: `"undeliverable"`; `reason`:
+`"recipient_offline"`; \}; `key`: `string`; `to`: \{ `kind`: `"agent"`;
+`agentId`: `string`; `sessionId?`: `string`; \}; `replyTo`: readonly `object`[];
+`content`: `string`; `createdAt`: `number`; `meta?`: Json \| undefined; \}\> &
+`Omit`\<`Readonly`\<\{ `addressKind`: `string`; `deadlineMs?`: `number`;
+`address`: `Codec`\<`unknown`, `unknown`\>; `event`: `Codec`\<`unknown`,
+`unknown`\>; `encodeEnvelope`: (`envelope`) => `object`; `parseDelivery`:
+(`envelope`) => `object`; `prepareEnvelope?`: (`envelope`, `signal`) =>
+`Promise`\<\{ `key`: `string`; `kind`: `string`; `address`: `unknown`; `event`:
+`unknown`; \}\>; `recordDelivered?`: (`envelope`) => `void`; `nameOf`:
+(`envelope`) => `string`; `namespace`: `Readonly`\<\{ `getByName`: (`name`) =>
+`Readonly`\<\{ `deliver`: (`envelope`) => `Promise`\<...\>; \}\>; \}\>;
+`recordCursor?`: (`envelope`, `cursor`) => `void`; `recordRefused?`:
+(`envelope`) => `void`; \}\>, `"event"` \| `"address"`\>
 
 ---
 

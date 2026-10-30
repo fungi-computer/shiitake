@@ -290,21 +290,51 @@ async function sseReader(
   id: string,
   mode: "tui" | "extra" | "slow",
 ) {
-  let slowServerBytes = 0;
-  const countSlowFrame =
-    mode === "slow"
-      ? (frame: SessionFrame) => {
-          // Mirror the Hono frame event at the producer boundary: the slow
-          // reader's pulled bytes alone omit the server's queued serialization.
-          const id =
-            frame.kind === "update" || frame.kind === "reset"
-              ? `\nid: ${frame.cursor ?? ""}`
-              : "";
-          slowServerBytes += encoder.encode(
-            `event: frame\ndata: ${JSON.stringify(frame)}${id}\n\n`,
-          ).byteLength;
-        }
-      : undefined;
+  let serverBytes = 0;
+  let progressFrames = 0;
+  let progressUnits = 0;
+  let resetBytes = 0;
+  let position = { messageId: "", text: 0, thinking: 0 };
+  let resolveTerminal: () => void = () => undefined;
+  const terminal = new Promise<void>((resolve) => {
+    resolveTerminal = resolve;
+  });
+  const countFrame = (frame: SessionFrame) => {
+    // Mirror Hono at the producer boundary, including queued bytes.
+    // Drained bytes alone can omit the final serialized completion.
+    const id =
+      frame.kind === "update" || frame.kind === "reset"
+        ? `\nid: ${frame.cursor ?? ""}`
+        : "";
+    const serializedBytes = encoder.encode(
+      `event: frame\ndata: ${JSON.stringify(frame)}${id}\n\n`,
+    ).byteLength;
+    serverBytes += serializedBytes;
+    if (frame.kind === "reset")
+      resetBytes = Math.max(resetBytes, serializedBytes);
+    if (frame.kind === "reset" && frame.baseline.progress !== null) {
+      const progress = frame.baseline.progress;
+      position = {
+        messageId: progress.messageId,
+        text: progress.textOffset + progress.text.length,
+        thinking: progress.thinkingOffset + progress.thinking.length,
+      };
+    }
+    if (frame.kind === "progress") {
+      const progress = frame.progress;
+      if (position.messageId !== progress.messageId)
+        position = { messageId: progress.messageId, text: 0, thinking: 0 };
+      expect(progress.text.offset).toBe(position.text);
+      expect(progress.thinking.offset).toBe(position.thinking);
+      position.text += progress.text.append.length;
+      position.thinking += progress.thinking.append.length;
+      progressUnits +=
+        progress.text.append.length + progress.thinking.append.length;
+      progressFrames++;
+    }
+    if (frame.kind === "update" && frame.terminals.length > 0)
+      resolveTerminal();
+  };
   const cursor =
     mode === "tui"
       ? null
@@ -313,7 +343,7 @@ async function sseReader(
     mode === "tui"
       ? "limit=200"
       : `mode=subscribe${cursor === null ? "" : `&after=${encodeURIComponent(cursor)}`}`;
-  const response: Response = await routes(host, countSlowFrame).request(
+  const response: Response = await routes(host, countFrame).request(
     `http://shiitake.test/sessions/${id}/events?${query}`,
   );
   if (response.body === null) throw new Error("SSE body missing");
@@ -374,7 +404,13 @@ async function sseReader(
   })();
   return {
     bytes: () => bytes,
-    serializedBytes: () => (mode === "slow" ? slowServerBytes : bytes),
+    // Initial reads belong to setup, not the per-reply streaming window.
+    // Reset baselines produced during the reply remain in serverBytes.
+    serializedBytes: () => serverBytes,
+    largestSnapshotBytes: () => Math.max(snapshotBytes, resetBytes),
+    progressFrames: () => progressFrames,
+    progressUnits: () => progressUnits,
+    terminal,
     snapshotBytes: () => snapshotBytes,
     resetSeen: () => resetSeen,
     close: async () => {
@@ -415,6 +451,7 @@ type Command = Readonly<{ index: number; commandId: string }>;
 async function emitToolTails(
   agent: LoadAgent,
   command: Command,
+  untilSettled: Promise<unknown>,
 ): Promise<number> {
   const accepted = {
     sessionId: `s${String(command.index)}`,
@@ -463,6 +500,10 @@ async function emitToolTails(
             () => new Promise<void>((resolve) => setImmediate(resolve)),
           );
         }
+        // Like the real Mule recorder, this synthetic tool observer shares
+        // the run's lifetime. Closing its scope after 20 updates can delete
+        // the shared progress owner while the model is still streaming.
+        yield* Effect.promise(() => untilSettled);
       }),
     ),
   );
@@ -736,40 +777,46 @@ it(
   "S4: producer CPU scales linearly with reply length",
   { timeout: 1_200_000 },
   async () => {
-    const samples: { small: number; large: number }[] = [];
-    for (let trial = 0; trial < 1; trial++) {
-      const cpu = async (length: number) => {
-        const agent = await makeAgent(
-          "warm",
-          fauxAssistantMessage(fauxText("x".repeat(length))),
-          0,
-          true,
-        );
+    const cpu = async (length: number) => {
+      const agent = await makeAgent(
+        "warm",
+        fauxAssistantMessage(fauxText("x".repeat(length))),
+        0,
+        true,
+      );
+      try {
+        // Drain the actual HTTP SSE path, including serialization. A probe
+        // without a reader can falsely pass while doing no fan-out work.
+        const reader = await sseReader(agent.host, "cpu", "tui");
         try {
-          // Serialize the whole-text progress frames over the actual HTTP SSE
-          // path; without a draining reader this measures only string growth.
-          const reader = await sseReader(agent.host, "cpu", "tui");
-          try {
-            const started = process.cpuUsage();
-            await agent.host.agent.session("cpu").send(`cpu-${String(length)}`);
-            await agent.host.settle("cpu");
-            const elapsed = process.cpuUsage(started);
-            return (elapsed.user + elapsed.system) / 1000;
-          } finally {
-            await reader.close();
-          }
+          const started = process.cpuUsage();
+          await agent.host.agent.session("cpu").send(`cpu-${String(length)}`);
+          await agent.host.settle("cpu");
+          await reader.terminal;
+          const elapsed = process.cpuUsage(started);
+          return (elapsed.user + elapsed.system) / 1000;
         } finally {
-          await agent.close();
+          await reader.close();
         }
-      };
-      samples.push({ small: await cpu(250_000), large: await cpu(500_000) });
-    }
-    const small = samples[0]?.small;
-    const large = samples[0]?.large;
-    if (small === undefined || large === undefined)
-      throw new Error("Missing producer CPU sample");
+      } finally {
+        await agent.close();
+      }
+    };
+    // Warm the real owner/SSE path before measuring. Remove the fixed turn
+    // cost as well, so setup cannot conceal superlinear append processing.
+    const warmup = await cpu(250_000);
+    const baseline = await cpu(0);
+    const raw = { small: await cpu(250_000), large: await cpu(500_000) };
+    const small = raw.small - baseline;
+    const large = raw.large - baseline;
     process.stderr.write(
-      `LIVE_UPDATES_S4_CPU ${JSON.stringify({ samples, ratioToLinear: large / (2 * small) })}\n`,
+      `LIVE_UPDATES_S4_CPU ${JSON.stringify({ warmup, baseline, raw, small, large, ratioToLinear: large / (2 * small) })}\n`,
+    );
+    expect(small, "250 KB exceeds the zero-length fixed cost").toBeGreaterThan(
+      0,
+    );
+    expect(large, "500 KB exceeds the zero-length fixed cost").toBeGreaterThan(
+      0,
     );
     expect
       .soft(large, "S4: 500 KB producer CPU vs 250 KB")
@@ -779,6 +826,8 @@ it(
 
 type Metrics = {
   turnMs: number;
+  progressFrames: number;
+  progressUnits: number;
   p99Ms: number;
   maxLagMs: number;
   histogramMaxLagMs: number;
@@ -795,6 +844,7 @@ type Metrics = {
   initialRss: number;
   bytesSerialized: number;
   snapshotBytes: number;
+  largestSnapshotBytes: number;
   slowClientBytes: number;
   slowClientReset: boolean;
   sseWatchers: number;
@@ -962,11 +1012,6 @@ async function measure(
       lastLagTick = now;
     }, 5);
     const start = performance.now();
-    const toolUpdates = agents.slice(1, 6).map((agent, index) => {
-      const command = commands[index];
-      if (command === undefined) throw new Error("missing tool command");
-      return emitToolTails(agent, command);
-    });
     let terminalCount = 0;
     let releaseReads: () => void = () => undefined;
     const readsAllowed = new Promise<void>((resolve) => {
@@ -998,6 +1043,11 @@ async function measure(
         }),
       ),
     );
+    const toolUpdates = agents.slice(1, 6).map((agent, index) => {
+      const command = commands[index];
+      if (command === undefined) throw new Error("missing tool command");
+      return emitToolTails(agent, command, settledPromise);
+    });
     const [settled, emitted] = await Promise.all([
       settledPromise,
       Promise.all(toolUpdates),
@@ -1005,12 +1055,37 @@ async function measure(
     expect(settled).toHaveLength(8);
     expect(emitted).toEqual([20, 20, 20, 20, 20]);
     if (waits !== undefined) await waits.finish();
+    if (watched) {
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.all(readers.slice(1, 5).map((reader) => reader.terminal)),
+          new Promise<never>((_, reject) => {
+            deadline = setTimeout(() => {
+              reject(
+                new Error("Healthy SSE readers did not receive completion"),
+              );
+            }, 10_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(deadline);
+      }
+    }
     finished = true;
     if (streamingMs === 0)
       throw new Error("Five replies did not finish streaming");
     const now = process.memoryUsage();
     return {
       turnMs,
+      progressFrames: readers.reduce(
+        (sum, reader) => sum + reader.progressFrames(),
+        0,
+      ),
+      progressUnits: readers.reduce(
+        (sum, reader) => sum + reader.progressUnits(),
+        0,
+      ),
       p99Ms,
       maxLagMs: Math.max(histogramMaxLagMs, sampledMaxLagMs),
       histogramMaxLagMs,
@@ -1032,6 +1107,10 @@ async function measure(
       snapshotBytes: readers.reduce(
         (sum, reader) => sum + reader.snapshotBytes(),
         0,
+      ),
+      largestSnapshotBytes: Math.max(
+        0,
+        ...readers.map((reader) => reader.largestSnapshotBytes()),
       ),
       slowClientBytes: readers[5]?.bytes() ?? 0,
       slowClientReset: readers[5]?.resetSeen() ?? false,
@@ -1121,6 +1200,34 @@ async function seededAgents() {
   });
   return { agents, history };
 }
+
+it(
+  "S4: serialized bytes stay within the reply budget on the S0 workload",
+  { timeout: 1_200_000 },
+  async () => {
+    const observed = await seededAgents();
+    try {
+      const busy = await measure(observed.agents, true, 0);
+      // Permit one baseline, not the sum of all three initial TUI snapshots.
+      const budget =
+        2 * (thinkingChars + textChars) * 5 + busy.largestSnapshotBytes;
+      process.stderr.write(
+        `LIVE_UPDATES_S4_BYTES ${JSON.stringify({ history: observed.history, busy, budget })}\n`,
+      );
+      expect(busy.sseWatchers).toBe(6);
+      expect(busy.toolTailUpdates).toBe(100);
+      expect(busy.waitCycles).toBeGreaterThanOrEqual(8);
+      expect(busy.bytesSerialized).toBeGreaterThan(0);
+      expect(busy.progressFrames).toBeGreaterThanOrEqual(5);
+      expect(busy.progressUnits).toBeGreaterThanOrEqual(
+        4 * (thinkingChars + textChars - 4096),
+      );
+      expect(busy.bytesSerialized).toBeLessThanOrEqual(budget);
+    } finally {
+      await Promise.all(observed.agents.map((agent) => agent.close()));
+    }
+  },
+);
 
 it("S0 control guard rejects an empty streaming histogram", () => {
   const histogram = monitorEventLoopDelay({ resolution: 10 });
@@ -1269,7 +1376,7 @@ it(
     expect
       .soft(busy.bytesSerialized, "S4: reply bytes with one bounded snapshot")
       .toBeLessThanOrEqual(
-        2 * (thinkingChars + textChars) * 5 + busy.snapshotBytes,
+        2 * (thinkingChars + textChars) * 5 + busy.largestSnapshotBytes,
       );
     expect
       .soft(busy.streamingMaxLagMs, "S5: streaming max loop lag")

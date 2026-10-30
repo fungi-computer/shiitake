@@ -2,7 +2,10 @@ import { idleActivity as idleFacts } from "./fixtures/client.fixture.js";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 
-import { prepareWoodstockSchema } from "../src/internal/woodstock/index.js";
+import {
+  prepareWoodstockSchema,
+  readSession,
+} from "../src/internal/woodstock/index.js";
 import {
   readClientReplayPage,
   readClientSnapshot,
@@ -24,7 +27,7 @@ const contract = { core: digest, extensions: [] } as const;
 const idleActivity = {
   facts: idleFacts,
   toolOutput: [],
-  progress: null,
+  readProgress: () => null,
 };
 
 const usage = {
@@ -377,9 +380,82 @@ it("resolves compaction markers kept inside the page without walking the lineage
 
     expect(snapshot.compactions).toHaveLength(session.compactions.length);
     expect(snapshot.hasMore).toBe(false);
-    // Exactly the reads one page needs: no lineage lookup per in-page head.
+    // One transaction plus the page's reads: no lineage lookup per in-page head.
     expect(operations).toBe(24);
   } finally {
     fixture.close();
   }
 });
+
+it.each(["direct", "public"] as const)(
+  "%s snapshot reads the whole projection in one owner transaction",
+  (mode) => {
+    const fixture = createNativeSqliteOwnerFixture();
+    let reading = false;
+    let depth = 0;
+    let transactions = 0;
+    const owner: SqliteOwner = {
+      sql: {
+        exec: (statement, ...bindings) => {
+          if (reading) expect(depth).toBe(1);
+          return fixture.owner.sql.exec(statement, ...bindings);
+        },
+      },
+      transactionSync: (operation) => {
+        if (reading) {
+          expect(depth).toBe(0);
+          transactions += 1;
+        }
+        depth += 1;
+        try {
+          return fixture.owner.transactionSync(operation);
+        } finally {
+          depth -= 1;
+        }
+      },
+    };
+    try {
+      Effect.runSync(prepareWoodstockSchema(owner));
+      const history = writeLargeSession(owner, {
+        sessionId: "atomic-compaction-page",
+        turns: 12,
+        compactEvery: 4,
+        keepTurns: 2,
+        textBytes: 16,
+      });
+      const extensions = () => {
+        expect(depth).toBe(1);
+        return {};
+      };
+      reading = true;
+      const page =
+        mode === "direct"
+          ? readClientSnapshot(
+              owner,
+              history.sessionId,
+              { limit: 200 },
+              idleActivity,
+              extensions,
+            )
+          : Effect.runSync(
+              readSession(
+                owner,
+                history.sessionId,
+                () => idleActivity,
+                { limit: 200 },
+                extensions,
+                (snapshot) => {
+                  expect(depth).toBe(1);
+                  return snapshot;
+                },
+              ),
+            );
+      expect(page.messages).toHaveLength(24);
+      expect(page.compactions).toHaveLength(history.compactions.length);
+      expect(transactions).toBe(1);
+      expect(depth).toBe(0);
+    } finally {
+      fixture.close();
+    }
+  },
+);

@@ -118,6 +118,54 @@ it.each([
   },
 );
 
+it("queues a steer instead of attaching it to a run with a recorded terminal", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    prepareSessionStore(fixture.owner);
+    const sessionId = "terminal-before-steer";
+    const parent = admitStoredCommand(
+      fixture.owner,
+      sessionId,
+      prompt("first", "start", "followUp"),
+      { enqueue: () => undefined },
+    );
+    prepareSessionRun(fixture.owner, {
+      sessionId,
+      commandFactId: parent.accepted.commandId,
+    });
+    const run = { kind: "run", value: "first-run" } as const;
+    appendSessionEntry(fixture.owner, {
+      sessionId,
+      id: "first-terminal",
+      entry: {
+        kind: "run_terminal",
+        workId: parent.accepted.commandId,
+        run,
+        terminal: { kind: "terminal", value: "first-terminal-id", parent: run },
+        outcome: "completed",
+      },
+    });
+    const queued: string[] = [];
+    const steer = admitStoredCommand(
+      fixture.owner,
+      sessionId,
+      prompt("next", "change course", "steer"),
+      {
+        enqueue: (work) => queued.push(work.jobId),
+        queueHead: () => ({
+          state: "running",
+          jobId: parent.accepted.commandId,
+          cancellationRequested: false,
+        }),
+      },
+    );
+    expect(queued).toEqual([steer.accepted.commandId]);
+    expect(steer.command.entry).toMatchObject({ delivery: "steer" });
+  } finally {
+    fixture.close();
+  }
+});
+
 it.each(["interrupted", "failed", "cancelled"] as const)(
   "removes a streaming placeholder when its work is %s",
   (outcome) => {
@@ -211,7 +259,10 @@ it.each(["completed", "failed", "cancelled", "interrupted"] as const)(
         },
       );
 
-      const queued: string[] = [];
+      const queued: Readonly<{
+        jobId: string;
+        delivery: "steer" | "followUp";
+      }>[] = [];
       Effect.runSync(
         settleControls(fixture.owner, {
           sessionId: "late-control-session",
@@ -219,11 +270,13 @@ it.each(["completed", "failed", "cancelled", "interrupted"] as const)(
           outcome,
           diagnostic: "safe parent reason belongs to the parent",
           enqueue: (work) => {
-            queued.push(work.jobId);
+            queued.push({ jobId: work.jobId, delivery: work.delivery });
           },
         }),
       );
-      expect(queued).toEqual([late.accepted.commandId]);
+      expect(queued).toEqual([
+        { jobId: late.accepted.commandId, delivery: "steer" },
+      ]);
       const run = prepareSessionRun(fixture.owner, {
         sessionId: "late-control-session",
         commandFactId: late.accepted.commandId,

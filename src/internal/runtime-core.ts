@@ -20,6 +20,7 @@ import {
   coreProtocolDigest,
 } from "./extension-roster.js";
 import { openRuntimeCoordinator } from "./runtime-coordinator.js";
+import type { OwnerBusy } from "./runtime-coordinator.js";
 import {
   readCommandSettlement,
   prepareWoodstockSchema,
@@ -34,6 +35,8 @@ export type RuntimeCore = Readonly<{
   ) => Effect.Effect<CommandSettlement | undefined, ShiitakeError>;
   /** Owner-local execution projection; never served by the remote client. */
   activeSessions: Effect.Effect<readonly string[]>;
+  /** Synchronous archive blocker; the host supplies the enclosing transaction. */
+  busySync: () => OwnerBusy | undefined;
   acceptMail: (
     mail: BirdDogMail,
     meta?: Json,
@@ -86,6 +89,7 @@ export function openRuntimeCore(
           ),
         ),
       activeSessions: runtime.activeSessions,
+      busySync: runtime.busySync,
       acceptMail: (
         mail,
         meta,

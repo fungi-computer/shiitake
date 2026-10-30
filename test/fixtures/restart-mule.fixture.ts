@@ -174,7 +174,7 @@ process.send?.(
     fixture.owner,
     "restart",
     { limit: 200 },
-    { facts: idleActivity, toolOutput: [], progress: null },
+    { facts: idleActivity, toolOutput: [], readProgress: () => null },
   ),
 );
 fixture.close();
