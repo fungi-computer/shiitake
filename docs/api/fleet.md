@@ -28,9 +28,9 @@ new AgentGrantError(reason): AgentGrantError;
 
 ###### Parameters
 
-| Parameter | Type                                                                                  |
-| --------- | ------------------------------------------------------------------------------------- |
-| `reason`  | `"agent"` \| `"expired"` \| `"action"` \| `"delegation_loop"` \| `"delegation_depth"` |
+| Parameter | Type                                                                                                              |
+| --------- | ----------------------------------------------------------------------------------------------------------------- |
+| `reason`  | \| `"agent"` \| `"expired"` \| `"action"` \| `"delegation_loop"` \| `"delegation_depth"` \| `"delegator_missing"` |
 
 ###### Returns
 
@@ -47,7 +47,13 @@ Error.constructor;
 ##### reason
 
 ```ts
-readonly reason: "agent" | "expired" | "action" | "delegation_loop" | "delegation_depth";
+readonly reason:
+  | "agent"
+  | "expired"
+  | "action"
+  | "delegation_loop"
+  | "delegation_depth"
+  | "delegator_missing";
 ```
 
 ---
@@ -554,6 +560,7 @@ const agentDelegationTaskSchema: ZodLazy<
           steer: "steer";
         }>
       >;
+      goal: ZodOptional<ZodUnion<readonly [ZodString, ZodLiteral<false>]>>;
       text: ZodString;
     },
     $strict
@@ -756,6 +763,28 @@ the verified reply retains the failed recipient's identity.
 #### Returns
 
 [`DelegationReplyMeta`](#delegationreplymeta)
+
+---
+
+### isOneWayAncestorNotice()
+
+```ts
+function isOneWayAncestorNotice(mail): boolean;
+```
+
+Shape check for a one-way ancestor notice, not sender provenance. The Local mail
+receiver checks mesh membership before calling it. This addressed mail is still
+work and may steer the parent's running turn when admitted.
+
+#### Parameters
+
+| Parameter | Type          |
+| --------- | ------------- |
+| `mail`    | `BirdDogMail` |
+
+#### Returns
+
+`boolean`
 
 ---
 

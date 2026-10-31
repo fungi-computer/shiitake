@@ -69,7 +69,7 @@ async function openAgent(responses: readonly (() => Promise<Reply>)[]) {
   };
 }
 
-it("the owner issues the queued command id and current blocker title", async ({
+it("the owner issues the queued command id and identity-free occupancy phase", async ({
   onTestFinished,
 }) => {
   const first = gatedReply("first reply");
@@ -83,12 +83,10 @@ it("the owner issues the queued command id and current blocker title", async ({
       type: "title",
       title: "Lanes tick",
     });
-    const firstCommand = await host.agent
-      .session("conversation-a")
-      .send("first", {
-        delivery: "followUp",
-        requestId: "waiting-a",
-      });
+    await host.agent.session("conversation-a").send("first", {
+      delivery: "followUp",
+      requestId: "waiting-a",
+    });
     running = host.drain();
     await first.started;
     const queued = await host.agent.session("conversation-b").send("second", {
@@ -103,12 +101,7 @@ it("the owner issues the queued command id and current blocker title", async ({
     expect(waiting.activity.queue).toEqual({
       state: "queued",
       commandId: queued.commandId,
-      runningWork: {
-        kind: "session",
-        sessionId: "conversation-a",
-        commandId: firstCommand.commandId,
-        title: "Lanes tick",
-      },
+      runningWork: { phase: "thinking" },
     });
     // The conversation that is actually running is not the waiting one.
     expect(
@@ -126,7 +119,7 @@ it("the owner issues the queued command id and current blocker title", async ({
         activity: {
           queue: {
             state: "queued",
-            runningWork: { kind: "session", title: "Release check" },
+            runningWork: { phase: "thinking" },
           },
         },
       },
@@ -332,13 +325,13 @@ it("the second conversation waits for the first and then runs", async () => {
   }
 });
 
-it("publishes the executor identity to a queued Session when another Session starts and settles", async () => {
+it("publishes identity-free occupancy to a queued Session when another Session starts and settles", async () => {
   const first = gatedReply("first reply");
   const host = await openAgent([
     first.respond,
     () => Promise.resolve(fauxAssistantMessage("second reply")),
   ]);
-  const a = await host.agent
+  await host.agent
     .session("conversation-a")
     .send("first", { delivery: "followUp", requestId: "observe-a" });
   const session = host.agent.session("conversation-b");
@@ -363,12 +356,7 @@ it("publishes the executor identity to a queued Session when another Session sta
         activity: {
           queue: {
             state: "queued",
-            runningWork: {
-              kind: "session",
-              sessionId: "conversation-a",
-              commandId: a.commandId,
-              title: "first",
-            },
+            runningWork: { phase: "thinking" },
           },
         },
       },

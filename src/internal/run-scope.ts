@@ -52,9 +52,11 @@ import {
   type RunContract,
 } from "./woodstock/index.js";
 
-// A run writes its terminal before scope release. Give each foreign release
-// one second to clean up without blocking the next Watchdog job indefinitely.
-const runFinalizerGraceMs = 1_000;
+// A run writes its terminal before scope release. Allow one second per foreign
+// release before detaching it: the held-model regression exercises the full
+// grace and proves Watchdog can settle and claim the next priority-1 steer.
+// Keep the test's eventual queue-idle budget tied to this product bound.
+export const runFinalizerGraceMs = 1_000;
 
 function boundedRunFinalizer<E>(
   name: "instructions" | "model" | "tools",

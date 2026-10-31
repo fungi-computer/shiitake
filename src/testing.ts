@@ -24,6 +24,9 @@ import {
   type SqliteOwner,
 } from "./index.js";
 
+/** Product finalizer grace, exposed for tests that wait for durable queue settlement. */
+export { runFinalizerGraceMs } from "./internal/run-scope.js";
+
 const settlementBudgetSchema = z.int().min(1).max(1_000).default(1_000);
 
 /** A deterministic model source for trusted tests; no provider account or I/O. */

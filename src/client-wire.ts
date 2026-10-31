@@ -60,19 +60,15 @@ const SessionActivitySchema: Schema.Codec<SessionActivity> = Schema.Struct({
       state: Schema.Literal("queued"),
       commandId: Schema.NonEmptyString,
       runningWork: Schema.NullOr(
-        Schema.Union([
-          Schema.Struct({
-            kind: Schema.Literal("session"),
-            sessionId: Schema.NonEmptyString,
-            commandId: Schema.NonEmptyString,
-            title: Schema.String,
-          }),
-          Schema.Struct({
-            kind: Schema.Literal("host"),
-            lane: Schema.NonEmptyString,
-            jobId: Schema.NonEmptyString,
-          }),
-        ]),
+        Schema.Struct({
+          phase: Schema.Literals([
+            "thinking",
+            "streaming",
+            "running_tool",
+            "waiting_on_you",
+            "cancelling",
+          ]),
+        }),
       ),
     }),
     Schema.Struct({

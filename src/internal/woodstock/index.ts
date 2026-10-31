@@ -1065,10 +1065,11 @@ export function recordLiveRetryEvent(
   }).pipe(Effect.mapError(listenerFailure));
 }
 
-const listenerFailure = (): MuleError => ({
+const listenerFailure = (cause: ShiitakeError): MuleError => ({
   _tag: "MuleError",
   phase: "listener",
   message: "Woodstock could not record the Mule event",
+  cause,
 });
 
 export type MuleRecorder = (

@@ -288,18 +288,26 @@ it("requires the owner-issued id on a queued activity", () => {
     ).activity.queue,
   ).toEqual({ state: "queued", commandId: "command-1", runningWork: null });
   expect(() => parseSessionSnapshot(snapshot({ state: "queued" }))).toThrow();
-  for (const runningWork of [
-    {
-      kind: "session",
-      sessionId: "a",
-      commandId: "running",
-      title: "Lanes tick",
-    },
-    { kind: "session", sessionId: "a", commandId: "running", title: "" },
-    { kind: "host", lane: "delivery", jobId: "mail-1" },
+  for (const phase of [
+    "thinking",
+    "streaming",
+    "running_tool",
+    "waiting_on_you",
+    "cancelling",
   ]) {
-    const queue = { state: "queued", commandId: "command-1", runningWork };
+    const queue = {
+      state: "queued",
+      commandId: "command-1",
+      runningWork: { phase },
+    };
     expect(parseSessionSnapshot(snapshot(queue)).activity.queue).toEqual(queue);
+    const activityFrame = {
+      kind: "activity",
+      activity: { ...idleActivity, queue },
+    };
+    expect(parseSessionFrame(JSON.stringify(activityFrame))).toEqual(
+      activityFrame,
+    );
   }
   expect(() =>
     parseSessionSnapshot(snapshot({ state: "queued", commandId: "command-1" })),
@@ -322,6 +330,17 @@ it("requires the owner-issued id on a queued activity", () => {
       }),
     ),
   ).toThrow();
+  for (const runningWork of [
+    {},
+    { phase: "unknown" },
+    { phase: "" },
+    { kind: "host", lane: "delivery", jobId: "mail-1" },
+  ])
+    expect(() =>
+      parseSessionSnapshot(
+        snapshot({ state: "queued", commandId: "command-1", runningWork }),
+      ),
+    ).toThrow();
 });
 
 it("parses owner-issued command identities without accepting caller request identities", () => {

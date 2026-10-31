@@ -118,6 +118,20 @@ function deliverObservation(listener: Listener, reason: ObservationHint): void {
   }
 }
 
+/** Queued views reconcile occupancy without replaying another Session's facts. */
+function notifyQueuedViews(
+  listeners: Iterable<Listener>,
+  sourceSessionId: string | null,
+): void {
+  for (const listener of listeners)
+    if (
+      listener.queued &&
+      !listener.settlementOnly &&
+      listener.sessionId !== sourceSessionId
+    )
+      deliverObservation(listener, "activity");
+}
+
 /** Notify observers of one Session's durable or process-local change. */
 export function publishOwnerObservation(
   store: SqliteOwner,
@@ -192,11 +206,12 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
 
   const publish = (publication: OwnerPublication): void => {
     if (publication.kind === "agent-execution") {
-      for (const listener of active)
-        if (listener.queued && !listener.settlementOnly)
-          deliverObservation(listener, "activity");
+      notifyQueuedViews(active, null);
       return;
     }
+    // Reuse bounded activity hints for the occupant's changing phase.
+    if (publication.sessionId !== null && publication.reason !== "settlement")
+      notifyQueuedViews(active, publication.sessionId);
     const listeners =
       publication.sessionId === null
         ? active

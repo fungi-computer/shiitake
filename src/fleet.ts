@@ -570,7 +570,11 @@ const delegationMetadata = z.object({
   delegation: FungiMessageMetaSchema.shape.delegation,
 });
 
-/** An original one-way report can only name an ancestor of its Agent sender. */
+/**
+ * Shape check for a one-way ancestor notice, not sender provenance. The Local
+ * mail receiver checks mesh membership before calling it. This addressed mail
+ * is still work and may steer the parent's running turn when admitted.
+ */
 export function isOneWayAncestorNotice(mail: BirdDogMail): boolean {
   if (
     mail.reply !== undefined ||

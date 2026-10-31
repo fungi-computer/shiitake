@@ -409,22 +409,13 @@ Durable outcome for one accepted work item on the selected Session lineage.
 ### AgentRunningWork
 
 ```ts
-type AgentRunningWork =
-  | Readonly<{
-      kind: "session";
-      sessionId: string;
-      commandId: string;
-      title: string;
-    }>
-  | Readonly<{
-      kind: "host";
-      lane: string;
-      jobId: string;
-    }>;
+type AgentRunningWork = Readonly<{
+  phase:
+    "thinking" | "streaming" | "running_tool" | "waiting_on_you" | "cancelling";
+}>;
 ```
 
-Blocking executor identity and Session display metadata, never messages or
-provider data.
+The occupying work's current phase; never its identity or transcript.
 
 ---
 

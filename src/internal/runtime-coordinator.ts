@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
 
 import type { AgentRunningWork } from "../client.js";
+import { readSessionPhase } from "./session-status.js";
 import { readOutstandingDelegationSync } from "../fleet.js";
 import type { GrantsDelivery } from "./contracts.js";
 import { publishAgentExecutionChange } from "./observation-kernel.js";
@@ -44,7 +45,6 @@ import {
   openStorageAdmission,
   readCursor,
   readSessionInboxPage,
-  readSessionSummary,
   type RecordAcceptedCancellation,
   type RunContract,
   type StorageAdmission,
@@ -108,10 +108,10 @@ export type RuntimeCoordinator = Readonly<{
 
 type CoordinatorLifecycleState = "open" | "closing" | "closed";
 
-/** Executor identity stays live here; display metadata stays with Woodstock. */
+/** Executor identity stays private to the owner; snapshots expose only phase. */
 type ExecutorWork =
-  | Omit<Extract<AgentRunningWork, { kind: "session" }>, "title">
-  | Extract<AgentRunningWork, { kind: "host" }>;
+  | Readonly<{ kind: "session"; sessionId: string; commandId: string }>
+  | Readonly<{ kind: "host"; lane: string; jobId: string }>;
 
 type HostExecutorCell = {
   current:
@@ -512,14 +512,26 @@ export function openRuntimeCoordinator(
                         : "serial",
                     )
                   : undefined;
-              if (work === undefined || work.kind === "host")
-                return Effect.succeed(work ?? null);
-              return readSessionSummary(options.store, work.sessionId).pipe(
-                Effect.map((summary) => ({
-                  ...work,
-                  title: summary?.title ?? "",
-                })),
-              );
+              if (work === undefined) return Effect.succeed(null);
+              if (work.kind === "host")
+                return Effect.succeed({ phase: "thinking" });
+              return Effect.try({
+                try: () => ({
+                  phase: readSessionPhase(
+                    options.store,
+                    work.sessionId,
+                    watchdog.transactional.readQueueHead(work.sessionId),
+                  ),
+                }),
+                catch: (cause) =>
+                  new ShiitakeError(
+                    "runtime",
+                    "rejected",
+                    "Running phase is unavailable",
+                    undefined,
+                    cause,
+                  ),
+              });
             },
           ),
           Effect.mapError(

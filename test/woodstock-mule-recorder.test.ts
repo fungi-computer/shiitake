@@ -2,6 +2,7 @@ import { idleActivity, runningActivity } from "./fixtures/client.fixture.js";
 import type { AssistantMessage, MuleEvent } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
+import { ShiitakeError } from "../src/errors.js";
 
 import { readClientSnapshot } from "../src/internal/woodstock/client-projection.js";
 import {
@@ -26,6 +27,53 @@ const message = {
   value: "recorder-message",
   parent: turn,
 } as const;
+
+it("retains the store rejection behind a failed Mule recording", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    const accepted = admitStoredCommand(
+      fixture.owner,
+      "recorder-failed",
+      {
+        requestId: "recorder-failed-request",
+        delivery: "followUp",
+        type: "prompt",
+        text: "private session content",
+      },
+      { contract, enqueue: () => undefined },
+    ).accepted;
+    const nativeFailure = new Error("SQLITE_BUSY");
+    const owner = {
+      ...fixture.owner,
+      transactionSync: <A>(operation: () => A): A => {
+        void operation;
+        throw nativeFailure;
+      },
+    };
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const record = yield* openMuleRecorder(owner, accepted, contract);
+          return yield* Effect.match(record({ type: "run_start", run }), {
+            onFailure: (error) => error,
+            onSuccess: () => undefined,
+          });
+        }),
+      ),
+    );
+    expect(result).toMatchObject({
+      _tag: "MuleError",
+      phase: "listener",
+      cause: { boundary: "store", cause: "rejected" },
+    });
+    if (!(result?.cause instanceof ShiitakeError))
+      throw new Error("Expected the store failure as the Mule cause");
+    expect(result.cause.underlying).toBe(nativeFailure);
+  } finally {
+    fixture.close();
+  }
+});
 
 function assistant(text: string, stopReason: "pending" | "stop") {
   return {

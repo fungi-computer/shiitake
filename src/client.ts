@@ -210,16 +210,11 @@ export type SessionTerminal = Readonly<{
   meta?: Json;
 }>;
 
-/** Blocking executor identity and Session display metadata, never messages or provider data. */
-export type AgentRunningWork =
-  | Readonly<{
-      kind: "session";
-      sessionId: string;
-      commandId: string;
-      /** Owner-issued display title; empty when no title is known. */
-      title: string;
-    }>
-  | Readonly<{ kind: "host"; lane: string; jobId: string }>;
+/** The occupying work's current phase; never its identity or transcript. */
+export type AgentRunningWork = Readonly<{
+  phase:
+    "thinking" | "streaming" | "running_tool" | "waiting_on_you" | "cancelling";
+}>;
 
 /**
  * Raw facts about what a Session is doing now. Shiitake publishes facts only;

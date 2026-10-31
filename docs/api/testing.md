@@ -91,6 +91,17 @@ type MemoryHost = Readonly<{
 
 Explicitly driven in-process host for trusted tests and runnable examples.
 
+## Variables
+
+### runFinalizerGraceMs
+
+```ts
+const runFinalizerGraceMs: 1000 = 1_000;
+```
+
+Product finalizer grace, exposed for tests that wait for durable queue
+settlement.
+
 ## Functions
 
 ### fauxModelSource()

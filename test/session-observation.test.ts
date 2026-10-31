@@ -48,6 +48,31 @@ it("coalesces progress wakes without hiding a durable observation", async () => 
   }
 });
 
+it("reconciles occupant phase changes only into queued views, not unrelated live or settlement observers", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const kernel = openObservationKernel(fixture.owner);
+  try {
+    const queued = await Effect.runPromise(kernel.register("queued"));
+    const running = await Effect.runPromise(kernel.register("running"));
+    const settlement = await Effect.runPromise(
+      kernel.register("queued", "settlement"),
+    );
+    queued.setQueued(true);
+    running.setQueued(false);
+    for (const reason of ["progress", "activity", "durable"] as const) {
+      publishOwnerObservation(fixture.owner, "occupant", reason);
+      expect(await Effect.runPromise(queued.pollSignal)).toBe("activity");
+      expect(await Effect.runPromise(running.pollSignal)).toBeUndefined();
+      expect(await Effect.runPromise(settlement.pollSignal)).toBeUndefined();
+    }
+    publishOwnerObservation(fixture.owner, "occupant", "settlement");
+    expect(await Effect.runPromise(queued.pollSignal)).toBeUndefined();
+  } finally {
+    await Effect.runPromise(kernel.close);
+    fixture.close();
+  }
+});
+
 it("tracks live-view demand across kernels without counting settlement waiters", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const first = openObservationKernel(fixture.owner);

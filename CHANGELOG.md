@@ -1,5 +1,23 @@
 # @fungi.computer/shiitake
 
+## 0.8.0
+
+### Minor Changes
+
+- Changes since 0.7.0:
+
+  - fix(shiitake): retain Mule recorder failure cause in local diagnostics
+  - fix(shiitake): bound finalizer settlement wait by its grace
+  - fix(tui): retain cancelling phase in focused pane proof
+  - feat(trellis): finish connection-bound schedules consumer
+  - fix(tui): carry real occupancy phases and show cancelling
+
+### Patch Changes
+
+- @fungi.computer/agar@0.6.1
+  - @fungi.computer/mycelium@0.3.1
+  - @fungi.computer/knapsack@0.4.2
+
 ## 0.7.0
 
 ### Minor Changes

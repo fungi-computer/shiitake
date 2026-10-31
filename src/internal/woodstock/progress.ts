@@ -268,6 +268,16 @@ export function readProcessProgressForWork(
   return snapshot(current?.workId === workId ? current.value : null);
 }
 
+/** Read a phase fact without flattening another Session's private text tails. */
+export function hasProcessTextForWork(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+): boolean {
+  const current = progressByOwner.get(owner)?.get(sessionId);
+  return current?.workId === workId && (current.value?.text.length ?? 0) > 0;
+}
+
 export type ProgressMessageStart = Extract<
   MuleEvent,
   { type: "message_start" }

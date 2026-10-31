@@ -14,6 +14,8 @@ import {
   readLatestLiveRetryForWork,
   readActiveToolForWork,
   readLastModelChoiceSequence,
+  readSessionAttention,
+  hasProcessTextForWork,
 } from "./woodstock/index.js";
 
 /** Activity facts plus an explicit, on-demand bounded progress read. */
@@ -22,6 +24,30 @@ export type ObservedActivity = Readonly<{
   readProgress: () => SessionProgress | null;
   toolOutput: readonly SessionToolOutput[];
 }>;
+
+/** Project only the occupying Session's activity, without disclosing its data. */
+export function readSessionPhase(
+  owner: SqliteOwner,
+  sessionId: string,
+  head: WatchdogQueueHead,
+): AgentRunningWork["phase"] {
+  const { facts } = readSessionActivity(owner, sessionId, head, null);
+  if (facts.cancellationRequested) return "cancelling";
+  if (
+    readSessionAttention(owner, sessionId).some(
+      (item) => item.inbox !== false && item.waitingOn === undefined,
+    )
+  )
+    return "waiting_on_you";
+  if (facts.compaction !== null || facts.retry !== null) return "thinking";
+  if (facts.activeTool !== null) return "running_tool";
+  if (
+    head.state === "running" &&
+    hasProcessTextForWork(owner, sessionId, head.jobId)
+  )
+    return "streaming";
+  return "thinking";
+}
 
 /** Join Watchdog authority with Woodstock facts and process-local progress. */
 export function readSessionActivity(

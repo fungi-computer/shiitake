@@ -209,7 +209,7 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
   let hostTick: Promise<unknown> | undefined;
   try {
     for (const task of tasks) await task;
-    const running = await agent
+    await agent
       .session("Agent-A")
       .send("Hold", { delivery: "followUp", requestId: "agent-a" });
     await agentStarted.promise;
@@ -221,12 +221,7 @@ it("a host completion cannot clear the Agent partition blocking a queued Session
     const expected = {
       state: "queued",
       commandId: queued.commandId,
-      runningWork: {
-        kind: "session",
-        sessionId: "Agent-A",
-        commandId: running.commandId,
-        title: "Hold",
-      },
+      runningWork: { phase: "thinking" },
     };
     expect((await waiting.read()).activity.queue).toEqual(expected);
     if (hostRuntime === undefined)
