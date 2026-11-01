@@ -230,6 +230,7 @@ export const SessionSnapshotSchema = Schema.Struct({
 }) satisfies Schema.Codec<SessionSnapshot>;
 
 export const SessionFrameSchema: Schema.Codec<SessionFrame> = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("heartbeat") }),
   Schema.Struct({
     kind: Schema.Literal("activity"),
     activity: SessionActivitySchema,

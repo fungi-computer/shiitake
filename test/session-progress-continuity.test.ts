@@ -15,10 +15,12 @@ function deferred() {
 
 for (const mode of ["slow watch", "subscribe(after) mid-reply"] as const) {
   it(`${mode} repairs a lost retained prefix and continues appending the reply`, async () => {
-    const text = "abcdefghijklmnopqrstuvwxyz".repeat(6_000);
+    const text = "abcdefghijklmnopqrstuvwxyz".repeat(46_000);
     const paused = deferred();
     const resume = deferred();
     const model = fauxModel([fauxAssistantMessage(text)], {
+      // Progress wakes coalesce at 4 KiB. Cross the feed backlog as well as
+      // the retained tail, not merely 256 provider token events.
       tokenSize: { min: 1024, max: 1024 },
     });
     const host = await memoryHost({
@@ -39,7 +41,9 @@ for (const mode of ["slow watch", "subscribe(after) mid-reply"] as const) {
                     yield event;
                     if (event.type !== "text_delta") continue;
                     length += event.delta.length;
-                    if (!held && length >= 100_000) {
+                    // Cross the feed's 256-frame bound as well as the
+                    // retained progress tail before allowing the slow read.
+                    if (!held && length >= 1_100_000) {
                       held = true;
                       paused.resolve();
                       await resume.promise;
@@ -74,9 +78,19 @@ for (const mode of ["slow watch", "subscribe(after) mid-reply"] as const) {
       let lastEnd = 0;
       for await (const frame of changes) {
         if (frame.kind === "reset") {
+          // The completed exact message itself exceeds the feed's 1 MiB
+          // backlog cap. Its reset replaces progress before settlement, or
+          // can already contain the terminal.
+          if (frame.baseline.terminals.length > 0) break;
           progress = frame.baseline.progress;
+          if (resets === 0 || progress !== null)
+            expect(progress?.textTruncated).toBe(true);
+          else
+            expect(frame.baseline.messages.at(-1)?.value).toMatchObject({
+              role: "assistant",
+              content: [{ type: "text", text }],
+            });
           resets += 1;
-          expect(progress?.textTruncated).toBe(true);
           resume.resolve();
         } else if (frame.kind === "progress") {
           progress = appendSessionProgress(progress, frame.progress);
@@ -95,7 +109,7 @@ for (const mode of ["slow watch", "subscribe(after) mid-reply"] as const) {
       await settling;
       expect(resets).toBeGreaterThan(0);
       expect(appends).toBeGreaterThan(1);
-      expect(lastEnd).toBeGreaterThan(150_000);
+      expect(lastEnd).toBeGreaterThan(1_150_000);
       expect((await session.read()).messages.at(-1)?.value).toMatchObject({
         role: "assistant",
         content: [{ type: "text", text }],

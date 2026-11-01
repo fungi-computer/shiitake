@@ -68,7 +68,7 @@ settlement(
   delegator: string | null;
   terminal: SessionTerminal;
   content: string;
-  usage: readonly Pick<AssistantMessage, "model" | "provider" | "usage">[];
+  usage: readonly Pick<AssistantMessage, "model" | "usage" | "provider">[];
   toolCalls: number;
   waitingOnYou: readonly Readonly<{
      itemId: string;
@@ -95,7 +95,7 @@ Recipient-local disclosure through the public host, never another Agent's RPC.
 `Promise`\< \| `Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
 `string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
 `content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, `"model"` \|
-`"provider"` \| `"usage"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
+`"usage"` \| `"provider"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
 `Readonly`\<\{ `itemId`: `string`; `kind`: `string`; `summary`: `string`;
 \}\>[]; \}\> \| `undefined`\>
 

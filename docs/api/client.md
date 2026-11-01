@@ -679,6 +679,9 @@ Bounded Session baseline at one opaque owner cursor.
 ```ts
 type SessionFrame =
   | Readonly<{
+      kind: "heartbeat";
+    }>
+  | Readonly<{
       kind: "activity";
       activity: SessionActivity;
     }>
@@ -1048,6 +1051,26 @@ const DelegationReceiptSchema: Schema.Codec<DelegationReceipt>;
 ```
 
 A delegated send is accepted by its owner or held in durable mail custody.
+
+---
+
+### sessionHeartbeatIntervalMs
+
+```ts
+const sessionHeartbeatIntervalMs: 15000 = 15_000;
+```
+
+Process-local liveness cadence, not a durable Session fact.
+
+---
+
+### sessionSilenceDeadlineMs
+
+```ts
+const sessionSilenceDeadlineMs: 45000 = 45_000;
+```
+
+Silence loses observation; only the service owner's lease check proves death.
 
 ## Functions
 

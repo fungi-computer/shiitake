@@ -61,7 +61,8 @@ export function openRuntimeCore(
       admitted,
       mailRoom,
     );
-    const coordinator = openCoordinator(options, runtime);
+    const ownerContext = yield* Effect.context();
+    const coordinator = openCoordinator(options, runtime, ownerContext);
     const agent: ShiitakeEffectAgent = Object.freeze({
       session: coordinator.session,
       createSession: coordinator.createSession,

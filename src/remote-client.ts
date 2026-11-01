@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import { sessionSilenceDeadlineMs } from "./session-liveness.js";
 
 import {
   parseAccepted,
@@ -199,6 +200,15 @@ function remoteEvents(
     { bufferSize: 256, strategy: "dropping" },
   ).pipe(
     Stream.mapEffect(decodeRemoteEvent),
+    Stream.timeoutOrElse({
+      duration: sessionSilenceDeadlineMs,
+      orElse: () =>
+        Stream.fail(
+          unavailable(
+            "Session feed is connected but silent; the service may be busy",
+          ),
+        ),
+    }),
     Stream.interruptWhen(clientClosed.await),
   );
 }

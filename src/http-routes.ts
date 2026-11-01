@@ -18,6 +18,7 @@ import type {
   ShiitakeSession,
 } from "./client.js";
 import * as Schema from "effect/Schema";
+import { encodeSessionFrame } from "./internal/observation-kernel.js";
 
 import { ShiitakeError, toShiitakeErrorWire } from "./errors.js";
 import type { Json } from "./extensions.js";
@@ -161,7 +162,7 @@ function frameEvent(frame: SessionFrame): SSEMessage {
       : frame.kind === "reset"
         ? (frame.cursor ?? "")
         : undefined;
-  const event = { event: "frame", data: JSON.stringify(frame) };
+  const event = { event: "frame", data: encodeSessionFrame(frame).data };
   return id === undefined ? event : { ...event, id };
 }
 

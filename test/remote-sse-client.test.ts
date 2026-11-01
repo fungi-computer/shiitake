@@ -74,6 +74,56 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("keeps quiet watches live on typed heartbeats, then fails silent-connected at 45 seconds", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  FakeEventSource.current = undefined;
+  const agent = createShiitakeClient({
+    baseUrl: "/api",
+    eventSource: FakeEventSource,
+  });
+  const pending = agent.session("quiet").watch();
+  try {
+    await vi.waitFor(() => {
+      expect(FakeEventSource.pending()).toBeDefined();
+    });
+    const source = FakeEventSource.created();
+    source.emit("snapshot", sessionSnapshot({ sessionId: "quiet" }));
+    const watch = await pending;
+    const changes = watch.changes[Symbol.asyncIterator]();
+    for (let beat = 0; beat < 4; beat += 1) {
+      const next = changes.next();
+      await vi.advanceTimersByTimeAsync(15_000);
+      source.emit("frame", { kind: "heartbeat" });
+      await expect(next).resolves.toEqual({
+        done: false,
+        value: { kind: "heartbeat" },
+      });
+    }
+    let settled = false;
+    const silent = changes.next().finally(() => {
+      settled = true;
+    });
+    // Install rejection handling before moving the maintained timeout clock.
+    const rejected = expect(silent).rejects.toMatchObject({
+      boundary: "runtime",
+      cause: "unavailable",
+    });
+    await vi.advanceTimersByTimeAsync(44_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await rejected;
+    await expect(silent).rejects.toThrow("busy");
+    expect(source.closeCount).toBe(1);
+    // No second EventSource or reconnect owner was started by the SDK.
+    expect(FakeEventSource.created()).toBe(source);
+    await watch.close();
+    await changes.return?.();
+  } finally {
+    await agent.close();
+    vi.useRealTimers();
+  }
+});
+
 /** One running extension slot with a small encoded value. */
 function fixtureSlot(state: string) {
   return {

@@ -5,6 +5,7 @@ import { fauxModel } from "@fungi.computer/mule/testing";
 import type {
   ModelPreference,
   ModelSource,
+  SessionContext,
   SessionFrame,
   SqliteOwner,
 } from "../src/index.js";
@@ -256,17 +257,24 @@ it("reports compaction's context use against the described window, after a turn 
     // The next turn's update carries the larger context it settles on.
     const watch = await session.watch();
     await session.send("Tell me more", { requestId: "second" });
-    await host.settle("context");
-    const updates: SessionFrame[] = [];
+    const settled = await host.settle("context");
+    let cursor = watch.snapshot.cursor;
+    let latest: SessionContext | undefined;
     for await (const frame of watch.changes) {
-      updates.push(frame);
-      if (frame.kind === "update" && frame.activity.queue.state === "idle")
+      if (frame.kind !== "update") continue;
+      // Shared feeds retain live pages, including activity-only idle patches.
+      // The figure belongs to the final cursor-moving page, not that patch.
+      if (frame.cursor !== cursor) {
+        cursor = frame.cursor;
+        latest = frame.context;
+      }
+      if (
+        frame.cursor === settled.cursor &&
+        frame.activity.queue.state === "idle"
+      )
         break;
     }
     await watch.close();
-    const latest = updates
-      .flatMap((frame) => (frame.kind === "update" ? [frame.context] : []))
-      .at(-1);
     expect(latest?.window).toBe(1_000_000);
     expect(latest?.tokens).toBeGreaterThan(first?.tokens ?? 0);
     expect((await session.read()).context).toEqual(latest);

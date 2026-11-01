@@ -3,6 +3,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { expect, it } from "vitest";
 
 import { Shiitake, type ShiitakeAgent } from "../src/index.js";
+import type { AgentRunningWork, SessionFrame } from "../src/client.js";
 import {
   createCompatibilityRuntimeHost,
   createNativeSqliteOwnerFixture,
@@ -10,6 +11,22 @@ import {
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
 type Reply = ReturnType<typeof fauxAssistantMessage>;
+
+/** Await the phase transition, not a fixed count of the occupant's intermediate hints. */
+async function nextOccupancyActivity(
+  changes: AsyncIterator<SessionFrame>,
+  phase: AgentRunningWork["phase"] | null,
+) {
+  // The test's existing deadline bounds the wait; unrelated frame kinds still fail.
+  for (;;) {
+    const frame = await changes.next();
+    if (frame.done || frame.value.kind !== "activity") return frame;
+    const queue = frame.value.activity.queue;
+    if (queue.state !== "queued") return frame;
+    const work = queue.runningWork;
+    if (phase === null ? work === null : work?.phase === phase) return frame;
+  }
+}
 
 /** A model reply that holds its run open until the test lets it finish. */
 function gatedReply(text: string) {
@@ -350,7 +367,9 @@ it("publishes identity-free occupancy to a queued Session when another Session s
     expect(watch.snapshot.hasMore).toBe(false);
     running = host.runtime.runNext();
     await first.started;
-    await expect(changes.next()).resolves.toMatchObject({
+    await expect(
+      nextOccupancyActivity(changes, "thinking"),
+    ).resolves.toMatchObject({
       value: {
         kind: "activity",
         activity: {
@@ -364,7 +383,7 @@ it("publishes identity-free occupancy to a queued Session when another Session s
     first.release();
     await running;
     running = undefined;
-    await expect(changes.next()).resolves.toMatchObject({
+    await expect(nextOccupancyActivity(changes, null)).resolves.toMatchObject({
       value: {
         kind: "activity",
         activity: { queue: { state: "queued", runningWork: null } },

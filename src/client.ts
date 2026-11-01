@@ -1,4 +1,8 @@
 import type { SessionAttention } from "./session-attention.js";
+export {
+  sessionHeartbeatIntervalMs,
+  sessionSilenceDeadlineMs,
+} from "./session-liveness.js";
 import type { CommandSettlement } from "./internal/contracts.js";
 export type { CommandSettlement } from "./internal/contracts.js";
 export { type SessionAttention } from "./session-attention.js";
@@ -459,6 +463,10 @@ export type SessionSnapshot = Readonly<{
 
 /** One bounded replay or live frame. */
 export type SessionFrame =
+  | Readonly<{
+      /** Process-local liveness only: never a durable cursor or activity fact. */
+      kind: "heartbeat";
+    }>
   | Readonly<{
       /** Process-local activity change for the Session's current queue head. */
       kind: "activity";

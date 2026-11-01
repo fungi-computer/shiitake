@@ -453,10 +453,8 @@ it("publishes a withdrawn prompt before the host settles its scheduler head", as
   const changes = watch.changes[Symbol.asyncIterator]();
   try {
     expect(watch.snapshot.pending.total).toBe(2);
-    // The watch replays the initial admission page before live notifications.
-    await expect(changes.next()).resolves.toMatchObject({
-      value: { kind: "update", pending: { total: 2 } },
-    });
+    // The baseline already contains the initial admission page; changes are
+    // push-only and must expose the cancellation without a scheduler write.
     const next = changes.next();
     await session.command({
       type: "cancel",

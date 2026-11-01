@@ -325,7 +325,10 @@ it("projects failed capability acquisition through public watch and cold reopen"
     const observed: SessionTerminal[] = [];
     const consume = (async () => {
       for await (const frame of watch.changes) {
-        if (frame.kind === "update") observed.push(...frame.terminals);
+        if (frame.kind === "update") {
+          observed.push(...frame.terminals);
+          if (frame.terminals.length > 0) break;
+        }
       }
     })();
     try {
@@ -344,6 +347,9 @@ it("projects failed capability acquisition through public watch and cold reopen"
         },
       ];
       await runtime.runNext();
+      // Publication is asynchronous; wait for delivery rather than closing
+      // the watch as soon as the execution plane settles.
+      await consume;
       const snapshot = await session.read();
       expect(snapshot.terminals).toMatchObject(expected);
       expect(JSON.stringify(snapshot)).not.toContain(
@@ -1619,12 +1625,9 @@ it("settles a pre-Mule acquisition failure and publishes idle status", async () 
       done: false,
       value: {
         kind: "update",
-        messages: [
-          {
-            commandId: accepted.commandId,
-            value: { role: "user", content: "Fail before Mule starts." },
-          },
-        ],
+        // The user row is already in the baseline; the push tail must not
+        // replay it just to refresh the running status.
+        messages: [],
         activity: { queue: { state: "running" } },
       },
     });
@@ -1634,6 +1637,7 @@ it("settles a pre-Mule acquisition failure and publishes idle status", async () 
         if (
           frame.done ||
           (frame.value.kind !== "reset" &&
+            frame.value.kind !== "heartbeat" &&
             frame.value.activity.queue.state === "idle")
         )
           return frame;

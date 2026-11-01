@@ -246,6 +246,18 @@ function projectTerminal(
   return Object.freeze(meta === undefined ? terminal : { ...terminal, meta });
 }
 
+const compactionEntrySequences = new WeakMap<SessionCompactionMarker, number>();
+
+/** Native entry order, not the marker's display horizon; requires no SQL read. */
+export function compactionEntrySequence(
+  marker: SessionCompactionMarker,
+): number {
+  const sequence = compactionEntrySequences.get(marker);
+  if (sequence === undefined)
+    throw unavailable("Session compaction entry position is unavailable");
+  return sequence;
+}
+
 /**
  * Full-history client projections show every durable entry, including what a
  * compaction summarized away. Each compaction entry in `rows` contributes one
@@ -270,16 +282,16 @@ function compactionMarkersIn(
       lineageEntrySequence(owner, lineage, entry.head);
     if (kept === undefined)
       throw unavailable("Session compaction horizon is unavailable");
-    markers.push(
-      Object.freeze({
-        id: row.id,
-        sequence: kept,
-        at: row.timestamp,
-        tokensBefore: entry.data.tokensBefore,
-        tokensAfter: entry.data.tokensAfter ?? null,
-        trigger: entry.data.reason ?? null,
-      }),
-    );
+    const marker: SessionCompactionMarker = Object.freeze({
+      id: row.id,
+      sequence: kept,
+      at: row.timestamp,
+      tokensBefore: entry.data.tokensBefore,
+      tokensAfter: entry.data.tokensAfter ?? null,
+      trigger: entry.data.reason ?? null,
+    });
+    compactionEntrySequences.set(marker, row.sequence);
+    markers.push(marker);
   }
   return Object.freeze(markers);
 }

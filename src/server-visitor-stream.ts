@@ -1,6 +1,7 @@
 import type { SessionSnapshot, SessionWatch } from "./client.js";
 import { SSEStreamingApi } from "hono/streaming";
 import { visitorSnapshot } from "./client-visitor.js";
+import { encodeSessionFrame } from "./internal/observation-kernel.js";
 
 export type VisitorStreamError =
   | "channel_visitor_stream_expiry_failed"
@@ -65,7 +66,7 @@ export function visitorStream(
       await close();
       return;
     }
-    await stream.write(": heartbeat\n\n");
+    // Keep the visitor authorization/expiry check, not a second liveness clock.
     if (!ending)
       heartbeat = setTimeout(() => {
         void beat().catch((cause: unknown) => {
@@ -99,6 +100,14 @@ export function visitorStream(
       }, 30_000);
       for await (const frame of options.watch.changes) {
         if (ending) break;
+        if (frame.kind === "heartbeat") {
+          if (!(await admitted())) break;
+          await stream.writeSSE({
+            event: "frame",
+            data: encodeSessionFrame(frame).data,
+          });
+          continue;
+        }
         if (frame.kind === "tool_output") continue;
         if (frame.kind === "progress" || frame.kind === "activity") {
           if (!(await admitted())) break;

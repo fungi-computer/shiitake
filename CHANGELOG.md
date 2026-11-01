@@ -1,5 +1,25 @@
 # @fungi.computer/shiitake
 
+## 0.9.0
+
+### Minor Changes
+
+- Changes since 0.8.0:
+
+  - fix(shiitake): retain non-empty settlement replies across stretches
+  - fix(shiitake): await live hints after the shared baseline
+  - feat(shiitake): retain bounded Session feeds on current Integration
+  - fix(shiitake): keep compactions across live feed joins
+  - fix(shiitake): join bounded session feeds with phase occupancy
+  - fix(shiitake): reconcile atomic reads with bounded Session feeds
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/mule@0.2.2
+  - @fungi.computer/knapsack@0.4.3
+  - @fungi.computer/mycelium@0.3.2
+
 ## 0.8.0
 
 ### Minor Changes

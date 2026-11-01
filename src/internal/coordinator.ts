@@ -5,8 +5,8 @@ import { acceptedNotice } from "@fungi.computer/bird-dog/effect";
 import { FungiMessageMetaSchema } from "@fungi.computer/agar/agents";
 import type { VerifiedAgentReply } from "./woodstock/index.js";
 import * as Effect from "effect/Effect";
+import type * as Context from "effect/Context";
 import * as Option from "effect/Option";
-import * as Stream from "effect/Stream";
 
 import type {
   AbortCommand,
@@ -21,62 +21,39 @@ import type {
   ForkedSession,
   PromptCommand,
   SessionCommand,
-  SessionContext,
-  SessionFrame,
-  SessionSnapshot,
-  SubscribeOptions,
-  WatchOptions,
 } from "../client.js";
 import { ShiitakeError } from "../errors.js";
 import type { ExtensionCommandCallerV0, Json } from "../extensions.js";
 import type { ModelPreference } from "./model-preference.js";
 import {
-  decodeClientReadOptions,
   decodeClientSettlementRequest,
   requireDecoded,
   decodeClientSessionCommand,
   decodeClientSessionId,
-  decodeClientSubscribeOptions,
-  type ClientReadOptions,
-  type ClientSubscribeOptions,
 } from "./client-boundary.js";
 import type {
   ShiitakeEffectAgent,
   ShiitakeEffectOwner,
   ShiitakeEffectOptions,
   ShiitakeEffectSession,
-  ShiitakeEffectWatch,
 } from "./effect-contracts.js";
 import {
-  mergeObservationSignals,
   openObservationKernel,
   publishAgentExecutionChange,
   publishOwnerObservation,
-  type ObservationKernel,
-  type ObservationRegistration,
-  type ObservationSignal,
 } from "./observation-kernel.js";
+import { openSessionObservation } from "./session-observation.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { AdmitRequest } from "./admission-door.js";
 import { checkHostMeta } from "./host-meta.js";
 import {
-  readSessionActivity,
-  type ObservedActivity,
-} from "./session-status.js";
-import { prepareSessionContext } from "./session-context.js";
-import {
-  progressPosition,
-  readProcessProgressDelta,
-  type ProgressPosition,
   abortSession,
   cancelSession,
   branchSession,
   recordOperatorLine,
   forkSession,
-  readSession,
   readCommandSettlement,
   readSessionModelPreference,
-  readSessionReplayPage,
   readSessionInbox,
   readLatestPendingPrompt,
   createSession,
@@ -110,73 +87,6 @@ function agentExtensions(runtime: RuntimeCoordinator) {
         ),
       ),
   });
-}
-
-function currentSessionWork(runtime: RuntimeCoordinator, sessionId: string) {
-  return runtime
-    .readQueueHead(sessionId)
-    .pipe(
-      Effect.flatMap((head) =>
-        (head.state === "queued"
-          ? runtime.runningWork(head.jobId)
-          : Effect.succeed(null)
-        ).pipe(Effect.map((runningWork) => ({ head, runningWork }))),
-      ),
-    );
-}
-
-function currentSessionActivity(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  sessionId: string,
-) {
-  return currentSessionWork(runtime, sessionId).pipe(
-    Effect.map(({ head, runningWork }) =>
-      readSessionActivity(options.store, sessionId, head, runningWork),
-    ),
-  );
-}
-
-/** Carry the Session's context use on a baseline, when it has one. */
-function withContext(
-  snapshot: SessionSnapshot,
-  context: SessionContext | undefined,
-): SessionSnapshot {
-  return context === undefined
-    ? snapshot
-    : Object.freeze({ ...snapshot, context });
-}
-
-/** Read the baseline and its context use for one Session. */
-function readSessionWithContext(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  sessionId: string,
-  input: Parameters<typeof readSession>[3],
-): Effect.Effect<SessionSnapshot, ShiitakeError> {
-  return currentSessionWork(runtime, sessionId).pipe(
-    Effect.flatMap(({ head, runningWork }) =>
-      readSession(
-        options.store,
-        sessionId,
-        () => readSessionActivity(options.store, sessionId, head, runningWork),
-        input,
-        () => runtime.extensions.project(sessionId),
-        (snapshot) => ({
-          snapshot,
-          context: prepareSessionContext(
-            options,
-            sessionId,
-            snapshot.cursor,
-            input?.before === undefined,
-          ),
-        }),
-      ),
-    ),
-    Effect.flatMap(({ snapshot, context }) =>
-      context.pipe(Effect.map((value) => withContext(snapshot, value))),
-    ),
-  );
 }
 
 function sessionOwnerOperation<A>(
@@ -231,382 +141,6 @@ function decodeSessionCommand(
             "Session command is invalid",
           ),
   });
-}
-
-function decodeSubscriptionInput(
-  sessionId: string,
-  input: SubscribeOptions,
-): Effect.Effect<
-  Readonly<{ sessionId: string; options: ClientSubscribeOptions }>,
-  ShiitakeError
-> {
-  return Effect.try({
-    try: () =>
-      Object.freeze({
-        sessionId: decodeClientSessionId(sessionId),
-        options: decodeClientSubscribeOptions(input),
-      }),
-    catch: (error) =>
-      error instanceof ShiitakeError
-        ? error
-        : new ShiitakeError(
-            "contract",
-            "invalid",
-            "Subscribe options are invalid",
-          ),
-  });
-}
-
-function resetFrame(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  sessionId: string,
-  includeSandboxFailures = false,
-): Effect.Effect<Extract<SessionFrame, { kind: "reset" }>, ShiitakeError> {
-  return runtime.assertOpen.pipe(
-    Effect.andThen(
-      readSessionWithContext(options, runtime, sessionId, {
-        includeSandboxFailures,
-      }),
-    ),
-    Effect.map((baseline): Extract<SessionFrame, { kind: "reset" }> =>
-      Object.freeze({
-        kind: "reset",
-        reason: "history_unavailable",
-        cursor: baseline.cursor,
-        baseline,
-      }),
-    ),
-  );
-}
-
-type SubscriptionState = Readonly<{
-  after: string | undefined;
-  delivery: "replay" | "live";
-  awaitSignal: boolean;
-}>;
-type SubscriptionStep = readonly [
-  readonly SessionFrame[],
-  Option.Option<SubscriptionState>,
-];
-
-function continueFromReset(
-  frame: Extract<SessionFrame, { kind: "reset" }>,
-): SubscriptionStep {
-  return [
-    [frame],
-    Option.some({
-      after: frame.cursor ?? undefined,
-      delivery: frame.baseline.hasMore ? "replay" : "live",
-      awaitSignal: !frame.baseline.hasMore,
-    }),
-  ];
-}
-
-function subscriptionFrames(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  registration: ObservationRegistration,
-  sessionId: string,
-  after: string | undefined,
-  delivery: "replay" | "live",
-  includeSandboxFailures = false,
-  baselineProgress: SessionSnapshot["progress"] = null,
-): Stream.Stream<SessionFrame, ShiitakeError> {
-  let position: ProgressPosition | null = progressPosition(baselineProgress);
-  let toolOutput: ObservedActivity["toolOutput"] = [];
-  const reset = () =>
-    resetFrame(options, runtime, sessionId, includeSandboxFailures).pipe(
-      Effect.map((frame) => {
-        position = progressPosition(frame.baseline.progress);
-        toolOutput = frame.baseline.toolOutput;
-        return continueFromReset(frame);
-      }),
-    );
-  const liveFrames = (
-    activity: ObservedActivity,
-  ): readonly SessionFrame[] | undefined => {
-    const queue = activity.facts.queue;
-    const delta =
-      queue.state !== "running"
-        ? null
-        : readProcessProgressDelta(
-            options.store,
-            sessionId,
-            queue.commandId,
-            position,
-          );
-    if (delta === undefined) return undefined;
-    const frames: SessionFrame[] = [];
-    if (delta !== null) {
-      frames.push({
-        kind: "progress",
-        progress: delta,
-        activity: activity.facts,
-      });
-      position = {
-        messageId: delta.messageId,
-        revision: delta.revision,
-        text: delta.text.offset + delta.text.append.length,
-        thinking: delta.thinking.offset + delta.thinking.append.length,
-      };
-    }
-    if (
-      toolOutput.length !== activity.toolOutput.length ||
-      toolOutput.some((slot, index) => slot !== activity.toolOutput[index])
-    ) {
-      toolOutput = activity.toolOutput;
-      frames.push({
-        kind: "tool_output",
-        toolOutput,
-        activity: activity.facts,
-      });
-    }
-    return frames;
-  };
-  const initial: SubscriptionState = {
-    after,
-    delivery,
-    awaitSignal: false,
-  };
-  return Stream.paginate<SubscriptionState, SessionFrame, ShiitakeError>(
-    initial,
-    (state): Effect.Effect<SubscriptionStep, ShiitakeError> =>
-      (state.awaitSignal
-        ? registration.awaitSignal.pipe(
-            Effect.flatMap((signal) =>
-              registration.pollSignal.pipe(
-                Effect.map((pending) =>
-                  pending === undefined
-                    ? signal
-                    : mergeObservationSignals(signal, pending),
-                ),
-              ),
-            ),
-          )
-        : registration.pollSignal
-      ).pipe(
-        Effect.flatMap(
-          (
-            signal: ObservationSignal | undefined,
-          ): Effect.Effect<SubscriptionStep, ShiitakeError> => {
-            if (signal === "closed")
-              return Effect.succeed([[], Option.none<SubscriptionState>()]);
-            if (signal === "reset") return reset();
-
-            return runtime.assertOpen.pipe(
-              Effect.andThen(
-                currentSessionActivity(options, runtime, sessionId),
-              ),
-              Effect.flatMap((activity) => {
-                registration.setQueued(activity.facts.queue.state === "queued");
-                if (
-                  (signal === "progress" || signal === "activity") &&
-                  state.delivery === "live"
-                ) {
-                  const frames = liveFrames(activity);
-                  if (frames === undefined) return reset();
-                  return Effect.succeed<SubscriptionStep>([
-                    [
-                      ...(signal === "activity"
-                        ? [
-                            {
-                              kind: "activity" as const,
-                              activity: activity.facts,
-                            },
-                          ]
-                        : []),
-                      ...frames,
-                    ],
-                    Option.some({ ...state, awaitSignal: true }),
-                  ]);
-                }
-                return readSessionReplayPage(
-                  options.store,
-                  sessionId,
-                  state.after,
-                  state.delivery,
-                  activity,
-                  () => runtime.extensions.project(sessionId),
-                  includeSandboxFailures,
-                  (page) => {
-                    const latestCursor =
-                      page.kind === "page"
-                        ? page.frames
-                            .flatMap((frame) =>
-                              frame.kind === "progress" ||
-                              frame.kind === "activity" ||
-                              frame.kind === "tool_output"
-                                ? []
-                                : [frame.cursor],
-                            )
-                            .at(-1)
-                        : undefined;
-                    // Prepare a figure only for the final moving update,
-                    // while its cursor and stored context share the read.
-                    const context =
-                      page.kind === "page" &&
-                      !page.hasMore &&
-                      page.frames.some(
-                        (frame) =>
-                          frame.kind === "update" &&
-                          frame.cursor !== state.after,
-                      )
-                        ? prepareSessionContext(
-                            options,
-                            sessionId,
-                            latestCursor ?? null,
-                          )
-                        : Effect.succeed(undefined);
-                    return { page, latestCursor, context };
-                  },
-                ).pipe(
-                  Effect.flatMap(
-                    ({
-                      page,
-                      latestCursor,
-                      context,
-                    }): Effect.Effect<SubscriptionStep, ShiitakeError> => {
-                      if (page.kind === "reset") return reset();
-
-                      if (!page.hasMore) toolOutput = activity.toolOutput;
-                      const progressFrames = page.hasMore
-                        ? []
-                        : liveFrames(activity);
-                      if (progressFrames === undefined) return reset();
-
-                      const next: SubscriptionState = {
-                        after: latestCursor ?? state.after,
-                        delivery: page.hasMore ? state.delivery : "live",
-                        awaitSignal: !page.hasMore,
-                      };
-                      return context.pipe(
-                        Effect.map((context): SubscriptionStep => [
-                          [
-                            ...(context === undefined
-                              ? page.frames
-                              : page.frames.map((frame) =>
-                                  frame.kind === "update" &&
-                                  frame.cursor === latestCursor
-                                    ? Object.freeze({ ...frame, context })
-                                    : frame,
-                                )),
-                            ...progressFrames,
-                          ],
-                          Option.some(next),
-                        ]),
-                      );
-                    },
-                  ),
-                );
-              }),
-            );
-          },
-        ),
-      ),
-  );
-}
-
-function subscribeSession(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  observation: ObservationKernel,
-  sessionId: string,
-  input: SubscribeOptions,
-): Stream.Stream<SessionFrame, ShiitakeError> {
-  return Stream.unwrap(
-    runtime.assertOpen.pipe(
-      Effect.andThen(decodeSubscriptionInput(sessionId, input)),
-      Effect.flatMap((decoded) =>
-        Effect.acquireRelease(
-          observation.register(decoded.sessionId),
-          (registration) => Effect.sync(registration.close),
-        ).pipe(
-          Effect.map((registration) =>
-            subscriptionFrames(
-              options,
-              runtime,
-              registration,
-              decoded.sessionId,
-              decoded.options.after,
-              "replay",
-              decoded.options.includeSandboxFailures === true,
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-function decodeWatchInput(
-  sessionId: string,
-  input: WatchOptions | undefined,
-): Effect.Effect<
-  Readonly<{ sessionId: string; options: ClientReadOptions }>,
-  ShiitakeError
-> {
-  return Effect.try({
-    try: () =>
-      Object.freeze({
-        sessionId: decodeClientSessionId(sessionId),
-        options: decodeClientReadOptions(input),
-      }),
-    catch: (error) =>
-      error instanceof ShiitakeError
-        ? error
-        : new ShiitakeError("contract", "invalid", "Watch options are invalid"),
-  });
-}
-
-function watchSession(
-  options: ShiitakeEffectOptions,
-  runtime: RuntimeCoordinator,
-  observation: ObservationKernel,
-  sessionId: string,
-  input: WatchOptions | undefined,
-): Effect.Effect<ShiitakeEffectWatch, ShiitakeError> {
-  return runtime.assertOpen.pipe(
-    Effect.andThen(decodeWatchInput(sessionId, input)),
-    Effect.flatMap((decoded) =>
-      Effect.uninterruptibleMask((restore) =>
-        Effect.gen(function* () {
-          const registration = yield* observation.register(decoded.sessionId);
-          return yield* restore(
-            runtime.assertOpen.pipe(
-              Effect.andThen(
-                readSessionWithContext(
-                  options,
-                  runtime,
-                  decoded.sessionId,
-                  decoded.options,
-                ),
-              ),
-              Effect.map((snapshot): ShiitakeEffectWatch => {
-                registration.setQueued(
-                  snapshot.activity.queue.state === "queued",
-                );
-                return Object.freeze({
-                  snapshot,
-                  changes: subscriptionFrames(
-                    options,
-                    runtime,
-                    registration,
-                    decoded.sessionId,
-                    snapshot.cursor ?? undefined,
-                    "live",
-                    decoded.options.includeSandboxFailures === true,
-                    snapshot.progress,
-                  ).pipe(Stream.ensuring(Effect.sync(registration.close))),
-                  close: Effect.sync(registration.close),
-                });
-              }),
-            ),
-          ).pipe(Effect.onError(() => Effect.sync(registration.close)));
-        }),
-      ),
-    ),
-  );
 }
 
 /**
@@ -914,8 +448,15 @@ function checkCommandMeta(
 export function openCoordinator(
   options: ShiitakeEffectOptions,
   runtime: RuntimeCoordinator,
+  ownerContext: Context.Context<never>,
 ): ShiitakeEffectOwner {
   const observation = openObservationKernel(options.store);
+  const sessionObservation = openSessionObservation(
+    options,
+    runtime,
+    observation,
+    ownerContext,
+  );
   /** One Session handle; `meta` is the host metadata its prompts carry. */
   const sessionFor = (
     sessionId: string,
@@ -1054,9 +595,7 @@ export function openCoordinator(
         }),
       read: (input) =>
         runtime.assertOpen.pipe(
-          Effect.andThen(
-            readSessionWithContext(options, runtime, sessionId, input),
-          ),
+          Effect.andThen(sessionObservation.read(sessionId, input)),
         ),
       readSettlement: (commandId, timeoutMs = 0) =>
         Effect.scoped(
@@ -1113,10 +652,8 @@ export function openCoordinator(
             );
           }),
         ),
-      subscribe: (input) =>
-        subscribeSession(options, runtime, observation, sessionId, input),
-      watch: (input) =>
-        watchSession(options, runtime, observation, sessionId, input),
+      subscribe: (input) => sessionObservation.subscribe(sessionId, input),
+      watch: (input) => sessionObservation.watch(sessionId, input),
     });
   };
   const agent: ShiitakeEffectAgent = Object.freeze({
@@ -1142,7 +679,10 @@ export function openCoordinator(
     extensions: agentExtensions(runtime),
     session: (sessionId): ShiitakeEffectSession =>
       sessionFor(sessionId, undefined),
-    close: runtime.beginClose.pipe(Effect.andThen(observation.close)),
+    close: runtime.beginClose.pipe(
+      Effect.andThen(sessionObservation.close),
+      Effect.andThen(observation.close),
+    ),
   });
   return Object.freeze({
     ...agent,

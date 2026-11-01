@@ -84,7 +84,11 @@ import {
 import { readSessionAttention } from "./session-attention.js";
 
 export * from "./extension-store.js";
-export { readLatestPendingPrompt } from "./client-projection.js";
+export { decodeWoodstockCursor } from "./cursor.js";
+export {
+  compactionEntrySequence,
+  readLatestPendingPrompt,
+} from "./client-projection.js";
 export {
   createFleetDirectoryStore,
   createFleetDelegationStore,
@@ -365,8 +369,63 @@ export function readSettlementContent(
     );
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index]?.entry;
-      if (entry?.kind === "message" && entry.value.role === "assistant")
-        return assistantText(entry.value);
+      if (entry?.kind === "message" && entry.value.role === "assistant") {
+        const text = assistantText(entry.value);
+        if (text !== "") return text;
+      }
+    }
+    return "";
+  });
+}
+
+/** Last non-empty text in an extension stretch, including its initiating work. */
+export function readSettlementStretchContent(
+  owner: SqliteOwner,
+  input: Readonly<{ sessionId: string; commandFactId: string }>,
+): Effect.Effect<string, ShiitakeError> {
+  return Effect.gen(function* () {
+    let commandFactId: string | undefined = input.commandFactId;
+    while (commandFactId !== undefined) {
+      const content = yield* readSettlementContent(owner, {
+        sessionId: input.sessionId,
+        commandFactId,
+      });
+      if (content !== "") return content;
+      const currentId: string = commandFactId;
+      commandFactId = yield* storeEffect(() => {
+        const admission = readSessionCommandAdmission(
+          owner,
+          input.sessionId,
+          currentId,
+        );
+        if (admission === undefined)
+          throw rejected("Accepted Session command is unavailable");
+        if (
+          readExtensionAdmissionOrigin(
+            owner,
+            input.sessionId,
+            currentId,
+            admission.entry.workId,
+          ) === null
+        )
+          return undefined;
+        let row = readSessionEntryById(owner, currentId);
+        if (row === undefined)
+          throw rejected("Accepted Session command entry is unavailable");
+        // Walk only this command's ancestry. Strictly decreasing sequences
+        // bound the walk and exclude sibling branches or newer queued work.
+        while (row.parentId !== null) {
+          const parent = readSessionEntryById(owner, row.parentId);
+          if (
+            parent?.sessionId !== input.sessionId ||
+            parent.sequence >= row.sequence
+          )
+            throw rejected("Session stretch ancestry is unavailable");
+          if (parent.entry.kind === "command") return parent.id;
+          row = parent;
+        }
+        return undefined;
+      });
     }
     return "";
   });

@@ -22,6 +22,34 @@ To add your own behaviour, start the extension guide at
 We don't take VC money. Fungi is built in the open and proudly backed by its
 community.
 
+## Observe a Session
+
+`session.watch()` returns an owner-atomic snapshot and live `changes`; close the
+watch when the consumer leaves. `session.subscribe({ after })` replays strictly
+after an opaque Woodstock cursor, then joins the same per-Session live feed.
+Woodstock remains the only durable history owner.
+
+Watchers share one projection producer and encoded frame per Session. Each
+watcher can retain at most 256 frames or 1 MiB of encoded UTF-8, whichever comes
+first. Overflow drops that backlog and delivers one `reset` with a fresh
+snapshot, even if no later write arrives. There are at most 64 live watchers per
+Agent; closing one releases its capacity. Closing the last watcher stops the
+Session's producer and heartbeat.
+
+The byte limit also applies to a single frame: an encoded frame over 1 MiB
+cannot enter even an empty watcher queue. Every watcher whose frame exceeds that
+limit resets, including an otherwise fast watcher. This is a per-watcher check,
+not a reset of other Sessions or of watchers whose filtered frame and backlog
+fit. The fresh Woodstock baseline is the recovery path; silently exceeding the
+queue bound or adding a second chunked wire protocol is not.
+
+A typed `{ kind: "heartbeat" }` arrives every 15 seconds. It is not durable and
+never carries or advances a cursor. Durable rows deduplicate by owner sequence;
+message progress uses message identity and revision, not the durable cursor. The
+HTTP client treats 45 seconds without a delivered event as an unavailable,
+possibly busy feed. Silence does not prove the service stopped: Local clients
+must check the service owner's database lease before claiming that.
+
 ## Recover an uncertain send
 
 Both local and HTTP Sessions expose

@@ -1,11 +1,155 @@
 import * as Effect from "effect/Effect";
+import type * as Cause from "effect/Cause";
+import * as Pull from "effect/Pull";
+import * as Queue from "effect/Queue";
 
+import type { SessionFrame } from "../client.js";
 import { ShiitakeError } from "../errors.js";
 import type { SqliteOwner } from "./contracts.js";
 import { reportCatchFailure } from "./failure.js";
 
 const MAX_OBSERVATIONS = 64;
 const MAX_PENDING_HINTS = 256;
+
+const encodedFrames = new WeakMap<
+  SessionFrame,
+  Readonly<{ data: string; bytes: number }>
+>();
+const frameEncoder = new TextEncoder();
+
+/** The feed shares one frame's JSON and byte accounting across its watchers. */
+export function encodeSessionFrame(
+  frame: SessionFrame,
+): Readonly<{ data: string; bytes: number }> {
+  const cached = encodedFrames.get(frame);
+  if (cached !== undefined) return cached;
+  const data = JSON.stringify(frame);
+  const encoded = Object.freeze({
+    data,
+    bytes: frameEncoder.encode(data).byteLength,
+  });
+  encodedFrames.set(frame, encoded);
+  return encoded;
+}
+
+/** One watcher has its own bounded backlog, not its own projection producer. */
+export type SessionFrameQueue = Readonly<{
+  take: Effect.Effect<SessionFrame | "reset" | "closed", ShiitakeError>;
+  /** Record the join before reading; retain later frames for cursor deduplication. */
+  checkpoint: (revision?: number) => void;
+  close: () => void;
+}>;
+
+type FrameListener = {
+  frames: Queue.Queue<SessionFrame | "reset", Cause.Done>;
+  bytes: number;
+  lagged: boolean;
+  closed: boolean;
+  observed: number;
+  includeSandboxFailures: boolean;
+};
+
+function withoutSandboxFailures(frame: SessionFrame): SessionFrame {
+  if (frame.kind === "update" && frame.sandboxFailures !== undefined) {
+    const value = { ...frame };
+    delete value.sandboxFailures;
+    return value;
+  }
+  if (frame.kind === "reset" && frame.baseline.sandboxFailures !== undefined) {
+    const baseline = { ...frame.baseline };
+    delete baseline.sandboxFailures;
+    return { ...frame, baseline };
+  }
+  return frame;
+}
+
+/** Bounded dropping fan-out; Woodstock, never this queue, owns replay. */
+export function openSessionFrameFeed(onIdle: () => void) {
+  const listeners = new Set<FrameListener>();
+  let ended = false;
+  let failure: ShiitakeError | undefined;
+  const clear = (listener: FrameListener): void => {
+    Effect.runSync(Queue.clear(listener.frames));
+    listener.bytes = 0;
+  };
+  return {
+    register(includeSandboxFailures = false): SessionFrameQueue {
+      const listener: FrameListener = {
+        frames: Effect.runSync(
+          Queue.dropping<SessionFrame | "reset", Cause.Done>(256),
+        ),
+        bytes: 0,
+        lagged: false,
+        closed: false,
+        observed: -1,
+        includeSandboxFailures,
+      };
+      listeners.add(listener);
+      const take: SessionFrameQueue["take"] = Effect.suspend(() => {
+        if (listener.closed) return Effect.succeed("closed" as const);
+        if (failure !== undefined) return Effect.fail(failure);
+        if (listener.lagged) return Effect.succeed("reset" as const);
+        if (ended) return Effect.succeed("closed" as const);
+        return Queue.take(listener.frames).pipe(
+          Pull.catchDone(() => Effect.succeed("closed" as const)),
+          Effect.flatMap((frame) => {
+            if (failure !== undefined) return Effect.fail(failure);
+            if (frame !== "reset" && frame !== "closed")
+              listener.bytes -= encodeSessionFrame(frame).bytes;
+            return Effect.succeed(frame);
+          }),
+        );
+      });
+      return Object.freeze({
+        take,
+        checkpoint: (revision = -1) => {
+          clear(listener);
+          listener.lagged = false;
+          listener.observed = revision;
+        },
+        close: () => {
+          if (listener.closed) return;
+          listener.closed = true;
+          clear(listener);
+          listeners.delete(listener);
+          Queue.endUnsafe(listener.frames);
+          if (listeners.size === 0) onIdle();
+        },
+      });
+    },
+    publish(frame: SessionFrame, revision = Infinity): void {
+      if (ended) return;
+      const publicFrame = withoutSandboxFailures(frame);
+      for (const listener of listeners) {
+        if (listener.closed || listener.lagged || revision <= listener.observed)
+          continue;
+        const value = listener.includeSandboxFailures ? frame : publicFrame;
+        const { bytes } = encodeSessionFrame(value);
+        if (
+          listener.bytes + bytes > 1_048_576 ||
+          !Queue.offerUnsafe(listener.frames, value)
+        ) {
+          clear(listener);
+          // Keep exactly one reset obligation; no incoming backlog can grow it.
+          listener.lagged = true;
+          Queue.offerUnsafe(listener.frames, "reset");
+        } else {
+          listener.bytes += bytes;
+        }
+      }
+    },
+    end(error?: ShiitakeError): void {
+      if (ended) return;
+      ended = true;
+      failure = error;
+      for (const listener of listeners) {
+        clear(listener);
+        listener.lagged = false;
+        Queue.endUnsafe(listener.frames);
+      }
+    },
+  };
+}
 
 /** Finite process-local signal; durable owner state remains authoritative. */
 export type ObservationSignal =
@@ -27,6 +171,7 @@ type OwnerPublisher = Readonly<{
   observes: (sessionId: string) => boolean;
 }>;
 type Listener = {
+  revision: number;
   readonly sessionId: string;
   readonly settlementOnly: boolean;
   closed: boolean;
@@ -51,6 +196,8 @@ export function hasOwnerObservers(
 
 /** One scoped process-local observation registration. */
 export type ObservationRegistration = Readonly<{
+  /** Owner-hint revision for the snapshot/live join, never a wire cursor. */
+  revision: number;
   /** Inspect and consume one pending finite signal without waiting. */
   pollSignal: Effect.Effect<ObservationSignal | undefined>;
   /** Await and consume one finite observation signal. */
@@ -101,7 +248,9 @@ function queueObservation(listener: Listener, reason: ObservationHint): void {
 }
 
 function deliverObservation(listener: Listener, reason: ObservationHint): void {
-  if (listener.closed || listener.reset) return;
+  if (listener.closed) return;
+  listener.revision += 1;
+  if (listener.reset) return;
   const wake = listener.wake;
   if (wake === undefined) {
     queueObservation(listener, reason);
@@ -253,6 +402,7 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
           );
 
         const listener: Listener = {
+          revision: 0,
           sessionId,
           settlementOnly: interest === "settlement",
           closed: false,
@@ -285,6 +435,9 @@ export function openObservationKernel(store: SqliteOwner): ObservationKernel {
 
         return Effect.succeed(
           Object.freeze({
+            get revision() {
+              return listener.revision;
+            },
             pollSignal,
             awaitSignal,
             close: () => {

@@ -436,6 +436,21 @@ it("Last-Event-ID resumes strictly after one opaque Shiitake cursor", async () =
   );
 });
 
+it("Hono sends typed heartbeats without changing the native EventSource cursor", async () => {
+  const routes = fixtureRoutes(() =>
+    makeSession({
+      subscribe: () => frames([reset, { kind: "heartbeat" }]),
+    }),
+  );
+  const response = await routes.request(
+    "http://shiitake.test/sessions/demo-session/events?mode=subscribe",
+  );
+  await expect(response.text()).resolves.toBe(
+    `event: frame\ndata: ${JSON.stringify(reset)}\nid: opaque-cursor-2\n\n` +
+      'event: frame\ndata: {"kind":"heartbeat"}\n\n',
+  );
+});
+
 it("a reset to an empty baseline clears the native EventSource cursor", async () => {
   const emptyReset: SessionFrame = {
     ...reset,

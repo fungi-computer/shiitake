@@ -63,19 +63,24 @@ export async function proveToolOutput(
   const runtime = await Effect.runPromise(
     openRuntimeCoordinator(options, contract.core, []),
   );
+  const ownerContext = await Effect.runPromise(Effect.context());
   let workId = "";
   let executionId = "";
   // The scheduler seam is held running while the real Mule executes the scripted tool.
   const owner = toPromiseOwner(
-    openCoordinator(options, {
-      ...runtime,
-      readQueueHead: () =>
-        Effect.succeed({
-          state: "running",
-          jobId: workId,
-          cancellationRequested: false,
-        }),
-    }),
+    openCoordinator(
+      options,
+      {
+        ...runtime,
+        readQueueHead: () =>
+          Effect.succeed({
+            state: "running",
+            jobId: workId,
+            cancellationRequested: false,
+          }),
+      },
+      ownerContext,
+    ),
   );
   const session = owner.session("scripted-output");
   const produced = Effect.runSync(Deferred.make<undefined>());

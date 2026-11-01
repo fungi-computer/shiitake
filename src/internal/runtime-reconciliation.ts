@@ -30,6 +30,7 @@ import {
   readExtensionAdmissionOrigin,
   readSettledRunFacts,
   readSettlementContent,
+  readSettlementStretchContent,
   readSettlementDiagnostic,
   readSessionDelegator,
   readSettlementMeta,
@@ -164,7 +165,11 @@ function reportToDelegator(
       catch: () => runtimeFailure("Session attention is unavailable"),
     });
     const settled = yield* settlementFacts(store, job, waiting);
-    yield* fanOut(mailRoom, { ...settled, delegator });
+    const content =
+      job.outcome === "cancelled"
+        ? ""
+        : yield* readSettlementStretchContent(store, payload.work);
+    yield* fanOut(mailRoom, { ...settled, content, delegator });
   });
 }
 
