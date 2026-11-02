@@ -1,5 +1,19 @@
 # @fungi.computer/shiitake
 
+## 0.9.1
+
+### Patch Changes
+
+- Changes since 0.9.0:
+
+  - perf(shiitake): fewer wait cycles, no dead HTTP server, one duplicate
+    restart case
+
+- Updated dependencies
+  - @fungi.computer/agar@0.7.0
+  - @fungi.computer/knapsack@0.4.4
+  - @fungi.computer/mycelium@0.3.3
+
 ## 0.9.0
 
 ### Minor Changes

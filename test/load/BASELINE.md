@@ -1,7 +1,7 @@
 # Local live-updates load baseline
 
-`HEAVY=/nonexistent/load-proof pnpm --dir packages/shiitake test:load` on
-`test/live-updates-load-harness`, 2026-10-25. Three independent invocations,
+`HEAVY=/nonexistent/load-proof pnpm --dir packages/shiitake load:live-updates`
+on `test/live-updates-load-harness`, 2026-10-25. Three independent invocations,
 each with three fresh zero-watcher/watched pairs. All exit 1. Under the
 superseded absolute-control rule, invocation 1 stopped at a zero-watcher p99
 above the S5 bar; that is not a failure under the current relative-control rule.

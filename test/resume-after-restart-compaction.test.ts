@@ -15,22 +15,12 @@ const decodeSessionRow = Schema.decodeUnknownSync(
 );
 
 it(
-  "passes pre-restart assistant and recovered tool result into real compaction",
+  "passes pre-restart assistant and recovered tool result into real compaction and rebuilds context from its stored model message",
   () =>
     withDatabase(async (path) => {
       await killed(path, "crash-tool", "tool-started");
       expectOutcome(await finished(path, "compact-recovered"), "completed");
       expect(await readFile(path + ".summary", "utf8")).toBe("paired\n");
-    }),
-  30_000,
-);
-
-it(
-  "rebuilds the context after a restart from the stored compaction model message",
-  () =>
-    withDatabase(async (path) => {
-      await killed(path, "crash-tool", "tool-started");
-      expectOutcome(await finished(path, "compact-recovered"), "completed");
       const fixture = createNativeSqliteOwnerFixture(path);
       try {
         const { id } = decodeSessionRow(

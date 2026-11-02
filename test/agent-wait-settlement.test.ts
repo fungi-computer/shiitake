@@ -2,7 +2,6 @@ import { Mycelium } from "@fungi.computer/mycelium";
 import { directSandbox } from "@fungi.computer/mycelium/testing";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
-import { isString } from "effect/Predicate";
 import { expect, it } from "vitest";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { fauxModel } from "@fungi.computer/mule/testing";
@@ -15,7 +14,7 @@ import { memoryHost } from "../src/testing.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
 it.each([false, true])(
-  "160 in-flight agents.wait calls avoid observation work (HTTP: %s)",
+  "72 in-flight agents.wait calls avoid observation work (HTTP: %s)",
   async (remote) => {
     async function measure(waiting: boolean) {
       const fixture = createNativeSqliteOwnerFixture();
@@ -38,7 +37,7 @@ it.each([false, true])(
         },
       };
       const faux = fauxModel(
-        Array.from({ length: 160 }, () => fauxAssistantMessage("answer")),
+        Array.from({ length: 72 }, () => fauxAssistantMessage("answer")),
         { tokenSize: { min: 1, max: 1 }, tokensPerSecond: 2_000 },
       );
       const host = await memoryHost({
@@ -93,53 +92,9 @@ it.each([false, true])(
         host.agent.deleteSession,
         () => host.agent.extensions,
       );
-      // The old watch path uses native EventSource over this real HTTP endpoint.
-      // Run the base comparison with NODE_OPTIONS=--experimental-eventsource.
-      const server = createServer((request, response) => {
-        const abort = new AbortController();
-        const closed = once(response, "close");
-        response.on("close", () => {
-          abort.abort();
-        });
-        void (async () => {
-          const result = await routes.fetch(
-            new Request(new URL(request.url ?? "/", "http://localhost"), {
-              signal: abort.signal,
-            }),
-          );
-          response.writeHead(result.status, Object.fromEntries(result.headers));
-          if (result.body !== null) {
-            const reader = result.body.getReader();
-            try {
-              await Promise.race([
-                closed,
-                (async () => {
-                  for (;;) {
-                    const chunk = await reader.read();
-                    if (chunk.done) return;
-                    response.write(chunk.value);
-                  }
-                })(),
-              ]);
-            } finally {
-              await reader.cancel();
-            }
-          }
-          response.end();
-        })().catch((error: unknown) => {
-          response.destroy(
-            error instanceof Error ? error : new Error(String(error)),
-          );
-        });
-      });
-      server.listen(0, "127.0.0.1");
-      await once(server, "listening");
-      const address = server.address();
-      if (address === null || isString(address))
-        throw new Error("Missing HTTP listener address");
       const requests: string[] = [];
       const client = createShiitakeClient({
-        baseUrl: `http://127.0.0.1:${String(address.port)}`,
+        baseUrl: "https://agent.internal",
         fetch: (input, init) => {
           const request = new Request(input, init);
           requests.push(new URL(request.url).pathname);
@@ -161,7 +116,9 @@ it.each([false, true])(
           if (agents?.wait === undefined)
             throw new Error("Missing agents.wait");
           const wait = agents.wait;
-          for (let cycle = 0; cycle < 20; cycle += 1) {
+          // 9 x 8 = 72 cumulative waits exceed the owner's 64 observation
+          // registrations, so a wait that leaks its registration fails here.
+          for (let cycle = 0; cycle < 9; cycle += 1) {
             const targets = [];
             for (let index = 0; index < 8; index += 1) {
               const sessionId = `helper-${String(index)}`;
@@ -219,7 +176,7 @@ it.each([false, true])(
         if (remote && waiting && snapshotReads === 0)
           expect(
             requests.filter((path) => path.endsWith("/settlement")),
-          ).toHaveLength(160);
+          ).toHaveLength(72);
         return { snapshotReads, contextReads, progressFrames };
       } finally {
         await lease.release();
@@ -227,13 +184,6 @@ it.each([false, true])(
         await client.close();
         await host.close();
         fixture.close();
-        server.closeAllConnections();
-        await new Promise<void>((resolve, reject) =>
-          server.close((error) => {
-            if (error) reject(error);
-            else resolve();
-          }),
-        );
       }
     }
     const control = await measure(false);
@@ -384,5 +334,3 @@ it("aborted and closed HTTP settlement reads release registrations without cance
     await host.close();
   }
 });
-import { createServer } from "node:http";
-import { once } from "node:events";
