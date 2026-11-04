@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.10.0
+
+### Minor Changes
+
+- Changes since 0.9.2:
+
+  - feat(oyster): compose authenticated standalone website visitors
+
 ## 0.9.2
 
 ### Patch Changes

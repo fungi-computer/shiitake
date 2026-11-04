@@ -261,12 +261,14 @@ export type ShiitakeOptions = Readonly<{
 /**
  * A host's access data for its Agent's tools. Grants are keyed by module id;
  * a module an extension built is granted by that extension's id. A missing id
- * keeps full access, so a first-time host writes no permission code.
+ * keeps full access unless the host explicitly chooses a different default.
  */
 export type ToolAccess = Pick<
   AccessOptions,
   /** The Agent-wide default; a Session's delivered grants override it. */
   | "grants"
+  /** The fallback when neither Agent-wide nor Session grants name a module. */
+  | "defaultGrant"
   /** Keys refused unless a delivery or the default names them: fail closed. */
   | "required"
   /** Ask a person to approve one `confirm` call; absent refuses those calls. */
