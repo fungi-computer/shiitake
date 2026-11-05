@@ -1,5 +1,18 @@
 # @fungi.computer/shiitake
 
+## 0.11.0
+
+### Minor Changes
+
+- Changes since 0.10.0:
+
+  - feat(front-doors): lead with the local try-it path and an install-now button
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/seam@0.2.2
+
 ## 0.10.0
 
 ### Minor Changes

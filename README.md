@@ -17,6 +17,47 @@ There are three ways to run it:
 To add your own behaviour, start the extension guide at
 [Your first extension](https://docs.fungi.computer/shiitake/extensions/first-extension/).
 
+## Choose how to start
+
+**Use the terminal agent.** Run Shiitake in your project folder, on your Claude
+or ChatGPT subscription, a provider key or Fungi hosted models. Needs Node 22.13
+or newer on Linux or macOS.
+
+```sh
+npm i -g @fungi.computer/spore
+cd your-project
+fungi
+```
+
+**Embed the library.** Host durable Agent Sessions in your own code. This runs
+one Session with a test model, so it needs no provider account or key.
+
+```sh
+npm init -y && npm pkg set type=module
+npm install @fungi.computer/shiitake @earendil-works/pi-ai@1.3.0
+npm install --save-dev tsx@4.23.12
+```
+
+```ts title="hello.ts"
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { memoryHost, fauxModelSource } from "@fungi.computer/shiitake/testing";
+
+const host = await memoryHost({
+  model: fauxModelSource([fauxAssistantMessage("Ready.")]),
+});
+try {
+  const session = host.agent.session("first-session");
+  await session.send("Say hello.", { requestId: "first-session-prompt" });
+  const snapshot = await host.settle("first-session");
+  console.log(JSON.stringify(snapshot.messages.at(-1)?.value, null, 2));
+} finally {
+  await host.close();
+}
+```
+
+Run it with `node --import tsx hello.ts`; the last message is the reply
+`Ready.`.
+
 ## Community-funded
 
 We don't take VC money. Fungi is built in the open and proudly backed by its
