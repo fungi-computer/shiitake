@@ -1,5 +1,17 @@
 # @fungi.computer/shiitake
 
+## 0.11.1
+
+### Patch Changes
+
+- Changes since 0.11.0:
+
+  - fix(docs): gate Bird-dog Shiitake and Seam API freshness
+  - fix(docs): lead Shiitake home with terminal setup
+
+- Updated dependencies
+  - @fungi.computer/bird-dog@0.3.3
+
 ## 0.11.0
 
 ### Minor Changes

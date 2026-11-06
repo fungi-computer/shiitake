@@ -599,13 +599,13 @@ Validated immutable construction bag for the durable harness.
 ```ts
 type ToolAccess = Pick<
   AccessOptions,
-  "grants" | "required" | "confirm" | "onRefused"
+  "grants" | "defaultGrant" | "required" | "confirm" | "onRefused"
 >;
 ```
 
 A host's access data for its Agent's tools. Grants are keyed by module id; a
 module an extension built is granted by that extension's id. A missing id keeps
-full access, so a first-time host writes no permission code.
+full access unless the host explicitly chooses a different default.
 
 ---
 

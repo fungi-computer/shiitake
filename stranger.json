@@ -227,9 +227,9 @@
             "description": "npm i -g @fungi.computer/spore, then run fungi in your project with your Claude or ChatGPT subscription."
           },
           {
-            "title": "Your first Session",
+            "title": "Embed it in your app",
             "href": "/quickstart/",
-            "description": "Send a prompt, settle the run and read what the Agent did."
+            "description": "Use the TypeScript library: install it, run your first Session and read what the Agent did."
           },
           {
             "title": "Concepts",
@@ -276,7 +276,29 @@
             "description": "Common errors and how to recover."
           }
         ]
-      }
+      },
+      "primaryAction": {
+        "title": "Run in your terminal",
+        "href": "/use-the-cli/"
+      },
+      "start": [
+        {
+          "title": "Install the fungi command",
+          "body": "Node 22.13 or newer. Linux or macOS. Spore installs Shiitake in your terminal.",
+          "code": {
+            "code": "npm i -g @fungi.computer/spore",
+            "lang": "sh"
+          }
+        },
+        {
+          "title": "Start in your project",
+          "body": "Run this in your project folder. Choose your Claude or ChatGPT subscription, finish browser sign-in, then send your first prompt. A Fungi account is optional.",
+          "code": {
+            "code": "fungi",
+            "lang": "sh"
+          }
+        }
+      ]
     }
   }
 }

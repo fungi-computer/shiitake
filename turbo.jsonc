@@ -1,0 +1,10 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    // TypeDoc checks examples that import this package's published subpaths.
+    "docs": {
+      "dependsOn": ["build"],
+    },
+  },
+}
