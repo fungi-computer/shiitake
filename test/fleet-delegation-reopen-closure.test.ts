@@ -80,8 +80,6 @@ it("reuses delegation admission and completed settlement across actual Agent and
       {
         fanOut: () => Effect.void,
         postMail: () => Effect.void,
-        drainOutbox: () => Effect.void,
-        nextWakeAt: () => Effect.succeed(undefined),
       },
     );
     try {

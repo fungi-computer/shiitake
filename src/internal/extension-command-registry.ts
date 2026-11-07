@@ -9,6 +9,7 @@ import type {
   ExtensionCommandError,
   ExtensionCommandCallerV0,
   ExtensionRead,
+  ExtensionPreparationV0,
   ExtensionStateError,
   ExtensionTx,
   Json,
@@ -16,9 +17,10 @@ import type {
 import { invokeTransactionHook } from "./extension-hook.js";
 import { JsonValueSchema } from "./json-value.js";
 
+/** Failures retained across read-only preparation and atomic dispatch. @inline */
 type CommandFailure =
   ExtensionCommandError | ExtensionStateError | AdmissionError;
-/** A parsed invocation retains its typed handler until the transaction runs. */
+/** Parsed input retains its typed preparation and atomic body. */
 export type RegisteredExtensionCommandV0 = (
   frame: Readonly<{
     sessionId: string | null;
@@ -26,13 +28,18 @@ export type RegisteredExtensionCommandV0 = (
     caller?: ExtensionCommandCallerV0;
   }>,
 ) => Result.Result<
-  () => Effect.Effect<
+  ExtensionPreparationV0<
     Json,
-    ExtensionCommandError | ExtensionStateError | AdmissionError,
-    ExtensionTx | ExtensionRead
+    ExtensionCommandError | ExtensionStateError | AdmissionError
   >,
   Schema.SchemaError
 >;
+
+type CommandCall<Scope extends keyof CommandSessionIdsV0, Input> = Readonly<{
+  sessionId: CommandSessionIdsV0[Scope];
+  input: Input;
+  caller?: ExtensionCommandCallerV0;
+}>;
 
 type SessionSchemas = {
   [K in keyof CommandSessionIdsV0]: Schema.Codec<CommandSessionIdsV0[K]>;
@@ -48,19 +55,21 @@ function bindCommand<
   Output extends Schema.Codec<unknown>,
 >(
   spec: Readonly<{ scope: Scope; input: Input; output: Output }>,
-  handler: (
-    call: Readonly<{
-      sessionId: CommandSessionIdsV0[Scope];
-      input: Input["Type"];
-      caller?: ExtensionCommandCallerV0;
-    }>,
-  ) =>
-    | Output["Type"]
-    | Effect.Effect<
-        Output["Type"],
-        CommandFailure,
-        ExtensionTx | ExtensionRead
-      >,
+  handler:
+    | ((
+        call: CommandCall<Scope, Input["Type"]>,
+      ) =>
+        | Output["Type"]
+        | Effect.Effect<
+            Output["Type"],
+            CommandFailure,
+            ExtensionTx | ExtensionRead
+          >)
+    | Readonly<{
+        prepare: (
+          call: CommandCall<Scope, Input["Type"]>,
+        ) => ExtensionPreparationV0<Output["Type"], CommandFailure>;
+      }>,
 ): RegisteredExtensionCommandV0 {
   const session: Schema.Codec<CommandSessionIdsV0[Scope]> =
     sessionSchemas[spec.scope];
@@ -68,26 +77,36 @@ function bindCommand<
   const decodeInput = Schema.decodeUnknownResult(spec.input, {
     onExcessProperty: "error",
   });
+  const encodeBody = (
+    body: Effect.Effect<
+      Output["Type"],
+      CommandFailure,
+      ExtensionTx | ExtensionRead
+    >,
+  ) =>
+    body.pipe(
+      Effect.flatMap((output) =>
+        Schema.encodeEffect(spec.output)(output).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(JsonValueSchema)),
+          Effect.orDie,
+        ),
+      ),
+    );
   return (frame) =>
     Result.flatMap(decodeSession(frame.sessionId), (sessionId) =>
-      Result.map(
-        decodeInput(frame.input),
-        (input) => () =>
-          invokeTransactionHook(() =>
-            handler(
-              frame.caller === undefined
-                ? { sessionId, input }
-                : { sessionId, input, caller: frame.caller },
-            ),
-          ).pipe(
-            Effect.flatMap((output) =>
-              Schema.encodeEffect(spec.output)(output).pipe(
-                Effect.flatMap(Schema.decodeUnknownEffect(JsonValueSchema)),
-                Effect.orDie,
-              ),
-            ),
-          ),
-      ),
+      Result.map(decodeInput(frame.input), (input) => {
+        const call =
+          frame.caller === undefined
+            ? { sessionId, input }
+            : { sessionId, input, caller: frame.caller };
+        return "prepare" in handler
+          ? Effect.suspend(() => handler.prepare(call)).pipe(
+              Effect.map(encodeBody),
+            )
+          : Effect.succeed(
+              encodeBody(invokeTransactionHook(() => handler(call))),
+            );
+      }),
     );
 }
 

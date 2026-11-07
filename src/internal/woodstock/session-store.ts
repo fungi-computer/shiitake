@@ -9,6 +9,7 @@ import type {
   MuleResume,
 } from "@fungi.computer/mule/effect";
 import * as Schema from "effect/Schema";
+import type { WatchdogCancellationResult } from "@fungi.computer/watchdog/effect";
 
 import type { ModelPreference } from "../model-preference.js";
 
@@ -646,7 +647,7 @@ export type RecordAcceptedCancellation = (
     cancellationId: string;
     onlyIfPending?: boolean;
   }>,
-) => Readonly<{ status: "recorded" | "replayed" | "conflict" | "missing" }>;
+) => WatchdogCancellationResult;
 
 export type SessionTreeNode = Readonly<{
   row: StoredSessionRow;
@@ -1511,7 +1512,7 @@ export function deleteStoredSession(
  * Older preview stores require explicit host custody; no compatibility reader
  * or automatic rewrite runs when the store opens.
  */
-const currentWoodstockSchemaVersion = 3;
+const currentWoodstockSchemaVersion = 6;
 const currentWoodstockProtocol = "shiitake.extension/v0";
 
 function tableExists(owner: SqliteOwner, name: string): boolean {
@@ -4280,6 +4281,8 @@ function acceptSessionCancellationInTransaction(
     !settleMissing
   )
     return undefined;
+  // Execution has already decided its outcome; projection may still be retrying.
+  if (decision.status === "decided") return undefined;
   // Watchdog refuses an `onlyIfQueued` cancel once the job has been claimed.
   if (decision.status === "conflict" && onlyIfPending) return undefined;
   if (decision.status !== "recorded" && decision.status !== "missing")

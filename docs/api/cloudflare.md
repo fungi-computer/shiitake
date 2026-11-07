@@ -372,12 +372,7 @@ delivery outbox. Shiitake never interprets it.
 ### CloudflareHostJobs
 
 ```ts
-type CloudflareHostJobs = Readonly<{
-  lane: string;
-  open: (runtime) => Readonly<{
-    execute: (job) => Promise<WatchdogExecutionDecision>;
-  }>;
-}>;
+type CloudflareHostJobs = ShiitakeHostJobs;
 ```
 
 Host jobs use a separate slot in Shiitake's one Watchdog and native alarm.

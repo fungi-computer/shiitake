@@ -252,6 +252,7 @@ const LiveRetryEventSchema = Schema.Union([
     attempt: Schema.Number,
     maxAttempts: Schema.Number,
     delayMs: Schema.Number,
+    dueAt: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
     errorMessage: Schema.String,
   }),
   Schema.Struct({
@@ -272,8 +273,8 @@ const LiveRetryEventSchema = Schema.Union([
  * One retained Pi live-retry observation, as Woodstock stores it under its
  * `live_retry` session entry kind. Mule's retry loop (`retryAssistantCall`
  * wrapped around each assistant call in `packages/mule/src/effect.ts`)
- * produces the generic `MuleRetryObservation`; `run-scope.ts` maps that onto
- * this exact shape before calling `recordLiveRetryEvent`.
+ * produces `MuleRetryObservation`; the scoped Woodstock recorder maps it
+ * using the acquired model identity before committing this exact shape.
  */
 export type LiveRetryEvent = Schema.Schema.Type<typeof LiveRetryEventSchema>;
 const fingerprint = Schema.String.pipe(
@@ -552,6 +553,19 @@ const StoredSessionEntrySchema = Schema.Union([
 export type StoredSessionEntry = Schema.Schema.Type<
   typeof StoredSessionEntrySchema
 >;
+
+const equivalentEntry = Schema.toEquivalence(StoredSessionEntrySchema);
+
+/** Compare the retained representation, including omission of undefined keys. */
+export function sameStoredSessionEntry(
+  left: StoredSessionEntry,
+  right: StoredSessionEntry,
+): boolean {
+  return equivalentEntry(
+    validateEntryJson(encodeJson(left)),
+    validateEntryJson(encodeJson(right)),
+  );
+}
 
 const StoredSessionEntryTextSchema = Schema.fromJsonString(
   StoredSessionEntrySchema,

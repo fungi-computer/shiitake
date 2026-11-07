@@ -134,7 +134,10 @@ export const escalateOutput = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("escalated"),
     /** Who the item waits on now. */
-    to: z.literal("person"),
+    to: z.enum(["person", "agent"]),
+    waitingOn: z
+      .strictObject({ agentId: id, sessionId: id, name: id })
+      .exactOptional(),
   }),
   z.strictObject({ status: z.literal("not_found") }),
   z.strictObject({ status: z.literal("closed"), reason: closedReasons }),
@@ -145,6 +148,33 @@ export const escalateOutput = z.discriminatedUnion("status", [
 export type AgentControlAnswerOutput = z.infer<typeof answerOutput>;
 /** Typed outcome of a sender's escalation of a child's item. */
 export type AgentControlEscalateOutput = z.infer<typeof escalateOutput>;
+/** Wire schema naming the target Session and an exact-delegator goal action. */
+export const goalControlInput = z.strictObject({
+  agentId: id,
+  sessionId: id,
+  action: z.enum(["pause", "resume", "clear"]),
+  reason: z.string().min(1).max(1000).regex(/\S/u),
+});
+/** Wire schema for a delegator's goal-control result or explicit refusal. */
+export const goalControlOutput = z.discriminatedUnion("status", [
+  z.strictObject({
+    status: z.enum(["paused", "resumed", "cleared", "no_goal", "closed"]),
+  }),
+  z.strictObject({
+    status: z.literal("refused"),
+    reason: z.enum([
+      "not_delegator",
+      "no_provenance",
+      "not_sender",
+      "not_paused_by_delegator",
+    ]),
+  }),
+  unsupported,
+]);
+/** Target and action for authenticated exact-delegator goal control. */
+export type AgentControlGoalInput = z.infer<typeof goalControlInput>;
+/** Outcome of authenticated exact-delegator goal control. */
+export type AgentControlGoalOutput = z.infer<typeof goalControlOutput>;
 const sendGoal = z
   .union([z.string().min(1).max(4_000), z.literal(false)])
   .optional();
@@ -471,6 +501,12 @@ export type AgentControlDirectory = Readonly<{
     senderSessionId: string,
     signal: AbortSignal,
   ) => Promise<AgentControlEscalateOutput>;
+  /** Exact delegator's controls; absent on hosts that do not offer this door. */
+  goal?: (
+    input: AgentControlGoalInput,
+    senderSessionId: string,
+    signal: AbortSignal,
+  ) => Promise<AgentControlGoalOutput>;
   /** Present only when this host authorizes ordinary Agent creation. */
   create?: (
     input: Readonly<{
@@ -644,6 +680,7 @@ export function createAgentControlSource(
   const recall = directory.recall;
   const answer = directory.answer;
   const escalate = directory.escalate;
+  const goal = directory.goal;
   const createOperation =
     create === undefined
       ? undefined
@@ -789,7 +826,7 @@ export function createAgentControlSource(
         requestOperations.answer = Mycelium.operation({
           replay: "unsafe",
           description:
-            "Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Only the Session that sent the sub-agent that work can answer; others are refused (not_sender). The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If the question needs a person's decision, call agents.escalate instead.",
+            "Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Only the exact Session the item waits on can answer; others are refused (not_sender). The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If it needs more than you can decide, agents.escalate bubbles it to your parent first. An item you leave keeps waiting on you; you are reminded at most twice. A person sees it only after escalation past every Agent or when its waiting Agent is gone.",
           input: answerInput,
           output: answerOutput,
           execute: async (input, context) => {
@@ -806,7 +843,7 @@ export function createAgentControlSource(
         requestOperations.escalate = Mycelium.operation({
           replay: "unsafe",
           description:
-            "Pass a sub-agent's waiting item on to a person when it needs more than you can decide. Use the itemId from a waiting_on_you entry. Only the Session that sent the sub-agent that work can escalate; others are refused (not_sender). An item you neither answer nor escalate is escalated for you when your turn ends.",
+            "Pass a sub-agent's waiting item to your own parent when it needs more than you can decide; only at the root or with a gone parent does it reach a person. Use the itemId from a waiting_on_you entry. Only the exact Session it waits on may escalate; others are refused (not_sender). An item you leave keeps waiting on you; you are reminded at most twice. A person is asked only when you escalate past every Agent or the waiting Agent is gone.",
           input: escalateInput,
           output: escalateOutput,
           execute: async (input, context) => {
@@ -815,6 +852,23 @@ export function createAgentControlSource(
             return escalateOutput.parse(
               await escalate(input, session.sessionId, context.signal).catch(
                 (cause: unknown) => admitArchiveRefusal("escalate", cause),
+              ),
+            );
+          },
+        });
+      if (goal !== undefined)
+        requestOperations.goal = Mycelium.operation({
+          replay: "unsafe",
+          description:
+            "Pause or clear the goal of a Session you delegated, or resume a goal you paused. Only the exact Session recorded as that child's first delegator may; siblings and other Sessions are refused (not_delegator). This does not cancel a running turn. An item you leave unanswered keeps waiting on you, with at most two reminders.",
+          input: goalControlInput,
+          output: goalControlOutput,
+          execute: async (input, context) => {
+            if (session === undefined)
+              throw new Error("Goal control requires an invoking Session");
+            return goalControlOutput.parse(
+              await goal(input, session.sessionId, context.signal).catch(
+                (cause: unknown) => admitArchiveRefusal("goal", cause),
               ),
             );
           },

@@ -1,4 +1,7 @@
-import { SessionAttentionListSchema } from "./session-attention.js";
+import {
+  SessionAttentionListSchema,
+  AttentionRecipientSchema,
+} from "./session-attention.js";
 import type { CommandSettlement } from "./internal/contracts.js";
 import { PromptImageSchema } from "./internal/client-boundary.js";
 import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
@@ -209,6 +212,7 @@ const SessionContextSchema = Schema.Struct({
 });
 
 export const SessionSnapshotSchema = Schema.Struct({
+  parent: Schema.optionalKey(AttentionRecipientSchema),
   sessionId: Schema.String,
   cursor: Schema.NullOr(Schema.String),
   hasMore: Schema.Boolean,

@@ -20,6 +20,7 @@ import {
   runAcceptedCompaction,
   RunRejectedError,
   ToolSetupError,
+  type RunCustody,
 } from "./run-scope.js";
 import { CompactionCommitError } from "./compaction/session-compaction.js";
 import type { ExtensionRuntime } from "./extension-runtime.js";
@@ -33,7 +34,10 @@ import {
 } from "./woodstock/index.js";
 
 /** Bounded process-loss recovery for every accepted Agent turn. */
-export const agentTurnRecovery = Object.freeze({ maxRecoveries: 2 });
+export const agentTurnRecovery = Object.freeze({
+  maxRecoveries: 2,
+  windowMs: 60_000,
+});
 
 function runtimeFailure(message: string): ShiitakeError {
   return new ShiitakeError("runtime", "rejected", message);
@@ -83,6 +87,7 @@ export function executeAcceptedRun(
   coreDigest: string,
   job: WatchdogRunningJob,
   extensions: ExtensionRuntime | undefined,
+  custody: RunCustody,
 ) {
   return Effect.gen(function* () {
     publishOwnerObservation(options.store, job.queue);
@@ -120,6 +125,7 @@ export function executeAcceptedRun(
         options,
         prepared,
         extensions?.compactionHandoff(participants),
+        custody,
       );
       yield* recordWorkSettlement(options.store, {
         sessionId: prepared.command.sessionId,
@@ -197,6 +203,7 @@ export function executeAcceptedRun(
       extensionModules,
       fileTools,
       extensionHandoff,
+      custody,
       extensions === undefined
         ? undefined
         : () => extensions.promptSections(runIdentity, participants),

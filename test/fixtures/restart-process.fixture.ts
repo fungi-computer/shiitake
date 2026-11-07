@@ -1,11 +1,23 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import { defineExtension } from "../../src/extensions.js";
+import {
+  completingRunOptions,
+  manualExtensionRuntime,
+} from "./extension-host.fixture.js";
+import { grantAll } from "./fixture-extensions.js";
+import assert from "node:assert/strict";
 import { fauxModel } from "@fungi.computer/mule/testing";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { readSelectedPath } from "../../src/internal/woodstock/session-store.js";
 import {
   fauxAssistantMessage,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { requestMessages } from "./model-context.js";
 import { Shiitake } from "../../src/index.js";
+import { make as makeEffect } from "../../src/effect.js";
+import { openPromiseAgent } from "../../src/internal/promise-facade.js";
 import {
   compatibilityRunDependencies,
   createCompatibilityRuntimeHost,
@@ -15,6 +27,145 @@ import {
 const [databasePath, mode] = process.argv.slice(2);
 if (databasePath === undefined) throw new Error("Database path required");
 const fixture = createNativeSqliteOwnerFixture(databasePath);
+if (
+  mode === "crash-timer-arm" ||
+  mode === "crash-timer-recover" ||
+  mode === "finish-timer"
+) {
+  let armed = false;
+  const owner = {
+    ...fixture.owner,
+    transactionSync: <A>(operation: () => A): A => {
+      const value = fixture.owner.transactionSync(operation);
+      if (
+        armed &&
+        mode !== "finish-timer" &&
+        fixture.owner.sql
+          .exec(
+            "SELECT job_id FROM watchdog_jobs WHERE lane='extension_timer' AND state='running'",
+          )
+          .toArray().length > 0
+      ) {
+        // The claim committed; the extension's consumption transaction has not begun.
+        process.send?.("timer-claimed");
+        process.kill(process.pid, "SIGSTOP");
+      }
+      return value;
+    },
+  };
+  const extension = defineExtension("restart-timer").define({
+    commands: {
+      specs: {
+        arm: {
+          scope: "agent",
+          input: Schema.Struct({}),
+          output: Schema.Struct({}),
+        },
+      },
+      handlers: (ctx) => ({
+        arm: () => ctx.timers.set("once", 0).pipe(Effect.as({})),
+      }),
+    },
+    hooks: {
+      onTimer: () =>
+        Effect.sync(() => {
+          fixture.owner.sql.exec("UPDATE timer_effect SET fires=fires+1");
+        }),
+    },
+  });
+  const host = manualExtensionRuntime();
+  const agent = await Effect.runPromise(
+    makeEffect(
+      completingRunOptions(owner, host.runtime, grantAll([extension])),
+    ),
+  );
+  fixture.owner.sql.exec(
+    "CREATE TABLE IF NOT EXISTS timer_effect(fires INTEGER NOT NULL)",
+  );
+  if (mode === "crash-timer-arm") {
+    fixture.owner.sql.exec("INSERT INTO timer_effect VALUES (0)");
+    await Effect.runPromise(agent.extensions.call("restart-timer", "arm", {}));
+  }
+  armed = true;
+  await host.drain();
+  const facts = {
+    fires: fixture.owner.sql.exec("SELECT fires FROM timer_effect").toArray()[0]
+      ?.fires,
+    pointers: fixture.owner.sql
+      .exec("SELECT count(*) AS count FROM shiitake_extension_timers")
+      .toArray()[0]?.count,
+    jobs: fixture.owner.sql
+      .exec(
+        "SELECT state,outcome,recovery_count,attempt_count FROM watchdog_jobs WHERE lane='extension_timer'",
+      )
+      .toArray(),
+    pending: await host.pendingWork(),
+  };
+  await Effect.runPromise(agent.close);
+  fixture.close();
+  process.send?.(facts);
+  process.exit(0);
+}
+const exhaustZero =
+  mode === "crash-exhausted-initial" ||
+  mode === "crash-exhausted-decision-zero";
+const exhaustOne =
+  mode === "crash-exhausted-after-retry" ||
+  mode === "crash-exhausted-decision-one";
+const stopAtExhaustion =
+  mode === "crash-exhausted-decision-zero" ||
+  mode === "crash-exhausted-decision-one";
+let interceptRetryCommit = false;
+const store =
+  mode === "crash-retry-decision" || stopAtExhaustion
+    ? {
+        ...fixture.owner,
+        transactionSync: <A>(operation: () => A): A => {
+          const result = fixture.owner.transactionSync(operation);
+          if (!interceptRetryCommit) return result;
+          const path = readSelectedPath(fixture.owner, {
+            sessionId: "restart",
+          });
+          const retry = path.at(-1)?.entry;
+          if (stopAtExhaustion) {
+            if (
+              retry?.kind !== "live_retry" ||
+              retry.event.type !== "auto_retry_end" ||
+              retry.event.success
+            )
+              return result;
+            process.send?.("retry-exhausted");
+            process.kill(process.pid, "SIGSTOP");
+            return result;
+          }
+          if (
+            !path.some(
+              ({ entry }) =>
+                entry.kind === "message" &&
+                entry.value.role === "assistant" &&
+                entry.value.stopReason === "error",
+            )
+          )
+            return result;
+          writeFileSync(
+            databasePath + ".retry-due",
+            String(
+              retry?.kind === "live_retry" &&
+                retry.event.type === "auto_retry_start"
+                ? retry.event.dueAt
+                : 0,
+            ),
+          );
+          // Stop precisely after the completed error's transaction, before its
+          // listener returns or onRetry/backoff can execute. The parent SIGKILLs us.
+          process.send?.("retry-decided");
+          process.kill(process.pid, "SIGSTOP");
+          return result;
+        },
+      }
+    : fixture.owner;
+if (mode === "finish-completion")
+  fixture.owner.sql.exec("DROP TRIGGER refuse_completion");
 const runtime = createCompatibilityRuntimeHost();
 const dependencies = compatibilityRunDependencies();
 const faux = fauxModel(
@@ -53,7 +204,13 @@ faux.setResponses(
       ]
     : [fauxAssistantMessage("complete")],
 );
-if (mode === "crash-retry" || mode === "crash-retry-abnormal")
+if (
+  mode === "crash-retry" ||
+  mode === "crash-exhausted-after-retry" ||
+  mode === "crash-retry-abnormal" ||
+  mode === "crash-backoff" ||
+  mode === "crash-retry-decision"
+)
   faux.setResponses([
     fauxAssistantMessage("failed attempt", {
       stopReason: "error",
@@ -150,9 +307,25 @@ if (mode === "compact-recovered")
       return fauxAssistantMessage("paired history summary");
     },
   ]);
-const agent = await Shiitake.make({
+// Retry policy is an Effect host option. Use its existing facade adapter for
+// these two policy fixtures; the Promise product API intentionally has no knob.
+const makeAgent: typeof Shiitake.make =
+  exhaustZero || exhaustOne
+    ? (options) =>
+        openPromiseAgent(options, (effectOptions) =>
+          makeEffect({
+            ...effectOptions,
+            retry: {
+              enabled: true,
+              maxRetries: exhaustZero ? 0 : 1,
+              baseDelayMs: 0,
+            },
+          }),
+        )
+    : Shiitake.make;
+const agent = await makeAgent({
   ...dependencies,
-  store: fixture.owner,
+  store,
   runtime: runtime.runtime,
   tools: {
     ...dependencies.tools,
@@ -172,7 +345,15 @@ const agent = await Shiitake.make({
         ...acquired,
         model: faux.model,
         retryable: () =>
-          mode === "crash-retry" || mode === "crash-retry-abnormal",
+          mode === "crash-exhausted-after-retry" ||
+          mode === "crash-retry" ||
+          mode === "crash-retry-abnormal" ||
+          mode === "crash-backoff" ||
+          mode === "crash-retry-decision",
+        retryAfterMs: () =>
+          mode === "crash-backoff" || mode === "crash-retry-decision"
+            ? 10_000
+            : undefined,
         release:
           mode === "crash-abnormal" || mode === "crash-retry-abnormal"
             ? () => {
@@ -182,6 +363,32 @@ const agent = await Shiitake.make({
             : acquired.release,
         stream: (model, context, options) => {
           requests += 1;
+          if (
+            exhaustZero ||
+            exhaustOne ||
+            mode === "finish-exhausted" ||
+            mode === "crash-backoff" ||
+            mode === "crash-retry-decision" ||
+            mode === "crash-retry" ||
+            mode === "finish-retry"
+          ) {
+            const prompt = [
+              ...readSelectedPath(fixture.owner, { sessionId: "restart" }),
+            ]
+              .reverse()
+              .find(({ entry }) => entry.kind === "model_prompt");
+            if (prompt?.entry.kind !== "model_prompt")
+              throw new Error("Missing dispatch fact");
+            appendFileSync(
+              databasePath + ".retry-requests",
+              JSON.stringify({
+                at: Date.now(),
+                attempt: prompt.entry.attempt,
+              }) + "\n",
+            );
+          }
+          if (mode === "crash-completion" || mode === "finish-completion")
+            appendFileSync(databasePath + ".requests", "request\n");
           if (
             mode === "crash-abnormal" ||
             (mode === "crash-retry-abnormal" && requests === 2)
@@ -193,6 +400,8 @@ const agent = await Shiitake.make({
           }
           if (
             mode === "crash-model" ||
+            mode === "crash-exhausted-initial" ||
+            (mode === "crash-exhausted-after-retry" && requests === 2) ||
             mode === "crash-summary-resume" ||
             ((mode === "crash-steer" || mode === "crash-retry") &&
               requests === 2) ||
@@ -208,6 +417,10 @@ const agent = await Shiitake.make({
     },
   },
 });
+if (mode === "crash-completion")
+  fixture.owner.sql.exec(
+    "CREATE TRIGGER refuse_completion BEFORE UPDATE OF state ON watchdog_jobs WHEN NEW.state = 'settled' BEGIN SELECT RAISE(ABORT, 'projection unavailable'); END",
+  );
 if (mode?.startsWith("crash-"))
   await agent.session("restart").command({
     type: "prompt",
@@ -229,7 +442,27 @@ if (mode === "cancel") {
     throw new Error("Missing command");
   await agent.session("restart").cancel({ commandId });
 }
+interceptRetryCommit = mode === "crash-retry-decision" || stopAtExhaustion;
 const running = runtime.runNext();
+if (mode === "crash-backoff") {
+  for (;;) {
+    const retry = [...readSelectedPath(fixture.owner, { sessionId: "restart" })]
+      .reverse()
+      .find(({ entry }) => entry.kind === "live_retry");
+    if (
+      retry?.entry.kind === "live_retry" &&
+      retry.entry.event.type === "auto_retry_start"
+    ) {
+      writeFileSync(
+        databasePath + ".retry-due",
+        String(retry.entry.event.dueAt),
+      );
+      process.send?.("retry-waiting");
+      await new Promise<never>(() => undefined);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 if (mode === "crash-steer") {
   await started;
   await agent.session("restart").command({
@@ -244,6 +477,21 @@ if (mode === "crash-cancel") {
   await started;
   await agent.session("restart").abort();
   process.send?.("cancelled");
+  await new Promise<never>(() => undefined);
+}
+if (mode === "crash-completion") {
+  await assert.rejects(running, {
+    _tag: "ShiitakeError",
+    boundary: "runtime",
+    cause: "rejected",
+    message: "Runtime reconciliation failed",
+  });
+  const row = fixture.owner.sql
+    .exec("SELECT state, outcome FROM watchdog_jobs")
+    .one();
+  if (row.state !== "completing" || row.outcome !== "completed")
+    throw new Error("Execution decision was lost");
+  process.send?.("completion-held");
   await new Promise<never>(() => undefined);
 }
 await running;

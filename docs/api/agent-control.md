@@ -181,6 +181,26 @@ Typed outcome of a sender's escalation of a child's item.
 
 ---
 
+### AgentControlGoalInput
+
+```ts
+type AgentControlGoalInput = z.infer<typeof goalControlInput>;
+```
+
+Target and action for authenticated exact-delegator goal control.
+
+---
+
+### AgentControlGoalOutput
+
+```ts
+type AgentControlGoalOutput = z.infer<typeof goalControlOutput>;
+```
+
+Outcome of authenticated exact-delegator goal control.
+
+---
+
 ### ArchiveRefusalReason
 
 ```ts
@@ -295,6 +315,7 @@ type AgentControlDirectory = Readonly<{
     senderSessionId,
     signal,
   ) => Promise<AgentControlEscalateOutput>;
+  goal?: (input, senderSessionId, signal) => Promise<AgentControlGoalOutput>;
   create?: (input, signal) => Promise<AgentControlAgent>;
   setModel?: (input, signal) => Promise<void>;
   archive?: (input, signal) => Promise<void>;
@@ -387,7 +408,20 @@ const escalateOutput: ZodDiscriminatedUnion<
     ZodObject<
       {
         status: ZodLiteral<"escalated">;
-        to: ZodLiteral<"person">;
+        to: ZodEnum<{
+          agent: "agent";
+          person: "person";
+        }>;
+        waitingOn: ZodExactOptional<
+          ZodObject<
+            {
+              agentId: ZodString;
+              sessionId: ZodString;
+              name: ZodString;
+            },
+            $strict
+          >
+        >;
       },
       $strict
     >,
@@ -437,6 +471,73 @@ Typed outcome of a sender's escalation of a child's item.
 
 ---
 
+### goalControlInput
+
+```ts
+const goalControlInput: ZodObject<
+  {
+    agentId: ZodString;
+    sessionId: ZodString;
+    action: ZodEnum<{
+      clear: "clear";
+      resume: "resume";
+      pause: "pause";
+    }>;
+    reason: ZodString;
+  },
+  $strict
+>;
+```
+
+Wire schema naming the target Session and an exact-delegator goal action.
+
+---
+
+### goalControlOutput
+
+```ts
+const goalControlOutput: ZodDiscriminatedUnion<
+  [
+    ZodObject<
+      {
+        status: ZodEnum<{
+          closed: "closed";
+          paused: "paused";
+          resumed: "resumed";
+          cleared: "cleared";
+          no_goal: "no_goal";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"refused">;
+        reason: ZodEnum<{
+          not_sender: "not_sender";
+          no_provenance: "no_provenance";
+          not_delegator: "not_delegator";
+          not_paused_by_delegator: "not_paused_by_delegator";
+        }>;
+      },
+      $strict
+    >,
+    ZodObject<
+      {
+        status: ZodLiteral<"unavailable">;
+        reason: ZodLiteral<"unsupported">;
+      },
+      $strict
+    >,
+  ],
+  "status"
+>;
+```
+
+Wire schema for a delegator's goal-control result or explicit refusal.
+
+---
+
 ### archiveRefusalReasons
 
 ```ts
@@ -471,7 +572,7 @@ function waitForAgentSettlement(
     delegator: string | null;
     terminal: SessionTerminal;
     content: string;
-    usage: readonly Pick<AssistantMessage, "model" | "usage" | "provider">[];
+    usage: readonly Pick<AssistantMessage, "model" | "provider" | "usage">[];
     toolCalls: number;
     waitingOnYou: readonly Readonly<{
       itemId: string;
@@ -499,7 +600,7 @@ Await one exact durable terminal without opening a transcript observation.
 `Promise`\<`Readonly`\<\{ `acceptedSender`: `string` \| `null`; `delegator`:
 `string` \| `null`; `terminal`: [`SessionTerminal`](client.md#sessionterminal);
 `content`: `string`; `usage`: readonly `Pick`\<`AssistantMessage`, `"model"` \|
-`"usage"` \| `"provider"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
+`"provider"` \| `"usage"`\>[]; `toolCalls`: `number`; `waitingOnYou`: readonly
 `Readonly`\<\{ `itemId`: `string`; `kind`: `string`; `summary`: `string`;
 \}\>[]; \}\>\>
 

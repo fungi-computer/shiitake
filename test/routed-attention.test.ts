@@ -1,4 +1,3 @@
-import { createMemoryOutbox } from "@fungi.computer/carrier/testing";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
@@ -9,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { expect, it } from "vitest";
 
 import type { ShiitakeEffectOptions } from "../src/effect.js";
+import { Shiitake } from "../src/index.js";
 import {
   AttentionRecipientSchema,
   defineExtension,
@@ -17,7 +17,11 @@ import {
 import { openRuntimeCore } from "../src/internal/runtime-core.js";
 import { readSessionInboxPage } from "../src/internal/woodstock/index.js";
 import { grantAll } from "./fixtures/fixture-extensions.js";
-import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import {
+  compatibilityRunDependencies,
+  createCompatibilityRuntimeHost,
+  createNativeSqliteOwnerFixture,
+} from "./fixtures/native-sqlite-owner.fixture.js";
 
 const parent = {
   kind: "agent",
@@ -40,6 +44,21 @@ const probe = defineExtension({ id: probeId, version: "1.0.0" }).define({
   attention: true,
   commands: {
     specs: {
+      parent: {
+        scope: "session",
+        input: Schema.Struct({}),
+        output: Schema.NullOr(AttentionRecipientSchema),
+      },
+      status: {
+        scope: "session",
+        input: Schema.Struct({}),
+        output: Schema.Literals(["present", "archived", "absent", "unknown"]),
+      },
+      next: {
+        scope: "session",
+        input: Schema.Struct({}),
+        output: Schema.String,
+      },
       /** Raise one item for a run, waiting on whoever sent that run. */
       raise: {
         scope: "session",
@@ -48,6 +67,32 @@ const probe = defineExtension({ id: probeId, version: "1.0.0" }).define({
       },
     },
     handlers: (ctx) => ({
+      parent: {
+        prepare: () =>
+          ctx
+            .recipientParent(sender)
+            .pipe(Effect.map((parent) => Effect.succeed(parent))),
+      },
+      status: {
+        prepare: () =>
+          ctx
+            .recipientStatus(sender)
+            .pipe(Effect.map((status) => Effect.succeed(status))),
+      },
+      next: ({ sessionId }) =>
+        Effect.gen(function* () {
+          const result = yield* ctx.send({
+            sessionId,
+            when: "now",
+            prompt: {
+              requestId: "extension-turn",
+              text: "Continue",
+              delivery: "followUp",
+            },
+          });
+          if (result._tag !== "Accepted") throw new Error("Not accepted");
+          return result.commandId;
+        }),
       raise: ({ sessionId, input }) =>
         Effect.gen(function* () {
           const waitingOn = yield* ctx.workSender({
@@ -76,6 +121,72 @@ const probe = defineExtension({ id: probeId, version: "1.0.0" }).define({
       description: "Holds the run_tools grant.",
       operations: {},
     }),
+});
+
+it("a rejecting Promise host presence lookup is unknown, never a defect or gone", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const agent = await Shiitake.make({
+    ...compatibilityRunDependencies(),
+    store: fixture.owner,
+    runtime: createCompatibilityRuntimeHost().runtime,
+    extensions: grantAll([probe]),
+    recipientStatus: () => Promise.reject(new Error("Directory offline")),
+    recipientParent: () => Promise.reject(new Error("Directory offline")),
+  });
+  try {
+    await expect(
+      agent.session("presence").extension(probeId).call("status", {}),
+    ).resolves.toBe("unknown");
+    await expect(
+      agent.session("presence").extension(probeId).call("parent", {}),
+    ).rejects.toMatchObject({ boundary: "store", cause: "unavailable" });
+    expect(await agent.extensions.list()).toMatchObject([
+      { status: "running" },
+    ]);
+  } finally {
+    await agent.close();
+    fixture.close();
+  }
+});
+
+it("an extension-admitted turn in a delegated Session waits on its delegator, unlike a person's message", async () => {
+  const open = await openChild();
+  try {
+    const mail = open.mail("delegated-extension");
+    await Effect.runPromise(
+      open.core.acceptMail(
+        { ...mail, to: { kind: "agent", agentId: child.agentId } },
+        mail.meta,
+        undefined,
+        (notice) => open.posted.push(notice),
+      ),
+    );
+    const created = (await Effect.runPromise(open.core.agent.listSessions()))
+      .sessions[0];
+    if (created === undefined) throw new Error("No delegated Session");
+    const session = open.core.agent.session(created.sessionId);
+    const extension = session.extension(probeId);
+    const workId = await Effect.runPromise(extension.call("next", {}));
+    expect(
+      await Effect.runPromise(
+        extension.call("raise", {
+          workId,
+          itemId: "extension-ask",
+        }),
+      ),
+    ).toEqual(sender);
+    const person = await Effect.runPromise(session.send("A person's message"));
+    expect(
+      await Effect.runPromise(
+        extension.call("raise", {
+          workId: person.commandId,
+          itemId: "person-ask",
+        }),
+      ),
+    ).toBeNull();
+  } finally {
+    await open.close();
+  }
 });
 
 function manualRuntime() {
@@ -107,22 +218,12 @@ async function openChild(
   const faux = fauxModel([]);
   faux.setResponses(replies.map((text) => fauxAssistantMessage(text)));
   const posted: BirdDogMail[] = [];
-  const rows = createMemoryOutbox();
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key) => Effect.promise(() => rows.read(key)),
-        put: (key, value) => Effect.promise(() => rows.put(key, value)),
-        list: (limit, afterKey) =>
-          Effect.promise(() => rows.list(limit, afterKey)),
-        delete: (key) => Effect.promise(() => rows.delete(key)),
-      },
-      post: (mail) =>
+      stage: (mail) =>
         Effect.sync(() => {
-          posted.push(mail);
-          return true;
+          posted.push(...mail);
         }),
-      scheduleWake: () => Effect.void,
       now: () => 100,
     }),
   );

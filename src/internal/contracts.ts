@@ -25,6 +25,11 @@ import type { ModelPreference } from "./model-preference.js";
 
 import type {
   WatchdogSqliteValue,
+  WatchdogExecutor,
+  WatchdogOptions,
+  WatchdogTransactionalProjection,
+  WatchdogReadResult,
+  WatchdogTickResult,
   WatchdogSqliteRow,
   WatchdogSqliteOwner,
   WatchdogSqliteCursor,
@@ -167,10 +172,12 @@ export type RuntimePendingWork = Readonly<{
 
 /** Promise host for scheduling the opaque durable reconciler. */
 export type RuntimeHost = Readonly<{
-  /** Bind the one repeatable zero-input reconciliation callback. */
+  /** Bind independent Session and delivery passes under one wake and close owner. */
   bind: (
     input: Readonly<{
       reconcile: () => Promise<void>;
+      /** Run delivery independently: a held delivery must not block Session work. */
+      reconcileHost: (() => Promise<void>) | undefined;
       pendingWork: () => Promise<RuntimePendingWork>;
     }>,
   ) => Promise<
@@ -224,8 +231,27 @@ export type CompactionOptions = CompactionBudget &
     modelOverrides?: Readonly<Record<string, CompactionBudget>>;
   }>;
 
+/** One native host lane sharing the Agent's existing Watchdog and wake owner. */
+export type ShiitakeHostJobs = Readonly<{
+  /** Delivery lane distinct from Session and extension timer execution. */
+  lane: string;
+  /** Bind the host's existing delivery owner to the shared native scheduler. */
+  open: (
+    runtime: Readonly<{
+      transactional: WatchdogTransactionalProjection;
+      readJob: (jobId: string) => Promise<WatchdogReadResult>;
+      tickConcurrent: () => Promise<WatchdogTickResult>;
+    }>,
+  ) => Readonly<{
+    execute: WatchdogExecutor;
+    retryPolicy?: WatchdogOptions["retryPolicy"];
+  }>;
+}>;
+
 /** Validated immutable construction bag for the durable harness. */
 export type ShiitakeOptions = Readonly<{
+  /** Open the native delivery lane before recovering persisted work. */
+  hostJobs?: ShiitakeHostJobs;
   /**
    * The schema of the opaque metadata this host attaches to prompts and
    * operator lines. Shiitake checks, stores and returns it; the host owns its
@@ -256,6 +282,14 @@ export type ShiitakeOptions = Readonly<{
    * extensions passes `{ roster: [], grants: [] }`.
    */
   extensions: ExtensionRosterV0;
+  /** Host presence check for routed attention. Omission or rejection means unknown. */
+  recipientStatus?: (
+    recipient: import("../session-attention.js").AttentionRecipient,
+  ) => Promise<import("../session-attention.js").RecipientStatus>;
+  /** Read the recipient's first delegator; null proves root, failure never does. */
+  recipientParent?: (
+    recipient: import("../session-attention.js").AttentionRecipient,
+  ) => Promise<import("../session-attention.js").AttentionRecipient | null>;
 }>;
 
 /**

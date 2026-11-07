@@ -5,7 +5,6 @@ import {
   type MuleEvent,
   type MuleError,
   type MuleListener,
-  type MuleRetryObservation,
   type MuleRunInput,
   type MuleTool,
 } from "@fungi.computer/mule/effect";
@@ -45,9 +44,9 @@ import {
   openMuleRecorder,
   readSessionGrants,
   recordLiveRetryEvent,
+  toLiveRetryEvent,
   recordSandboxFailure,
   takeSessionControls,
-  type LiveRetryEvent,
   type PreparedSessionRun,
   type RunContract,
 } from "./woodstock/index.js";
@@ -58,10 +57,17 @@ import {
 // Keep the test's eventual queue-idle budget tied to this product bound.
 export const runFinalizerGraceMs = 1_000;
 
+/** One execution's cleanup evidence, observed only after its fiber has ended. */
+export type RunCustody = {
+  readonly isStopping: () => boolean;
+  released: boolean;
+};
+
 function boundedRunFinalizer<E>(
   name: "instructions" | "model" | "tools",
   workId: string,
   release: Effect.Effect<void, E>,
+  custody: RunCustody,
 ): Effect.Effect<void, E> {
   return Effect.gen(function* () {
     // A detached release may finish later; interrupting a finalizer itself
@@ -71,11 +77,39 @@ function boundedRunFinalizer<E>(
       Fiber.join(fiber).pipe(Effect.as(true)),
       Effect.sleep(runFinalizerGraceMs).pipe(Effect.as(false)),
     );
-    if (!finished)
+    if (!finished) {
+      custody.released = false;
       yield* Effect.logError("shiitake_run_finalizer_hung").pipe(
         Effect.annotateLogs({ workId, finalizer: name }),
       );
+    }
   });
+}
+
+/** Both command and manual compaction own the same bounded model release. */
+function acquireRunModel(
+  options: ShiitakeEffectOptions,
+  prepared: PreparedSessionRun,
+  custody: RunCustody,
+) {
+  return acquireOwnedModel(
+    options.model
+      .acquire({
+        sessionId: prepared.command.sessionId,
+        preference: prepared.modelPreference,
+      })
+      .pipe(
+        Effect.map((model) => ({
+          ...model,
+          release: boundedRunFinalizer(
+            "model",
+            prepared.command.entry.workId,
+            model.release,
+            custody,
+          ),
+        })),
+      ),
+  );
 }
 
 const toolSetupMessages = {
@@ -128,55 +162,6 @@ function rejectedRun(error: MuleError): RunRejectedError {
   return new RunRejectedError(error.phase, error);
 }
 
-/**
- * Map Mule's retry transitions onto Woodstock's retained `live_retry` facts.
- * A started attempt ends the backoff countdown before streaming resumes.
- */
-function toLiveRetryEvent(
-  event: MuleRetryObservation,
-  model: Readonly<{ provider: string; id: string }>,
-): LiveRetryEvent {
-  if (event.type === "retry_attempt_started")
-    return {
-      type: "auto_retry_attempt",
-      run: event.run,
-      attempt: event.attempt,
-    };
-  // Mule's retry text is Pi's private error body. Woodstock's retry journal
-  // feeds status and recovery, not the owner's failed-turn conversation.
-  const safeReason = (
-    "Model request failed. Retry the request. " +
-    unavailableRunReason({
-      runId: event.run.value,
-      provider: model.provider,
-      model: model.id,
-    })
-  ).slice(0, 200);
-  return event.type === "retry_scheduled"
-    ? {
-        type: "auto_retry_start",
-        run: event.run,
-        attempt: event.attempt,
-        maxAttempts: event.maxAttempts,
-        delayMs: event.delayMs,
-        errorMessage: safeReason,
-      }
-    : event.finalError === undefined
-      ? {
-          type: "auto_retry_end",
-          run: event.run,
-          attempt: event.attempt,
-          success: event.success,
-        }
-      : {
-          type: "auto_retry_end",
-          run: event.run,
-          attempt: event.attempt,
-          success: event.success,
-          finalError: safeReason,
-        };
-}
-
 /** Acquire the run's tools for exactly one Session, so hosts can project per Session. */
 function acquiredTools(
   options: ShiitakeEffectOptions,
@@ -186,6 +171,7 @@ function acquiredTools(
   instructions: Pick<InstructionSnapshot, "modules">,
   extensionModules: readonly ModuleRegistration[],
   extensionFileTools: readonly FileTool[],
+  custody: RunCustody,
 ): Effect.Effect<readonly MuleTool[], ShiitakeError, Scope.Scope> {
   const toolSource = options.tools;
   const instructionModules = instructions.modules ?? [];
@@ -226,6 +212,7 @@ function acquiredTools(
         "tools",
         workId,
         Scope.close(toolScope, Exit.succeed(undefined)),
+        custody,
       ),
     );
     const runtime = yield* makeMycelium(
@@ -252,6 +239,7 @@ export function runAcceptedCommand(
   extensionModules: readonly ModuleRegistration[],
   extensionFileTools: readonly FileTool[],
   compactionHandoff: CompactionHandoffV0 | undefined,
+  custody: RunCustody,
   promptSections?: () => Effect.Effect<
     readonly PromptSectionV0[],
     ShiitakeError
@@ -270,25 +258,13 @@ export function runAcceptedCommand(
             "instructions",
             prepared.command.entry.workId,
             Effect.sync(releaseInstructions),
+            custody,
           ),
         );
-      const acquired = yield* acquireOwnedModel(
-        options.model
-          .acquire({
-            sessionId: prepared.command.sessionId,
-            preference: prepared.modelPreference,
-          })
-          .pipe(
-            Effect.map((model) => ({
-              ...model,
-              release: boundedRunFinalizer(
-                "model",
-                prepared.command.entry.workId,
-                model.release,
-              ),
-            })),
-          ),
-      );
+      // Preparatory ports have returned and instruction release is owned.
+      // An interrupted foreign acquisition before this point proves no drain.
+      custody.released = true;
+      const acquired = yield* acquireRunModel(options, prepared, custody);
       const tools = yield* acquiredTools(
         options,
         prepared.command.sessionId,
@@ -297,6 +273,7 @@ export function runAcceptedCommand(
         instructions,
         extensionModules,
         extensionFileTools,
+        custody,
       );
       const accepted = Object.freeze({
         sessionId: prepared.command.sessionId,
@@ -307,6 +284,7 @@ export function runAcceptedCommand(
         options.store,
         accepted,
         executionContract,
+        acquired.model,
       );
       const controlMessages = (
         delivery: "steer" | "followUp",
@@ -339,6 +317,12 @@ export function runAcceptedCommand(
       let failureReason: string | undefined;
       let failedModelAttempts = 0;
       const run = yield* runWithCompaction({
+        cleanup: {
+          graceMs: runFinalizerGraceMs,
+          onUndrained: Effect.sync(() => {
+            custody.released = false;
+          }),
+        },
         store: options.store,
         sessionId: prepared.command.sessionId,
         workId: prepared.command.entry.workId,
@@ -358,6 +342,14 @@ export function runAcceptedCommand(
           // no observer can win a race against a later diagnostic settlement.
           let failedEnd: Extract<MuleEvent, { type: "run_end" }> | undefined;
           const listener: MuleListener = (event: MuleEvent) => {
+            // Host stop preserves the continuation; user cancellation is still
+            // decided by Watchdog's durable cancellation intent.
+            if (
+              custody.isStopping() &&
+              event.type === "run_end" &&
+              event.outcome === "cancelled"
+            )
+              return Effect.void;
             if (event.type === "run_end" && event.outcome === "failed") {
               failedEnd = event;
               return Effect.void;
@@ -377,6 +369,9 @@ export function runAcceptedCommand(
             return recorder(event);
           };
           const input: MuleRunInput = {
+            onUndrained: Effect.sync(() => {
+              custody.released = false;
+            }),
             model: acquired.model,
             modelStreamIdleTimeoutMs: options.modelStreamIdleTimeoutMs,
             retry: options.retry ?? piCodingAgentRetryDefaults,
@@ -386,7 +381,13 @@ export function runAcceptedCommand(
             prepareSystemPrompt: () =>
               (promptSections === undefined
                 ? Effect.succeed<readonly PromptSectionV0[]>([])
-                : promptSections()
+                : promptSections().pipe(
+                    Effect.onInterrupt(() =>
+                      Effect.sync(() => {
+                        custody.released = false;
+                      }),
+                    ),
+                  )
               ).pipe(
                 Effect.map(
                   (sections) =>
@@ -417,6 +418,12 @@ export function runAcceptedCommand(
                 })),
               ),
             onRetry: (event) => {
+              if (
+                custody.isStopping() &&
+                event.type === "retry_finished" &&
+                !event.success
+              )
+                return Effect.void;
               if (event.type === "retry_finished" && !event.success)
                 failedModelAttempts = event.attempt + 1;
               return recordLiveRetryEvent(
@@ -493,17 +500,20 @@ export function runAcceptedCompaction(
   options: ShiitakeEffectOptions,
   prepared: PreparedSessionRun,
   compactionHandoff: CompactionHandoffV0 | undefined,
+  custody: RunCustody,
 ): Effect.Effect<ManualCompactionOutcome, ShiitakeError> {
   return Effect.scoped(
     Effect.gen(function* () {
-      const acquired = yield* acquireOwnedModel(
-        options.model.acquire({
-          sessionId: prepared.command.sessionId,
-          preference: prepared.modelPreference,
-        }),
-      );
+      custody.released = true;
+      const acquired = yield* acquireRunModel(options, prepared, custody);
       const entry = prepared.command.entry;
       return yield* compactSession({
+        cleanup: {
+          graceMs: runFinalizerGraceMs,
+          onUndrained: Effect.sync(() => {
+            custody.released = false;
+          }),
+        },
         store: options.store,
         sessionId: prepared.command.sessionId,
         workId: entry.workId,

@@ -70,11 +70,11 @@ One durable Agent in a SQLite file, owned by this Node process.
 function nodeRuntimeHost(observeFailure): NodeRuntimeHost;
 ```
 
-The Node event loop as Shiitake's runtime host: one reconciliation at a time,
-re-run when woken during a pass, and a timer for the earliest due retry. It has
-no queue policy; Watchdog owns execution and retries. `observeFailure` sees a
-failed pass, which is retried after five seconds; if it throws, the throw is
-logged and the retry still happens.
+The Node event loop as Shiitake's runtime host: one reconciliation per execution
+partition, re-run when woken during a pass, and one timer for the earliest due
+retry. It has no queue policy; Watchdog owns execution and retries.
+`observeFailure` sees a failed pass, which is retried after five seconds; if it
+throws, the throw is logged and the retry still happens.
 
 #### Parameters
 

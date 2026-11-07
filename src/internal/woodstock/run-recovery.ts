@@ -15,6 +15,8 @@ export function recoverAssistantTurn(
       ({ entry }) =>
         entry.kind === "message" && entry.value.role === "assistant",
     );
+  const retry = recoverModelRetry(rows, assistant);
+  if (retry !== undefined) return retry;
   if (
     assistant?.entry.kind !== "message" ||
     assistant.entry.value.role !== "assistant"
@@ -24,6 +26,7 @@ export function recoverAssistantTurn(
   // A later request was already dispatched. Resend that request from the
   // completed transcript, not the previous assistant turn.
   if (
+    !hasFailedRetryDecision(rows) &&
     after.some(
       ({ entry }) =>
         entry.kind === "turn_started" ||
@@ -73,7 +76,71 @@ export function recoverAssistantTurn(
           : { call, state: "pending" },
       ];
     });
-  return { message: assistant.entry.value, tools };
+  return { kind: "assistant", message: assistant.entry.value, tools };
+}
+
+/** Existing retry and model-prompt facts distinguish sleeping from dispatched. */
+function recoverModelRetry(
+  rows: readonly StoredSessionRow[],
+  assistant: StoredSessionRow | undefined,
+): Extract<MuleResume, { kind: "retry" }> | undefined {
+  const boundary = Math.max(
+    assistant?.sequence ?? 0,
+    ...rows
+      .filter(({ entry }) => entry.kind === "compaction")
+      .map(({ sequence }) => sequence),
+  );
+  const after = rows.filter(({ sequence }) => sequence > boundary);
+  const reversed = [...after].reverse();
+  const retry = reversed.find(({ entry }) => entry.kind === "live_retry");
+  const prompt = reversed.find(({ entry }) => entry.kind === "model_prompt");
+  if (
+    retry?.entry.kind === "live_retry" &&
+    retry.entry.event.type === "auto_retry_end" &&
+    (prompt === undefined || prompt.sequence < retry.sequence)
+  )
+    return undefined;
+  const scheduled = reversed.find(
+    ({ entry }) =>
+      entry.kind === "live_retry" && entry.event.type === "auto_retry_start",
+  );
+  let common: Pick<
+    Extract<MuleResume, { kind: "retry" }>,
+    "kind" | "message" | "maxAttempts"
+  > = { kind: "retry" };
+  if (
+    assistant?.entry.kind === "message" &&
+    assistant.entry.value.role === "assistant" &&
+    assistant.entry.value.stopReason === "error"
+  )
+    common = { ...common, message: assistant.entry.value };
+  if (
+    scheduled?.entry.kind === "live_retry" &&
+    scheduled.entry.event.type === "auto_retry_start"
+  )
+    common = { ...common, maxAttempts: scheduled.entry.event.maxAttempts };
+  if (retry?.entry.kind === "live_retry") {
+    const event = retry.entry.event;
+    if (
+      event.type === "auto_retry_start" &&
+      (prompt === undefined || prompt.sequence < retry.sequence)
+    )
+      return {
+        ...common,
+        phase: "waiting",
+        attempt: event.attempt,
+        dueAt: event.dueAt,
+      };
+    if (event.type === "auto_retry_attempt")
+      return { ...common, phase: "dispatched", attempt: event.attempt };
+  }
+  if (prompt?.entry.kind === "model_prompt")
+    return {
+      ...common,
+      phase: "dispatched",
+      attempt: prompt.entry.attempt - 1,
+    };
+  return undefined;
 }
 
 /** One visibility rule for model context and compaction, including recovered runs. */
@@ -113,13 +180,46 @@ export function contextMessageIds(
   return messages;
 }
 
+/** An inert reopen cannot erase a failed retry decision; a new request can. */
+function hasFailedRetryDecision(rows: readonly StoredSessionRow[]): boolean {
+  const retry = [...rows]
+    .reverse()
+    .find(({ entry }) => entry.kind === "live_retry");
+  return (
+    retry?.entry.kind === "live_retry" &&
+    retry.entry.event.type === "auto_retry_end" &&
+    !retry.entry.event.success &&
+    !rows.some(
+      ({ sequence, entry }) =>
+        sequence > retry.sequence &&
+        (entry.kind === "model_prompt" ||
+          (entry.kind === "compaction" && entry.data.resumesRun)),
+    )
+  );
+}
+
 /** Returned assistant failures still pass through compaction; abnormal exits do not. */
 export function abnormalTerminal(
   rows: readonly StoredSessionRow[],
 ): "failed" | "cancelled" | undefined {
   const reversed = [...rows].reverse();
   const terminal = reversed.find(({ entry }) => entry.kind === "run_terminal");
-  if (terminal?.entry.kind !== "run_terminal") return undefined;
+  const latestAssistant = reversed.find(
+    ({ entry }) => entry.kind === "message" && entry.value.role === "assistant",
+  );
+  // Exhaustion may have no assistant at all (the first request never returned).
+  // An error or aborted response still follows ordinary assistant recovery.
+  const retryFailure =
+    hasFailedRetryDecision(rows) &&
+    !(
+      latestAssistant?.entry.kind === "message" &&
+      latestAssistant.entry.value.role === "assistant" &&
+      (latestAssistant.entry.value.stopReason === "error" ||
+        latestAssistant.entry.value.stopReason === "aborted")
+    )
+      ? "failed"
+      : undefined;
+  if (terminal?.entry.kind !== "run_terminal") return retryFailure;
   if (
     rows.some(
       ({ sequence, entry }) =>
@@ -128,7 +228,7 @@ export function abnormalTerminal(
           (entry.kind === "compaction" && entry.data.resumesRun)),
     )
   )
-    return undefined;
+    return retryFailure;
   if (terminal.entry.outcome === "cancelled") return "cancelled";
   if (terminal.entry.outcome !== "failed") return undefined;
   const turn = reversed.find(({ entry }) => entry.kind === "turn_started");

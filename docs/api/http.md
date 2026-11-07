@@ -86,7 +86,7 @@ Sanitize one caught host failure for Shiitake's public wire.
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
 | `_tag`       | `"ShiitakeError"`                                                                                                                                                       | -                             |
 | `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | `ShiitakeErrorBoundarySchema` |
-| `cause`      | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"archived"` | `ShiitakeErrorCauseSchema`    |
+| `cause`      | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | `ShiitakeErrorCauseSchema`    |
 | `message`    | `string`                                                                                                                                                                | `Schema.String`               |
 | `requestId?` | `string`                                                                                                                                                                | -                             |
 

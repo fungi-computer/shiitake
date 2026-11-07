@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, it } from "vitest";
 import {
   killed,
@@ -57,6 +58,22 @@ it(
       expectOutcome(snapshot, "failed");
       expect(snapshot.messages.map(({ value }) => value.role)).toEqual([
         "user",
+      ]);
+    }),
+  30_000,
+);
+
+it(
+  "retains a completed execution across a failed settlement and SIGKILL",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-completion", "completion-held");
+      const snapshot = await finished(path, "finish-completion");
+      expectOutcome(snapshot, "completed");
+      expect(await readFile(path + ".requests", "utf8")).toBe("request\n");
+      expect(snapshot.messages.map(({ value }) => value.role)).toEqual([
+        "user",
+        "assistant",
       ]);
     }),
   30_000,

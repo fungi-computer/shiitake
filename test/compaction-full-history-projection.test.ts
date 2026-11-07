@@ -380,8 +380,9 @@ it("resolves compaction markers kept inside the page without walking the lineage
 
     expect(snapshot.compactions).toHaveLength(session.compactions.length);
     expect(snapshot.hasMore).toBe(false);
-    // One transaction plus the page's reads: no lineage lookup per in-page head.
-    expect(operations).toBe(24);
+    // One transaction, the page's reads and one parent lookup: no lineage lookup
+    // per in-page head.
+    expect(operations).toBe(25);
   } finally {
     fixture.close();
   }

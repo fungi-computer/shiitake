@@ -410,8 +410,6 @@ it("delegation polls one durable BirdDog receipt and preserves a cancelled termi
     {
       fanOut: () => Effect.void,
       postMail: () => Effect.void,
-      drainOutbox: () => Effect.void,
-      nextWakeAt: () => Effect.succeed(undefined),
     },
   );
   const mail: import("@fungi.computer/bird-dog").BirdDogMail[] = [];
@@ -556,8 +554,6 @@ it("resolves an old settled delegation after its terminal leaves the page and th
     {
       fanOut: () => Effect.void,
       postMail: () => Effect.void,
-      drainOutbox: () => Effect.void,
-      nextWakeAt: () => Effect.succeed(undefined),
     },
   );
   const grant: AgentGrant = {

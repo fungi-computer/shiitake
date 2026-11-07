@@ -107,6 +107,7 @@ export async function proveToolOutput(
               commandId: workId,
             },
             contract,
+            faux.model,
           );
           yield* run(
             {

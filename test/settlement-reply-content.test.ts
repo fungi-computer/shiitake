@@ -4,7 +4,6 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import { make as makeBirdDog } from "@fungi.computer/bird-dog/effect";
-import { createMemoryOutbox } from "@fungi.computer/carrier/testing";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
@@ -38,21 +37,12 @@ async function replyFixture(
   const host = manualExtensionRuntime();
   const faux = fauxModel(responses);
   const posted: BirdDogMail[] = [];
-  const rows = createMemoryOutbox();
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key) => Effect.promise(() => rows.read(key)),
-        put: (key, value) => Effect.promise(() => rows.put(key, value)),
-        list: (limit, after) => Effect.promise(() => rows.list(limit, after)),
-        delete: (key) => Effect.promise(() => rows.delete(key)),
-      },
-      post: (mail) =>
+      stage: (mail) =>
         Effect.sync(() => {
-          posted.push(mail);
-          return true;
+          posted.push(...mail);
         }),
-      scheduleWake: () => Effect.void,
       now: () => 100,
     }),
   );

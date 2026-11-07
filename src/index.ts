@@ -89,6 +89,7 @@ export type {
   CompactionOptions,
   GrantsDelivery,
   GrantsDeliveryResult,
+  ShiitakeHostJobs,
   ShiitakeOptions,
   ShiitakeOwnerAgent,
   ToolAccess,

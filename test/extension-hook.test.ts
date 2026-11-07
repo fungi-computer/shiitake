@@ -121,66 +121,92 @@ it("rejects an async callback before the owner transaction can commit", () => {
   }
 });
 
-it("commits schema-typed state.update synchronously and rolls back a Promise", async () => {
-  const Row = Schema.Struct({ id: Schema.String, count: Schema.Number });
-  const collections = { rows: defineCollection(Row, { key: (row) => row.id }) };
-  const id = ExtensionId.make("sync-state-update");
-  let context:
-    ExtensionContextV0<typeof collections, Record<string, never>> | undefined;
-  const extension = defineExtension({ id, version: "1.0.0" })
-    .config({})
-    .state({ version: 1, collections, migrations: {} })
-    .define({
-      hooks: {
-        start: (ctx) =>
-          Effect.sync(() => {
-            context = ctx;
-          }),
+it.each(["callback", "prepared"] as const)(
+  "commits schema-typed state synchronously and rolls back suspension in a %s",
+  async (mode) => {
+    const Row = Schema.Struct({ id: Schema.String, count: Schema.Number });
+    const collections = {
+      rows: defineCollection(Row, { key: (row) => row.id }),
+    };
+    const id = ExtensionId.make("sync-state-update");
+    let context:
+      ExtensionContextV0<typeof collections, Record<string, never>> | undefined;
+    const extension = defineExtension({ id, version: "1.0.0" })
+      .config({})
+      .state({ version: 1, collections, migrations: {} })
+      .define({
+        hooks: {
+          start: (ctx) =>
+            Effect.sync(() => {
+              context = ctx;
+            }),
+        },
+      });
+    const fixture = createNativeSqliteOwnerFixture();
+    const agent = await Shiitake.make({
+      ...compatibilityRunDependencies(),
+      store: fixture.owner,
+      runtime: createCompatibilityRuntimeHost().runtime,
+      extensions: {
+        roster: [extension],
+        grants: [{ id, capabilities: ["state"] }],
       },
     });
-  const fixture = createNativeSqliteOwnerFixture();
-  const agent = await Shiitake.make({
-    ...compatibilityRunDependencies(),
-    store: fixture.owner,
-    runtime: createCompatibilityRuntimeHost().runtime,
-    extensions: {
-      roster: [extension],
-      grants: [{ id, capabilities: ["state"] }],
-    },
-  });
-  try {
-    if (context === undefined) throw new Error("Extension did not activate");
-    const state = context.state;
-    expect(
-      state.update((tx) => {
-        tx.rows.put({ id: "row", count: 1 });
-        tx.observe("update-session");
-        return Option.getOrUndefined(tx.rows.get("row"))?.count;
-      }),
-    ).toBe(1);
-    expect(() =>
-      state.update((tx) => {
-        tx.rows.put({ id: "row", count: 2 });
-        // An untyped outside extension can still violate the public type.
-        const result: unknown = Promise.resolve(2);
-        return result;
-      }),
-    ).toThrow(
-      expect.objectContaining({
-        _tag: "ExtensionStop",
-        reason: "Extension transaction handler must return synchronously",
-      }),
-    );
-    expect(
-      Schema.decodeUnknownSync(Schema.fromJsonString(Row))(
-        readRecord(fixture.owner, id, "rows", "row"),
-      ).count,
-    ).toBe(1);
-  } finally {
-    await agent.close();
-    fixture.close();
-  }
-});
+    try {
+      if (context === undefined) throw new Error("Extension did not activate");
+      const ctx = context;
+      const state = context.state;
+      expect(
+        state.update((tx) => {
+          tx.rows.put({ id: "row", count: 1 });
+          tx.observe("update-session");
+          return Option.getOrUndefined(tx.rows.get("row"))?.count;
+        }),
+      ).toBe(1);
+      if (mode === "prepared") {
+        await expect(
+          Effect.runPromise(
+            ctx.transact({
+              prepare: Effect.promise(() =>
+                Promise.resolve(
+                  Effect.gen(function* () {
+                    yield* ctx.state.rows.put({ id: "row", count: 2 });
+                    yield* Effect.promise(() => Promise.resolve());
+                  }),
+                ),
+              ),
+            }),
+          ),
+        ).rejects.toMatchObject({
+          _tag: "ExtensionStop",
+          reason:
+            "transact crossed an asynchronous boundary inside a core transaction",
+        });
+      } else
+        expect(() =>
+          state.update((tx) => {
+            tx.rows.put({ id: "row", count: 2 });
+            // An untyped outside extension can still violate the public type.
+            const result: unknown = Promise.resolve(2);
+            return result;
+          }),
+        ).toThrow(
+          expect.objectContaining({
+            _tag: "ExtensionStop",
+            reason: "Extension transaction handler must return synchronously",
+          }),
+        );
+      expect(
+        Schema.decodeUnknownSync(Schema.fromJsonString(Row))(
+          readRecord(fixture.owner, id, "rows", "row"),
+        ).count,
+      ).toBe(1);
+    } finally {
+      await agent.close();
+      fixture.close();
+    }
+  },
+);
 
 it("stops a command that returns a Promise before its transaction commits", async () => {
   const id = ExtensionId.make("untyped-promise-command");

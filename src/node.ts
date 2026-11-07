@@ -40,8 +40,8 @@ export type NodeRuntimeHost = Readonly<{
 }>;
 
 /**
- * The Node event loop as Shiitake's runtime host: one reconciliation at a
- * time, re-run when woken during a pass, and a timer for the earliest due
+ * The Node event loop as Shiitake's runtime host: one reconciliation per
+ * execution partition, re-run when woken during a pass, and one timer for the earliest due
  * retry. It has no queue policy; Watchdog owns execution and retries.
  * `observeFailure` sees a failed pass, which is retried after five seconds;
  * if it throws, the throw is logged and the retry still happens.
@@ -93,56 +93,82 @@ export function nodeRuntimeHost(
     );
   };
   const runtime: RuntimeHost = Object.freeze({
-    bind: ({ reconcile, pendingWork }: Parameters<RuntimeHost["bind"]>[0]) => {
+    bind: ({
+      reconcile,
+      reconcileHost,
+      pendingWork,
+    }: Parameters<RuntimeHost["bind"]>[0]) => {
       if (bound !== undefined)
         return Promise.reject(
           new Error("Shiitake Node runtime is already bound"),
         );
-      let active: Promise<void> | undefined;
-      let pending: NodeJS.Immediate | undefined;
-      let rerun = false;
       let closing: Promise<void> | undefined;
+      function pass(reconcile: () => Promise<void>) {
+        let active: Promise<void> | undefined;
+        let pending: NodeJS.Immediate | undefined;
+        let rerun = false;
+        let retry = false;
 
-      const run = (): void => {
-        if (active !== undefined) return;
-        const task = Promise.resolve().then(async () => {
-          try {
-            await reconcile();
-            const work = await pendingWork();
-            scheduleWake(
-              work.pending ? Date.now() + retryAfterMs : work.nextWakeAt,
-            );
-          } catch (cause) {
-            reportFailure(cause);
-            scheduleWake(Date.now() + retryAfterMs);
-          } finally {
-            if (active === task) active = undefined;
-            if (rerun) {
-              rerun = false;
-              // A wake admitted before close still drains its one rerun.
-              if (closed) run();
-              else schedule();
+        const run = (): void => {
+          if (active !== undefined) return;
+          const task = Promise.resolve().then(async () => {
+            try {
+              await reconcile();
+              retry = false;
+              const work = await pendingWork();
+              scheduleWake(
+                work.pending || passes.some((pass) => pass.retry)
+                  ? Date.now() + retryAfterMs
+                  : work.nextWakeAt,
+              );
+            } catch (cause) {
+              retry = true;
+              reportFailure(cause);
+              scheduleWake(Date.now() + retryAfterMs);
+            } finally {
+              if (active === task) active = undefined;
+              if (rerun) {
+                rerun = false;
+                // A wake admitted before close still drains its one rerun.
+                if (closed) run();
+                else schedule();
+              }
             }
-          }
-        });
-        active = task;
-      };
+          });
+          active = task;
+        };
 
-      const schedule = (): void => {
-        if (closed || active !== undefined || pending !== undefined) return;
-        pending = setImmediate(() => {
-          pending = undefined;
-          if (!closed) run();
-        });
-      };
+        const schedule = (): void => {
+          if (closed || active !== undefined || pending !== undefined) return;
+          pending = setImmediate(() => {
+            pending = undefined;
+            if (!closed) run();
+          });
+        };
 
+        return {
+          get retry() {
+            return retry;
+          },
+          requestWake: () => {
+            if (active !== undefined) rerun = true;
+            else schedule();
+          },
+          close: async () => {
+            if (pending !== undefined) clearImmediate(pending);
+            pending = undefined;
+            while (active !== undefined) await active;
+          },
+        };
+      }
+      const passes = [pass(reconcile)];
+      if (reconcileHost !== undefined) passes.push(pass(reconcileHost));
       const handle: BoundRuntime = Object.freeze({
         commit: (mutation) => mutation(),
         requestWake: () => {
           if (closed)
             return Promise.reject(new Error("Shiitake Node runtime is closed"));
-          if (active !== undefined) rerun = true;
-          else schedule();
+          for (const pass of passes) pass.requestWake();
           return Promise.resolve();
         },
         close: () => {
@@ -151,15 +177,13 @@ export function nodeRuntimeHost(
             if (wakeTimer !== undefined) clearTimeout(wakeTimer);
             wakeTimer = undefined;
             wakeAt = undefined;
-            if (pending !== undefined) clearImmediate(pending);
-            pending = undefined;
-            while (active !== undefined) await active;
+            await Promise.all(passes.map((pass) => pass.close()));
           })();
           return closing;
         },
       });
 
-      schedule();
+      for (const pass of passes) pass.requestWake();
       bound = handle;
       return Promise.resolve(handle);
     },

@@ -85,6 +85,7 @@ await Effect.runPromise(
         fixture.owner,
         accepted,
         executionContract,
+        faux.model,
       );
       yield* muleEffect.run(
         {

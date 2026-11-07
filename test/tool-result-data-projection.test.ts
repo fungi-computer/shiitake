@@ -98,6 +98,7 @@ it("retains real tool data through persistence, wire, replay and reopen without 
             fixture.owner,
             accepted,
             prepared.command.entry.contract,
+            faux.model,
           );
           yield* muleEffect.run(
             {

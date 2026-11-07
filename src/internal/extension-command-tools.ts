@@ -86,7 +86,7 @@ export function commandTools<C extends CommandsV0>(
               });
               if (Result.isFailure(invocation))
                 return yield* Effect.fail(invocation.failure);
-              const output = yield* transact(invocation.success());
+              const output = yield* transact({ prepare: invocation.success });
               return yield* decodeOutput(output);
             }),
           ),

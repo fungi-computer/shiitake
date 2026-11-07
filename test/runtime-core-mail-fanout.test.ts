@@ -1,7 +1,3 @@
-import {
-  createMemoryOutbox,
-  type MemoryOutbox,
-} from "@fungi.computer/carrier/testing";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import * as Schema from "effect/Schema";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -33,7 +29,6 @@ import {
 import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
 import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import { readSessionCommandAdmissionByRequest } from "../src/internal/woodstock/session-store.js";
-import { manualExtensionRuntime } from "./fixtures/extension-host.fixture.js";
 import { defineExtension, ExtensionId } from "../src/extensions.js";
 
 function manualRuntime() {
@@ -60,41 +55,26 @@ function manualRuntime() {
 }
 
 function mailRoom(posted: BirdDogMail[], onPut: () => void = () => undefined) {
-  const rows = createMemoryOutbox();
+  const rows = new Map<string, BirdDogMail>();
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key) => Effect.promise(() => rows.read(key)),
-        put: (key, value) =>
-          Effect.promise(async () => {
-            onPut();
-            await rows.put(key, value);
-          }),
-        list: (limit, afterKey) =>
-          Effect.promise(() => rows.list(limit, afterKey)),
-        delete: (key) => Effect.promise(() => rows.delete(key)),
-      },
-      post: (mail) =>
+      stage: (mail) =>
         Effect.sync(() => {
-          posted.push(mail);
-          return true;
+          for (const letter of mail) {
+            if (rows.has(letter.key)) continue;
+            onPut();
+            rows.set(letter.key, letter);
+            posted.push(letter);
+          }
         }),
-      scheduleWake: () => Effect.void,
       now: () => 100,
     }),
   );
-  return { room, rows } satisfies {
-    room: BirdDogEffect;
-    rows: MemoryOutbox;
-  };
+  return { room, rows };
 }
 
-async function expectDeliveredReceipt(rows: MemoryOutbox, mailKey: string) {
-  const key = `outbox:${mailKey}:reply:0`;
-  expect((await rows.list(1_000)).map(({ key }) => key)).toEqual([key]);
-  expect(JSON.parse((await rows.read(key)) ?? "null")).toEqual({
-    state: "delivered",
-  });
+function expectStagedReply(rows: Map<string, BirdDogMail>, mailKey: string) {
+  expect([...rows.keys()]).toEqual([`${mailKey}:reply:0`]);
 }
 
 const parent = {
@@ -107,52 +87,6 @@ const child = {
   agentId: "child-agent",
   sessionId: "child-session",
 } as const;
-
-it("includes future and due Carrier replies in pending work until delivery", async () => {
-  const fixture = createNativeSqliteOwnerFixture();
-  const runtime = manualExtensionRuntime();
-  const { room, rows } = mailRoom([]);
-  let core: Effect.Success<ReturnType<typeof openRuntimeCore>> | undefined;
-  try {
-    core = await Effect.runPromise(
-      openRuntimeCore(
-        runtimeOptions(fixture.owner, runtime.runtime, fauxModel([])),
-        room,
-      ),
-    );
-    const due = Date.now() + 60_000;
-    const mail = addressedMail("retained-retry", "Reply");
-    await rows.put(
-      "outbox:retained-retry",
-      JSON.stringify({
-        mail,
-        attempts: 1,
-        nextAttemptAt: due,
-      }),
-    );
-    expect(await runtime.pendingWork()).toEqual({
-      pending: false,
-      nextWakeAt: due,
-    });
-    await rows.put(
-      "outbox:retained-retry",
-      JSON.stringify({
-        mail,
-        attempts: 1,
-        nextAttemptAt: 0,
-      }),
-    );
-    expect((await runtime.pendingWork()).pending).toBe(true);
-    await runtime.reconcile();
-    expect(await runtime.pendingWork()).toEqual({
-      pending: false,
-      nextWakeAt: null,
-    });
-  } finally {
-    await Effect.runPromise(core?.agent.close ?? Effect.void);
-    fixture.close();
-  }
-});
 
 function addressedMail(key: string, content: string): BirdDogMail {
   return {
@@ -439,17 +373,14 @@ it("fans a cold-reopened child completion from exact Woodstock output", async ()
     await secondRuntime.reconcile();
     await secondRuntime.reconcile();
 
-    expect(ordering).toEqual([
-      { state: "settled", terminals: 1 },
-      { state: "settled", terminals: 1 },
-    ]);
+    expect(ordering).toEqual([{ state: "settled", terminals: 1 }]);
     expect(requestMessages(requests[0])).toEqual([
       expect.objectContaining({
         role: "user",
         content: "Investigate the failing request",
       }),
     ]);
-    await expectDeliveredReceipt(rows, "delegation-cold-1");
+    expectStagedReply(rows, "delegation-cold-1");
     expect(posted).toEqual([
       {
         key: "delegation-cold-1:reply:0",
@@ -518,8 +449,6 @@ it("hands BirdDog a cancelled settlement with the cancellation's metadata", asyn
         settlements.push(settlement);
       }),
     postMail: () => Effect.void,
-    drainOutbox: () => Effect.void,
-    nextWakeAt: () => Effect.succeed(undefined),
   };
   const cancelledBy = { author: { id: "user_sam", name: "Sam" } };
   let core: Effect.Success<ReturnType<typeof openRuntimeCore>> | undefined;
@@ -559,30 +488,24 @@ it("surfaces an outbox write interruption after durable settlement", async () =>
   faux.setResponses([fauxAssistantMessage("Settled before outbox failure")]);
   let outboxWrites = 0;
   let interrupted = true;
-  const rows = createMemoryOutbox();
+  const rows = new Map<string, BirdDogMail>();
   const posted: BirdDogMail[] = [];
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key) => Effect.promise(() => rows.read(key)),
-        put: (key, value) => {
+      stage: (mail) =>
+        Effect.suspend(() => {
           outboxWrites += 1;
           if (interrupted) {
             interrupted = false;
-            return Effect.fail(new BirdDogError("outbox write interrupted"));
+            return Effect.fail(new BirdDogError("mail staging interrupted"));
           }
-          return Effect.promise(() => rows.put(key, value));
-        },
-        list: (limit, afterKey) =>
-          Effect.promise(() => rows.list(limit, afterKey)),
-        delete: (key) => Effect.promise(() => rows.delete(key)),
-      },
-      post: (mail) =>
-        Effect.sync(() => {
-          posted.push(mail);
-          return true;
+          return Effect.sync(() => {
+            for (const letter of mail) {
+              rows.set(letter.key, letter);
+              posted.push(letter);
+            }
+          });
         }),
-      scheduleWake: () => Effect.void,
       now: () => 100,
     }),
   );
@@ -628,8 +551,8 @@ it("surfaces an outbox write interruption after durable settlement", async () =>
     ).toEqual({ terminals: 1 });
 
     await expect(runtime.reconcile()).resolves.toBeUndefined();
-    expect(outboxWrites).toBe(3);
-    await expectDeliveredReceipt(rows, "delegation-outbox-interrupted");
+    expect(outboxWrites).toBe(2);
+    expectStagedReply(rows, "delegation-outbox-interrupted");
     expect(posted).toHaveLength(1);
     await expect(Effect.runPromise(core.agent.close)).rejects.toMatchObject({
       message: "Agent reply fan-out is unavailable",
@@ -722,7 +645,7 @@ it("fans an exhausted disappeared child claim without fabricating output", async
       ],
     });
     await watch.close();
-    await expectDeliveredReceipt(rows, "delegation-interrupted-1");
+    expectStagedReply(rows, "delegation-interrupted-1");
     expect(posted).toEqual([
       expect.objectContaining({
         to: parent,
@@ -886,7 +809,6 @@ it("replies once to cancelled queued addressed work after reopening without runn
       core.acceptMail(addressedMail("delegation-cancelled-1", "Stop")),
     );
     await reopenedRuntime.reconcile();
-    await Effect.runPromise(room.drainOutbox());
     expect(
       fixture.owner.sql
         .exec(
@@ -911,7 +833,7 @@ it("replies once to cancelled queued addressed work after reopening without runn
         reply: { commandId: accepted.commandId, outcome: "cancelled" },
       },
     ]);
-    await expectDeliveredReceipt(rows, "delegation-cancelled-1");
+    expectStagedReply(rows, "delegation-cancelled-1");
     expect(
       fixture.owner.sql
         .exec(
@@ -994,7 +916,7 @@ it("hands BirdDog the first canceller's opaque metadata across a store restart, 
         meta: cancelledBy,
       },
     ]);
-    await expectDeliveredReceipt(rows, "cancel-meta-restart");
+    expectStagedReply(rows, "cancel-meta-restart");
   } finally {
     await Effect.runPromise(core?.agent.close ?? Effect.void);
     fixture.close();

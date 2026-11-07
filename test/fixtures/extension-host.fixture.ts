@@ -88,12 +88,13 @@ export function openCore(
   store: SqliteOwner,
   extensions: ExtensionRosterV0,
   mailRoom?: BirdDogEffect,
+  hostJobs?: ShiitakeEffectOptions["hostJobs"],
 ) {
   const host = manualExtensionRuntime();
-  return Effect.runPromise(
-    openRuntimeCore(
-      completingRunOptions(store, host.runtime, extensions),
-      mailRoom,
-    ),
-  ).then((core) => ({ core, host }));
+  const options = completingRunOptions(store, host.runtime, extensions);
+  if (hostJobs !== undefined) Object.assign(options, { hostJobs });
+  return Effect.runPromise(openRuntimeCore(options, mailRoom)).then((core) => ({
+    core,
+    host,
+  }));
 }

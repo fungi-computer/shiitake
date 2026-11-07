@@ -1432,3 +1432,40 @@ it("settles an orphan admission without blocking the rest of cancel-all", () => 
     fixture.close();
   }
 });
+
+it("does not append cancellation facts once Watchdog has decided completion", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    const sessionId = "decided-completion";
+    const admission = admitStoredCommand(fixture.owner, sessionId, {
+      type: "prompt",
+      delivery: "followUp",
+      requestId: "complete",
+      text: "complete",
+    });
+    const before = fixture.owner.sql
+      .exec("SELECT id, data_json FROM session_entries ORDER BY id")
+      .toArray();
+    expect(
+      woodstock.acceptSessionCancellation(
+        fixture.owner,
+        sessionId,
+        admission.command.id,
+        () => ({
+          state: "running",
+          jobId: admission.command.entry.workId,
+          cancellationRequested: false,
+        }),
+        () => ({ status: "decided", outcome: "completed" }),
+      ),
+    ).toBeUndefined();
+    expect(
+      fixture.owner.sql
+        .exec("SELECT id, data_json FROM session_entries ORDER BY id")
+        .toArray(),
+    ).toEqual(before);
+  } finally {
+    fixture.close();
+  }
+});

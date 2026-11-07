@@ -39,7 +39,7 @@ Construct a sanitized boundary failure.
 | Parameter    | Type                                                                                                                                                                    | Description                                                                                                                        |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | Boundary that rejected the operation.                                                                                              |
-| `category`   | \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"archived"` | Safe category describing why it was rejected.                                                                                      |
+| `category`   | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | Safe category describing why it was rejected.                                                                                      |
 | `message`    | `string`                                                                                                                                                                | Human-readable message safe for callers to display.                                                                                |
 | `requestId?` | `string`                                                                                                                                                                | Request identity recoverable when a send may have reached the owner.                                                               |
 | `cause?`     | `unknown`                                                                                                                                                               | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
@@ -68,6 +68,7 @@ Stable runtime tag for typed Shiitake failures.
 
 ```ts
 readonly cause:
+  | "archived"
   | "closed"
   | "conflict"
   | "incompatible"
@@ -75,8 +76,7 @@ readonly cause:
   | "rejected"
   | "unavailable"
   | "state_reset_required"
-  | "storage_pressure"
-  | "archived";
+  | "storage_pressure";
 ```
 
 Safe category describing why it was rejected.
@@ -571,10 +571,27 @@ automatic compaction only; a manual compaction always runs.
 
 ---
 
+### ShiitakeHostJobs
+
+```ts
+type ShiitakeHostJobs = Readonly<{
+  lane: string;
+  open: (runtime) => Readonly<{
+    execute: WatchdogExecutor;
+    retryPolicy?: WatchdogOptions["retryPolicy"];
+  }>;
+}>;
+```
+
+One native host lane sharing the Agent's existing Watchdog and wake owner.
+
+---
+
 ### ShiitakeOptions
 
 ```ts
 type ShiitakeOptions = Readonly<{
+  hostJobs?: ShiitakeHostJobs;
   meta?: HostMetaOptions;
   store: SqliteOwner;
   storagePressure?: StoragePressureCheck;
@@ -587,6 +604,8 @@ type ShiitakeOptions = Readonly<{
   instructions: InstructionSource;
   tools?: ToolSource;
   extensions: ExtensionRosterV0;
+  recipientStatus?: (recipient) => Promise<RecipientStatus>;
+  recipientParent?: (recipient) => Promise<AttentionRecipient | null>;
 }>;
 ```
 

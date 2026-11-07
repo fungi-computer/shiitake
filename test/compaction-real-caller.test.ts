@@ -1,3 +1,4 @@
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { getSystemMessageText, type Context } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -1245,3 +1246,127 @@ it("runs a compaction request queued before a restart exactly once", async () =>
     scenario.fixture.close();
   }
 });
+
+it("bounds manual compaction model release through the same run owner", async () => {
+  const scenario = manualCompactionScenario();
+  const runtime = createCompatibilityRuntimeHost();
+  const options = compactionOptions(scenario.fixture, scenario.faux, runtime);
+  let acquisitions = 0;
+  let releaseHeld: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    releaseHeld = resolve;
+  });
+  const agent = await Shiitake.make({
+    ...options,
+    model: {
+      acquire: async (input) => {
+        const model = await options.model.acquire(input);
+        acquisitions++;
+        return {
+          ...model,
+          release: acquisitions === 2 ? () => held : model.release,
+        };
+      },
+    },
+  });
+  try {
+    const session = agent.session(manualSession);
+    scenario.faux.setResponses([fauxAssistantMessage("short answer")]);
+    await session.command({
+      requestId: "release-history",
+      delivery: "followUp",
+      type: "prompt",
+      text: "Short.",
+    });
+    await runtime.runNext();
+    const compact = await session.command({
+      type: "compact",
+      requestId: "release-compact",
+    });
+    await runtime.runNext();
+    expect(
+      (await session.read()).terminals.find(
+        ({ commandId }) => commandId === compact.commandId,
+      ),
+    ).toMatchObject({ outcome: "completed" });
+    expect(acquisitions).toBe(2);
+  } finally {
+    releaseHeld();
+    await agent.close();
+    scenario.fixture.close();
+  }
+});
+
+it.each([false, true])(
+  "hands off a manual summary only after its producer settles: cooperative=%s",
+  async (cooperative) => {
+    const scenario = manualCompactionScenario();
+    const runtime = createCompatibilityRuntimeHost();
+    const options = compactionOptions(scenario.fixture, scenario.faux, runtime);
+    let summarizing = false;
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const events = createAssistantMessageEventStream();
+    const aborted = fauxAssistantMessage("", { stopReason: "aborted" });
+    const agent = await Shiitake.make({
+      ...options,
+      model: {
+        acquire: async (input) => {
+          const acquired = await options.model.acquire(input);
+          return {
+            ...acquired,
+            stream: (model, context, streamOptions) => {
+              if (!summarizing)
+                return scenario.faux.stream(model, context, streamOptions);
+              streamOptions?.signal?.addEventListener(
+                "abort",
+                () => {
+                  if (cooperative) events.end(aborted);
+                },
+                { once: true },
+              );
+              markStarted();
+              return events;
+            },
+          };
+        },
+      },
+    });
+    try {
+      const session = await buildHistory(scenario, { agent, runtime });
+      summarizing = true;
+      const accepted = await session.command({
+        type: "compact",
+        requestId: "held-summary",
+      });
+      const running = runtime.runNext().then(
+        () => "completed",
+        () => "failed",
+      );
+      await started;
+      if (cooperative) await agent.close();
+      else
+        await expect(agent.close()).rejects.toMatchObject({
+          message: "Runtime execution did not drain",
+        });
+      expect(await running).toBe(cooperative ? "completed" : "failed");
+      expect(
+        scenario.fixture.owner.sql
+          .exec(
+            "SELECT state, recovery_count FROM watchdog_jobs WHERE job_id = ?",
+            accepted.commandId,
+          )
+          .one(),
+      ).toEqual({
+        state: cooperative ? "queued" : "running",
+        recovery_count: 0,
+      });
+      expect(compactionsIn(scenario.fixture.owner)).toEqual([]);
+    } finally {
+      events.end(aborted);
+      scenario.fixture.close();
+    }
+  },
+);

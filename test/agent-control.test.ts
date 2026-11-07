@@ -794,9 +794,48 @@ it("offers neither answer nor escalate to a host that cannot route them", async 
     (tools) => {
       expect(tools.answer).toBeUndefined();
       expect(tools.escalate).toBeUndefined();
+      expect(tools.goal).toBeUndefined();
       return Promise.resolve(null);
     },
   );
+});
+
+it("offers agents.goal only with the host door and passes the exact invoking Session", async () => {
+  const calls: unknown[] = [];
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () => Promise.reject(new Error("unused")),
+      goal: (input, sessionId) => {
+        calls.push({ input, sessionId });
+        return Promise.resolve({ status: "resumed" });
+      },
+    },
+    async (tools) => {
+      if (tools.goal === undefined) throw new Error("Goal operation missing");
+      expect(
+        await tools.goal({
+          agentId: "child",
+          sessionId: "child-session",
+          action: "resume",
+          reason: "Review done",
+        }),
+      ).toEqual({ status: "resumed" });
+      return null;
+    },
+    "first-parent-session",
+  );
+  expect(calls).toEqual([
+    {
+      input: {
+        agentId: "child",
+        sessionId: "child-session",
+        action: "resume",
+        reason: "Review done",
+      },
+      sessionId: "first-parent-session",
+    },
+  ]);
 });
 
 it("returns the items a waited-on Agent left waiting on the caller", async () => {

@@ -1,3 +1,4 @@
+import { makeRuntime as makeWatchdog } from "@fungi.computer/watchdog/effect";
 import {
   directSandbox,
   rejectingSandbox,
@@ -293,6 +294,14 @@ it("never captures Files from a holder outside the run participants", async () =
   const runtime = await Effect.runPromise(
     openExtensionRuntime({
       owner: fixture.owner,
+      watchdog: Effect.runSync(
+        makeWatchdog({
+          owner: fixture.owner,
+          executor: { execute: () => Effect.succeed({ kind: "completed" }) },
+          isAlive: () => Effect.succeed(false),
+          wake: { recompute: () => Effect.void },
+        }),
+      ).transactional,
       door: openTestAdmissionDoor(fixture.owner),
       readQueueHead: () => ({ state: "idle" }),
       admitted,

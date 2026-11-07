@@ -423,6 +423,8 @@ export type SessionContext = Readonly<{
 
 /** Bounded Session baseline at one opaque owner cursor. */
 export type SessionSnapshot = Readonly<{
+  /** First delegating Agent Session, when this Session was delegated. */
+  parent?: import("./session-attention.js").AttentionRecipient;
   /** Session represented by the snapshot. */
   sessionId: string;
   /** Opaque owner cursor at the snapshot boundary, or null when empty. */

@@ -1,3 +1,5 @@
+import { liftHostJobs } from "./internal/promise-facade.js";
+import type { ShiitakeHostJobs } from "./internal/contracts.js";
 import type { CommandSettlement } from "./internal/contracts.js";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { VerifiedAgentReply } from "./internal/woodstock/index.js";
@@ -18,14 +20,6 @@ import { fromTypedSandbox } from "@fungi.computer/mycelium/effect";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Redacted from "effect/Redacted";
-import {
-  WatchdogError,
-  type WatchdogExecutionDecision,
-  type WatchdogReadResult,
-  type WatchdogRunningJob,
-  type WatchdogTransactionalProjection,
-  type WatchdogTickResult,
-} from "@fungi.computer/watchdog";
 
 import type { ExtensionRosterV0, Json } from "./extensions.js";
 import { ShiitakeError } from "./errors.js";
@@ -145,21 +139,7 @@ export type CloudflareHostWork = Readonly<{
 }>;
 
 /** Host jobs use a separate slot in Shiitake's one Watchdog and native alarm. */
-export type CloudflareHostJobs = Readonly<{
-  lane: string;
-  /** Open the host executor on the shared transactional job store. */
-  open: (
-    runtime: Readonly<{
-      transactional: WatchdogTransactionalProjection;
-      readJob: (jobId: string) => Promise<WatchdogReadResult>;
-      /** Execute one job in the construction-time host partition. */
-      tickConcurrent: () => Promise<WatchdogTickResult>;
-    }>,
-  ) => Readonly<{
-    /** Execute one job claimed for this host lane. */
-    execute: (job: WatchdogRunningJob) => Promise<WatchdogExecutionDecision>;
-  }>;
-}>;
+export type CloudflareHostJobs = ShiitakeHostJobs;
 
 /** ACP's maintained transport, supplied by the host without a package cycle. */
 export type CloudflareShiitakeAcpServer = Readonly<{
@@ -249,7 +229,7 @@ function runtimeHost(
 ) {
   let alarm: (() => Promise<void>) | undefined;
   const runtime: RuntimeHostEffect = {
-    bind: ({ reconcile, pendingWork }) =>
+    bind: ({ reconcile, reconcileHost, pendingWork }) =>
       Effect.sync(() => {
         let closed = false;
         const isClosed = () => closed;
@@ -405,7 +385,11 @@ function runtimeHost(
         }
         const passes = [
           pass(() => runShiitakePromise(reconcile)),
-          pass(hostPass),
+          pass(async () => {
+            if (reconcileHost !== undefined)
+              await runShiitakePromise(reconcileHost);
+            await hostPass();
+          }),
         ];
         function schedule(): void {
           for (const slot of passes) slot.schedule();
@@ -506,32 +490,8 @@ function effectOptions(
     },
     model: adaptModelSource(options.model),
   };
-  if (options.hostJobs !== undefined) {
-    const hostJobs = options.hostJobs;
-    Object.assign(base, {
-      hostJobs: {
-        lane: hostJobs.lane,
-        open: (
-          watchdog: Parameters<
-            NonNullable<ShiitakeEffectOptions["hostJobs"]>["open"]
-          >[0],
-        ) => {
-          const host = hostJobs.open({
-            transactional: watchdog.transactional,
-            readJob: (jobId) => runShiitakePromise(watchdog.read(jobId)),
-            tickConcurrent: () => runShiitakePromise(watchdog.tickConcurrent()),
-          });
-          return {
-            execute: (job: WatchdogRunningJob) =>
-              Effect.tryPromise({
-                try: () => host.execute(job),
-                catch: (error) => new WatchdogError("execution_failed", error),
-              }),
-          };
-        },
-      },
-    });
-  }
+  if (options.hostJobs !== undefined)
+    Object.assign(base, { hostJobs: liftHostJobs(options.hostJobs) });
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
   if (options.storagePressure !== undefined)
     Object.assign(base, { storagePressure: options.storagePressure });

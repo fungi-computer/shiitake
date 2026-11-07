@@ -18,6 +18,7 @@ import {
   borrowedView,
   compact,
   prepareCompaction,
+  type CompactionCleanup,
   type CompactionPreparation,
   type CompactionResult,
   type CompactionSourceEntry,
@@ -170,6 +171,7 @@ export type SessionCompactionInput = Readonly<{
   workId: string;
   model: Model<Api>;
   stream?: MuleStreamFunction | undefined;
+  cleanup?: CompactionCleanup | undefined;
   handoff?: CompactionHandoffV0 | undefined;
   /** This model's resolved budgets and the global automatic switch. */
   settings: CompactionSettings;
@@ -191,7 +193,14 @@ type CompactionContext = Readonly<{
 /** What one commit needs: the Session, its model, budgets and handoff. */
 type CommitInput = Pick<
   SessionCompactionInput,
-  "store" | "sessionId" | "workId" | "model" | "stream" | "handoff" | "settings"
+  | "store"
+  | "sessionId"
+  | "workId"
+  | "model"
+  | "stream"
+  | "handoff"
+  | "settings"
+  | "cleanup"
 >;
 
 type CommitRequest = Readonly<{
@@ -258,6 +267,7 @@ function commitCompactionEffect(
       input.model,
       input.stream,
       request.instructions,
+      input.cleanup,
     );
     const receipt = yield* handOff(input, preparation, result, expected.id);
     return yield* appendSummary(
@@ -302,6 +312,9 @@ function handOff(
       borrowedView(preparation, result, input.sessionId, contextRevision),
     )
     .pipe(
+      // Extensions have no producer-drain contract; an interrupted handoff
+      // cannot earn the run's clean-stop exemption.
+      Effect.onInterrupt(() => input.cleanup?.onUndrained ?? Effect.void),
       Effect.mapError(() => new CompactionCommitError("handoff", result.usage)),
       Effect.flatMap((handed) => {
         const decoded = decodeHandoffResult(handed);
@@ -581,7 +594,13 @@ function summarize(
 ): Effect.Effect<void, ShiitakeError> {
   return Effect.suspend(() => {
     beginCompactionActivity(input.store, input.sessionId, "threshold");
-    return compact(preparation, input.model, input.stream).pipe(
+    return compact(
+      preparation,
+      input.model,
+      input.stream,
+      undefined,
+      input.cleanup,
+    ).pipe(
       Effect.map((result) => {
         handBack({ preparation, result, selectionTail });
       }),
@@ -1004,6 +1023,7 @@ export function compactSession(
     | "workId"
     | "model"
     | "stream"
+    | "cleanup"
     | "handoff"
     | "settings"
     | "path"

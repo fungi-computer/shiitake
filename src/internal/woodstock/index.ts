@@ -5,6 +5,7 @@ import type {
   MuleError,
   MuleEvent,
   MuleIdentity,
+  MuleRetryObservation,
 } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
@@ -25,6 +26,7 @@ import {
   decodeClientSessionId,
 } from "../client-boundary.js";
 import type { CommandSettlement, SqliteOwner } from "../contracts.js";
+import { unavailableRunReason } from "../run-failure-reason.js";
 import { publishOwnerObservation } from "../observation-kernel.js";
 import { readColdSessionPageOwned } from "./cold-sessions.js";
 import type { ObservedActivity } from "../session-status.js";
@@ -39,7 +41,7 @@ import { sessionIds } from "./identities.js";
 import { decodeWoodstockCursor } from "./cursor.js";
 import { openProgress, openToolProgress } from "./progress.js";
 import {
-  encodeStoredSessionEntry,
+  sameStoredSessionEntry,
   type LiveRetryEvent,
   type StoredSessionEntry,
 } from "./session-entry.js";
@@ -95,6 +97,7 @@ export {
 } from "./fleet-store.js";
 export * from "./session-attention.js";
 export * from "./work-senders.js";
+import { readSessionParent } from "./work-senders.js";
 export * from "./session-delegator.js";
 export {
   deliverSessionGrants,
@@ -616,6 +619,11 @@ export function readStoredSessionAttention(
   return storeEffect(() => readSessionAttention(owner, sessionId));
 }
 
+/** Exact first-delegator parent from the store, without starting a runtime. */
+export function readStoredSessionParent(owner: SqliteOwner, sessionId: string) {
+  return storeEffect(() => readSessionParent(owner, sessionId) ?? null);
+}
+
 /** Read and complete one strict-after page in the same Session transaction. */
 export function readSessionReplayPage<A>(
   owner: SqliteOwner,
@@ -645,10 +653,6 @@ export function readSessionReplayPage<A>(
   });
 }
 
-function sameEntry(left: StoredSessionEntry, right: StoredSessionEntry) {
-  return encodeStoredSessionEntry(left) === encodeStoredSessionEntry(right);
-}
-
 function sameIdentity(left: MuleIdentity, right: MuleIdentity): boolean {
   return (
     left.kind === right.kind &&
@@ -669,6 +673,47 @@ function sameContract(left: RunContract, right: RunContract): boolean {
   );
 }
 
+function appendRecordedEntryOwned(
+  owner: SqliteOwner,
+  accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
+  entry: StoredSessionEntry,
+  findExisting: (row: StoredSessionRow) => boolean,
+  beforeAppend?: () => void,
+): "new" | "replay" {
+  beforeAppend?.();
+  const existing = readSessionEntriesForWork(
+    owner,
+    accepted.sessionId,
+    accepted.commandId,
+  ).find(findExisting);
+  if (existing !== undefined) {
+    if (
+      entry.kind === "work_terminal" &&
+      existing.entry.kind === "run_terminal"
+    )
+      return "replay" as const;
+    if (sameStoredSessionEntry(existing.entry, entry)) return "replay" as const;
+    throw conflict("Mule event identity conflicts");
+  }
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const factId = sessionIds.fact.generate();
+    if (
+      readSessionEntryById(owner, factId) !== undefined ||
+      readSessionCommandAdmission(owner, accepted.sessionId, factId) !==
+        undefined
+    )
+      continue;
+    appendSessionEntry(owner, {
+      sessionId: accepted.sessionId,
+      id: factId,
+      entry,
+    });
+    return "new" as const;
+  }
+  throw rejected("Session fact identity allocation failed");
+}
+
 function appendRecordedEntry(
   owner: SqliteOwner,
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
@@ -676,40 +721,15 @@ function appendRecordedEntry(
   findExisting: (row: StoredSessionRow) => boolean,
   beforeAppend?: () => void,
 ): void {
-  const delivery = owner.transactionSync(() => {
-    beforeAppend?.();
-    const existing = readSessionEntriesForWork(
+  const delivery = owner.transactionSync(() =>
+    appendRecordedEntryOwned(
       owner,
-      accepted.sessionId,
-      accepted.commandId,
-    ).find(findExisting);
-    if (existing !== undefined) {
-      if (
-        entry.kind === "work_terminal" &&
-        existing.entry.kind === "run_terminal"
-      )
-        return "replay" as const;
-      if (sameEntry(existing.entry, entry)) return "replay" as const;
-      throw conflict("Mule event identity conflicts");
-    }
-
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const factId = sessionIds.fact.generate();
-      if (
-        readSessionEntryById(owner, factId) !== undefined ||
-        readSessionCommandAdmission(owner, accepted.sessionId, factId) !==
-          undefined
-      )
-        continue;
-      appendSessionEntry(owner, {
-        sessionId: accepted.sessionId,
-        id: factId,
-        entry,
-      });
-      return "new" as const;
-    }
-    throw rejected("Session fact identity allocation failed");
-  });
+      accepted,
+      entry,
+      findExisting,
+      beforeAppend,
+    ),
+  );
   if (delivery === "new")
     publishOwnerObservation(
       owner,
@@ -942,7 +962,7 @@ function recordMessageStart(
             throw conflict("Mule message-start identity conflicts");
           return "replay" as const;
         }
-        if (!sameEntry(existing.entry, entry))
+        if (!sameStoredSessionEntry(existing.entry, entry))
           throw conflict("Mule message-start identity conflicts");
         return "replay" as const;
       }
@@ -992,6 +1012,7 @@ function recordMessageEnd(
   owner: SqliteOwner,
   accepted: AcceptedCommand,
   event: Extract<MuleEvent, { type: "message_end" }>,
+  model: Readonly<{ provider: string; id: string }>,
 ): Effect.Effect<void, ShiitakeError> {
   return storeEffect(() => {
     const entry: Extract<StoredSessionEntry, { kind: "message" }> = {
@@ -1015,16 +1036,27 @@ function recordMessageEnd(
           sameIdentity(current.message, event.message),
       );
       if (existing?.entry.kind === "message") {
-        if (!sameEntry(existing.entry, completed))
+        if (!sameStoredSessionEntry(existing.entry, completed))
           throw conflict("Mule completed-message identity conflicts");
-        return "replay" as const;
+      } else {
+        completeSessionLeaf(owner, {
+          sessionId: accepted.sessionId,
+          id: event.message.value,
+          entry: completed,
+        });
       }
-      completeSessionLeaf(owner, {
-        sessionId: accepted.sessionId,
-        id: event.message.value,
-        entry: completed,
-      });
-      return "new" as const;
+      const retryDelivery =
+        event.retry === undefined || event.value.role !== "assistant"
+          ? "replay"
+          : recordLiveRetryEventOwned(
+              owner,
+              accepted,
+              toLiveRetryEvent(event.retry, model),
+              event.turn,
+            );
+      return existing?.entry.kind === "message" && retryDelivery === "replay"
+        ? ("replay" as const)
+        : ("new" as const);
     });
     if (delivery === "new") publishOwnerObservation(owner, accepted.sessionId);
   });
@@ -1086,7 +1118,92 @@ function recordToolOutcome(
   });
 }
 
-/** Record one retained live Pi retry observation on the Session lineage. */
+/**
+ * Map Mule's retry transitions onto Woodstock's retained `live_retry` facts.
+ * A started attempt ends the backoff countdown before streaming resumes.
+ */
+export function toLiveRetryEvent(
+  event: MuleRetryObservation,
+  model: Readonly<{ provider: string; id: string }>,
+): LiveRetryEvent {
+  if (event.type === "retry_attempt_started")
+    return {
+      type: "auto_retry_attempt",
+      run: event.run,
+      attempt: event.attempt,
+    };
+  // Mule's retry text is Pi's private error body. Woodstock's retry journal
+  // feeds status and recovery, not the owner's failed-turn conversation.
+  const safeReason = (
+    "Model request failed. Retry the request. " +
+    unavailableRunReason({
+      runId: event.run.value,
+      provider: model.provider,
+      model: model.id,
+    })
+  ).slice(0, 200);
+  return event.type === "retry_scheduled"
+    ? {
+        type: "auto_retry_start",
+        run: event.run,
+        attempt: event.attempt,
+        maxAttempts: event.maxAttempts,
+        delayMs: event.delayMs,
+        dueAt: event.dueAt,
+        errorMessage: safeReason,
+      }
+    : event.finalError === undefined
+      ? {
+          type: "auto_retry_end",
+          run: event.run,
+          attempt: event.attempt,
+          success: event.success,
+        }
+      : {
+          type: "auto_retry_end",
+          run: event.run,
+          attempt: event.attempt,
+          success: event.success,
+          finalError: safeReason,
+        };
+}
+
+function recordLiveRetryEventOwned(
+  owner: SqliteOwner,
+  accepted: AcceptedCommand,
+  event: LiveRetryEvent,
+  turn: MuleIdentity,
+): "new" | "replay" {
+  // Pi numbers retries per assistant turn, not per run. The retained turn
+  // boundary scopes replay identity without changing older event payloads.
+  const boundary = readSessionEntriesForWork(
+    owner,
+    accepted.sessionId,
+    accepted.commandId,
+  ).find(
+    ({ entry }) =>
+      entry.kind === "turn_started" && sameIdentity(entry.turn, turn),
+  );
+  if (boundary === undefined) throw conflict("Retry has no recorded turn");
+  const entry: Extract<StoredSessionEntry, { kind: "live_retry" }> = {
+    kind: "live_retry",
+    workId: accepted.commandId,
+    event,
+  };
+  return appendRecordedEntryOwned(
+    owner,
+    accepted,
+    entry,
+    ({ entry: current, sequence }) =>
+      sequence > boundary.sequence &&
+      current.kind === "live_retry" &&
+      current.event.type === event.type &&
+      current.event.attempt === event.attempt &&
+      sameIdentity(current.event.run, event.run),
+  );
+}
+
+/** Record one standalone live Pi retry observation on the Session lineage. */
 export function recordLiveRetryEvent(
   owner: SqliteOwner,
   accepted: AcceptedCommand,
@@ -1094,33 +1211,10 @@ export function recordLiveRetryEvent(
   turn: MuleIdentity,
 ): Effect.Effect<void, MuleError> {
   return storeEffect(() => {
-    // Pi numbers retries per assistant turn, not per run. The retained turn
-    // boundary scopes replay identity without changing older event payloads.
-    const boundary = readSessionEntriesForWork(
-      owner,
-      accepted.sessionId,
-      accepted.commandId,
-    ).find(
-      ({ entry }) =>
-        entry.kind === "turn_started" && sameIdentity(entry.turn, turn),
+    const delivery = owner.transactionSync(() =>
+      recordLiveRetryEventOwned(owner, accepted, event, turn),
     );
-    if (boundary === undefined) throw conflict("Retry has no recorded turn");
-    const entry: Extract<StoredSessionEntry, { kind: "live_retry" }> = {
-      kind: "live_retry",
-      workId: accepted.commandId,
-      event,
-    };
-    appendRecordedEntry(
-      owner,
-      accepted,
-      entry,
-      ({ entry: current, sequence }) =>
-        sequence > boundary.sequence &&
-        current.kind === "live_retry" &&
-        current.event.type === event.type &&
-        current.event.attempt === event.attempt &&
-        sameIdentity(current.event.run, event.run),
-    );
+    if (delivery === "new") publishOwnerObservation(owner, accepted.sessionId);
   }).pipe(Effect.mapError(listenerFailure));
 }
 
@@ -1144,10 +1238,11 @@ export function openMuleRecorder(
   owner: SqliteOwner,
   accepted: AcceptedCommand,
   contract: RunContract,
+  model: Readonly<{ provider: string; id: string }>,
 ): Effect.Effect<MuleRecorder, never, Scope.Scope> {
   return Effect.gen(function* () {
     const progress = yield* openProgress(owner, accepted, (event) =>
-      recordMessageEnd(owner, accepted, event),
+      recordMessageEnd(owner, accepted, event, model),
     );
     const toolProgress = yield* openToolProgress(owner, accepted);
     const record = (
@@ -1176,7 +1271,7 @@ export function openMuleRecorder(
           if (event.value.role === "user") return Effect.void;
           return event.value.role === "assistant"
             ? progress.terminal(event)
-            : recordMessageEnd(owner, accepted, event);
+            : recordMessageEnd(owner, accepted, event, model);
         case "tool_execution_start":
           return recordToolIntent(owner, accepted, contract, event).pipe(
             Effect.andThen(toolProgress.started(event)),

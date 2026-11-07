@@ -26,6 +26,7 @@ import {
   hasStoredSession,
   hasRecordedRunTerminal,
   readWorkSender,
+  readSessionParent,
   recordWorkSender,
   type AdmissionOrigin,
   type EnqueueAcceptedWork,
@@ -170,7 +171,8 @@ function decodeReply(request: AdmitRequest): VerifiedAgentReply | undefined {
 /**
  * The Agent Session whose work this admission is: the sender of delegated
  * mail that expects a reply, or the sender of the earlier work this one
- * continues. Replies and every other admission have none.
+ * continues. Extension-admitted work otherwise belongs to the Session's first
+ * delegator. A person's own message still has no sender.
  */
 function workSender(
   owner: SqliteOwner,
@@ -185,7 +187,9 @@ function workSender(
       name: messageAuthor(request.meta)?.name ?? mail.from.agentId,
     };
   return request.continuesWorkId === undefined
-    ? undefined
+    ? request.origin.kind !== "extension"
+      ? undefined
+      : readSessionParent(owner, request.sessionId)
     : readWorkSender(owner, request.sessionId, request.continuesWorkId);
 }
 

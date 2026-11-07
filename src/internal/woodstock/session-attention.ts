@@ -74,6 +74,16 @@ export function hasSessionAttention(
   );
 }
 
+/** Whether a person-bound or Agent-routed decision still blocks continuation. */
+export function hasSessionDecision(
+  owner: SqliteOwner,
+  sessionId: string,
+): boolean {
+  return readSessionAttention(owner, sessionId).some(
+    (item) => item.inbox !== false || item.waitingOn !== undefined,
+  );
+}
+
 /** Upsert only the calling extension's item, in the calling transaction. */
 export function setSessionAttention(
   owner: SqliteOwner,

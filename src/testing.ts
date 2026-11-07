@@ -264,7 +264,10 @@ export async function memoryHost(
     });
     return {
       agent,
-      reconcile: async () => requireBound().reconcile(),
+      reconcile: async () => {
+        const host = requireBound();
+        await Promise.all([host.reconcile(), host.reconcileHost?.()]);
+      },
       settle: async (sessionId, maxTicks, beforeRead) => {
         const budget = settlementBudgetSchema.parse(maxTicks);
         for (let tick = 0; tick < budget; tick += 1) {
@@ -273,7 +276,7 @@ export async function memoryHost(
             await beforeRead?.();
             return agent.session(sessionId).read();
           }
-          await host.reconcile();
+          await Promise.all([host.reconcile(), host.reconcileHost?.()]);
         }
         throw new Error(
           `Memory host did not settle within ${String(budget)} reconciliation ticks`,

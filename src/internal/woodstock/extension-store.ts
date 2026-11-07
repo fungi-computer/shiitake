@@ -1,3 +1,5 @@
+import type { WatchdogTransactionalProjection } from "@fungi.computer/watchdog";
+import { sessionIds } from "./identities.js";
 import * as Schema from "effect/Schema";
 
 import { ShiitakeError } from "../../errors.js";
@@ -31,7 +33,7 @@ const StatusRowSchema = Schema.Struct({
 const TimerRowSchema = Schema.Struct({
   extension_id: Text,
   key: Text,
-  due_at: Instant,
+  job_id: Text,
 });
 const StoredRecordRowSchema = Schema.Struct({
   collection: Text,
@@ -39,10 +41,6 @@ const StoredRecordRowSchema = Schema.Struct({
   value_json: Schema.String,
 });
 const CursorRowSchema = Schema.Struct({ sequence: Instant });
-const WakeRowSchema = Schema.Struct({
-  due: Schema.Literals([0, 1]),
-  next_due_at: Schema.NullOr(Instant),
-});
 
 function unavailable(message: string): ShiitakeError {
   return new ShiitakeError("store", "unavailable", message);
@@ -92,11 +90,9 @@ export function prepareExtensionStore(owner: SqliteOwner): void {
     owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_timers (
       extension_id TEXT NOT NULL,
       key TEXT NOT NULL,
-      due_at INTEGER NOT NULL CHECK (due_at >= 0),
+      job_id TEXT NOT NULL,
       PRIMARY KEY (extension_id, key)
     )`);
-    owner.sql.exec(`CREATE INDEX IF NOT EXISTS idx_shiitake_extension_timers_due
-      ON shiitake_extension_timers(due_at, extension_id, key)`);
     owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_settled_cursors (
       consumer TEXT PRIMARY KEY,
       sequence INTEGER NOT NULL CHECK (sequence >= 0)
@@ -338,123 +334,139 @@ export function writeStatus(
 
 // ---------- timers -------------------------------------------------------------
 
-/** Upsert one timer. */
+/** Timer jobs share Watchdog's serial partition with Session execution. */
+export const extensionTimerLane = "extension_timer";
+
+/** Current keyed registration; the deadline lives only in Watchdog. */
+export function readTimerJob(
+  owner: SqliteOwner,
+  extensionId: string,
+  key: string,
+): string | undefined {
+  return decodeRows(
+    TimerRowSchema,
+    owner.sql
+      .exec(
+        "SELECT extension_id,key,job_id FROM shiitake_extension_timers WHERE extension_id=? AND key=?",
+        extensionId,
+        key,
+      )
+      .toArray(),
+    "Extension timer is invalid",
+  )[0]?.job_id;
+}
+
+/** Replace a registration and its queued job in the enclosing extension transaction. */
 export function writeTimer(
   owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
   extensionId: string,
   key: string,
   dueAt: number,
 ): void {
+  deleteTimer(owner, watchdog, extensionId, key);
+  const jobId = sessionIds.work.generate();
+  watchdog.enqueueAcceptedJob({
+    jobId,
+    queue: jobId,
+    lane: extensionTimerLane,
+    priority: 0,
+    payload: { extensionId, key },
+    notBefore: dueAt,
+    state: "queued",
+  });
   owner.sql.exec(
-    `INSERT INTO shiitake_extension_timers (extension_id, key, due_at)
-     VALUES (?, ?, ?)
-     ON CONFLICT(extension_id, key) DO UPDATE SET due_at = excluded.due_at`,
+    "INSERT INTO shiitake_extension_timers(extension_id,key,job_id) VALUES (?,?,?)",
     extensionId,
     key,
-    dueAt,
+    jobId,
   );
 }
 
-/** Delete one timer; absent keys are a no-op. */
+/** Cancel queued work and release its registration; a running callback keeps its own claim. */
 export function deleteTimer(
   owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
   extensionId: string,
   key: string,
 ): void {
+  const jobId = readTimerJob(owner, extensionId, key);
+  if (jobId !== undefined)
+    watchdog.recordCancellationIntent({
+      jobId,
+      cancellationId: `${jobId}:cancel`,
+      onlyIfQueued: true,
+    });
   owner.sql.exec(
-    "DELETE FROM shiitake_extension_timers WHERE extension_id = ? AND key = ?",
+    "DELETE FROM shiitake_extension_timers WHERE extension_id=? AND key=?",
     extensionId,
     key,
   );
 }
 
-/** Release all timer registrations when their extension leaves the roster. */
-export function deleteExtensionTimers(
-  owner: SqliteOwner,
-  extensionId: string,
-): void {
-  owner.sql.exec(
-    "DELETE FROM shiitake_extension_timers WHERE extension_id = ?",
-    extensionId,
+function extensionTimers(owner: SqliteOwner, extensionId: string) {
+  return decodeRows(
+    TimerRowSchema,
+    owner.sql
+      .exec(
+        "SELECT extension_id,key,job_id FROM shiitake_extension_timers WHERE extension_id=?",
+        extensionId,
+      )
+      .toArray(),
+    "Extension timer is invalid",
   );
 }
 
-/** Read one timer's due instant. */
+/** Stop wakes while retaining registrations for explicit extension resume. */
+export function cancelExtensionTimers(
+  owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
+  extensionId: string,
+): void {
+  for (const row of extensionTimers(owner, extensionId))
+    watchdog.recordCancellationIntent({
+      jobId: row.job_id,
+      cancellationId: `${row.job_id}:cancel`,
+      onlyIfQueued: true,
+    });
+}
+
+/** Re-arm stopped registrations without replacing queued work or a live claim. */
+export function resumeExtensionTimers(
+  owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
+  extensionId: string,
+): void {
+  for (const row of extensionTimers(owner, extensionId)) {
+    const job = watchdog.readJob(row.job_id);
+    if (job === undefined) throw unavailable("Extension timer job is missing");
+    if (job.state === "queued" || job.state === "running") continue;
+    writeTimer(owner, watchdog, extensionId, row.key, job.notBefore);
+  }
+}
+
+/** Roster removal releases both registrations and their queued wakes. */
+export function deleteExtensionTimers(
+  owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
+  extensionId: string,
+): void {
+  for (const row of extensionTimers(owner, extensionId))
+    deleteTimer(owner, watchdog, extensionId, row.key);
+}
+
+/** Public timer reads resolve the current pointer through Watchdog's due time. */
 export function readTimer(
   owner: SqliteOwner,
+  watchdog: WatchdogTransactionalProjection,
   extensionId: string,
   key: string,
 ): number | undefined {
-  const rows = owner.sql
-    .exec(
-      `SELECT extension_id, key, due_at FROM shiitake_extension_timers
-       WHERE extension_id = ? AND key = ?`,
-      extensionId,
-      key,
-    )
-    .toArray();
-  return decodeRows(TimerRowSchema, rows, "Extension timer is invalid")[0]
-    ?.due_at;
-}
-
-function placeholders(values: readonly string[]): string {
-  return values.map(() => "?").join(", ");
-}
-
-/** Due timers of the given extensions, oldest first, bounded by `limit`. */
-export function readDueTimers(
-  owner: SqliteOwner,
-  extensionIds: readonly string[],
-  now: number,
-  limit: number,
-): readonly Readonly<{ extensionId: string; key: string; dueAt: number }>[] {
-  if (extensionIds.length === 0) return [];
-  const rows = owner.sql
-    .exec(
-      `SELECT extension_id, key, due_at FROM shiitake_extension_timers
-       WHERE due_at <= ? AND extension_id IN (${placeholders(extensionIds)})
-       ORDER BY due_at, extension_id, key LIMIT ?`,
-      now,
-      ...extensionIds,
-      limit,
-    )
-    .toArray();
-  return decodeRows(TimerRowSchema, rows, "Extension timer is invalid").map(
-    (row) => ({
-      extensionId: row.extension_id,
-      key: row.key,
-      dueAt: row.due_at,
-    }),
-  );
-}
-
-/** Whether a timer is due now, and the next future timer instant. */
-export type TimerWake = Readonly<{ due: boolean; nextWakeAt: number | null }>;
-
-/** Whether a timer of the given extensions is due, and the next future one. */
-export function readTimerWake(
-  owner: SqliteOwner,
-  extensionIds: readonly string[],
-  now: number,
-): TimerWake {
-  if (extensionIds.length === 0) return { due: false, nextWakeAt: null };
-  const ids = placeholders(extensionIds);
-  const rows = owner.sql
-    .exec(
-      `SELECT
-         EXISTS (SELECT 1 FROM shiitake_extension_timers
-                 WHERE due_at <= ? AND extension_id IN (${ids})) AS due,
-         (SELECT MIN(due_at) FROM shiitake_extension_timers
-          WHERE due_at > ? AND extension_id IN (${ids})) AS next_due_at`,
-      now,
-      ...extensionIds,
-      now,
-      ...extensionIds,
-    )
-    .toArray();
-  const row = decodeRows(WakeRowSchema, rows, "Extension timer is invalid")[0];
-  if (row === undefined) throw unavailable("Extension timer is unavailable");
-  return { due: row.due === 1, nextWakeAt: row.next_due_at };
+  const jobId = readTimerJob(owner, extensionId, key);
+  if (jobId === undefined) return undefined;
+  const row = watchdog.readJob(jobId);
+  if (row === undefined) throw unavailable("Extension timer job is missing");
+  return row.notBefore;
 }
 
 // ---------- settled cursors ----------------------------------------------------
@@ -465,7 +477,7 @@ export function readTimerWake(
  *
  * Watchdog's settled `sequence` is the enqueue order, not the settle order.
  * Watchdog exposes only the settled prefix below the first unfinished serial
- * row. That fence makes this high-water cursor exact across queue skips and
+ * row in the selected default lane. That fence makes this high-water cursor exact across queue skips and
  * concurrent delivery. Stream order is enqueue order, not completion order.
  */
 export function readCursor(

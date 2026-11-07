@@ -1,7 +1,7 @@
 import type { Json } from "../../extensions.js";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { readSessionAttention } from "./session-attention.js";
-import { readWaitingOnSender } from "./work-senders.js";
+import { readSessionParent, readWaitingOnSender } from "./work-senders.js";
 import { readSessionDelegator } from "./session-delegator.js";
 import type { SessionAttention } from "../../session-attention.js";
 import type { UserMessage } from "@fungi.computer/mule/effect";
@@ -612,6 +612,8 @@ export function readClientSnapshot(
       extensions: projectExtensions(),
       attention: readSessionAttention(owner, sessionId),
     };
+    const parent = readSessionParent(owner, sessionId);
+    if (parent !== undefined) Object.assign(snapshot, { parent });
     return Object.freeze(
       options.includeSandboxFailures === true
         ? { ...snapshot, sandboxFailures: page.sandboxFailures }

@@ -161,8 +161,8 @@ The door refused an extension admission.
 
 #### Extends
 
-- `YieldableError`\<`this`\> & `object` & `Readonly`\<\{ `reason`: `"closed"` \|
-  `"conflict"` \| `"invalid"` \| `"archived"`; `message`: `string`; \}\>
+- `YieldableError`\<`this`\> & `object` & `Readonly`\<\{ `reason`: `"archived"`
+  \| `"closed"` \| `"conflict"` \| `"invalid"`; `message`: `string`; \}\>
 
 #### Constructors
 
@@ -176,8 +176,8 @@ new AdmissionError(args): AdmissionError;
 
 | Parameter      | Type                                                                                            |
 | -------------- | ----------------------------------------------------------------------------------------------- |
-| `args`         | \{ `reason`: `"closed"` \| `"conflict"` \| `"invalid"` \| `"archived"`; `message`: `string`; \} |
-| `args.reason`  | `"closed"` \| `"conflict"` \| `"invalid"` \| `"archived"`                                       |
+| `args`         | \{ `reason`: `"archived"` \| `"closed"` \| `"conflict"` \| `"invalid"`; `message`: `string`; \} |
+| `args.reason`  | `"archived"` \| `"closed"` \| `"conflict"` \| `"invalid"`                                       |
 | `args.message` | `string`                                                                                        |
 
 ###### Returns
@@ -198,7 +198,7 @@ Data.TaggedError("AdmissionError")<{
 ##### reason
 
 ```ts
-readonly reason: "closed" | "conflict" | "invalid" | "archived";
+readonly reason: "archived" | "closed" | "conflict" | "invalid";
 ```
 
 ###### Inherited from
@@ -506,25 +506,26 @@ Request bounded Session documents under the state grant.
 ###### Call Signature
 
 ```ts
-define<C, P, PI, H>(definition): DefinedExtensionV0<C, P, PI>;
+define<C, P, PI, Author>(definition, ...validation): DefinedExtensionV0<C, P, PI>;
 ```
 
 Register commands without a client entry.
 
 ###### Type Parameters
 
-| Type Parameter                                                                                                                                                          | Default type                                     |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `C` _extends_ `Readonly`\<`Record`\<`string`, `Readonly`\<\{ `scope`: `"session"` \| `"agent"`; `input`: `Codec`\<`unknown`\>; `output`: `Codec`\<`unknown`\>; \}\>\>\> | -                                                |
-| `P`                                                                                                                                                                     | -                                                |
-| `PI`                                                                                                                                                                    | -                                                |
-| `H` _extends_ [`CommandHandlersV0`](#commandhandlersv0)\<`C`\>                                                                                                          | [`CommandHandlersV0`](#commandhandlersv0)\<`C`\> |
+| Type Parameter                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `C` _extends_ `Readonly`\<`Record`\<`string`, `Readonly`\<\{ `scope`: `"session"` \| `"agent"`; `input`: `Codec`\<`unknown`\>; `output`: `Codec`\<`unknown`\>; \}\>\>\> |
+| `P`                                                                                                                                                                     |
+| `PI`                                                                                                                                                                    |
+| `Author`                                                                                                                                                                |
 
 ###### Parameters
 
-| Parameter    | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `definition` | `Omit`\<`Readonly`\<\{ `catalog?`: [`Json`](#json); `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`C`\>; \}\>; `projection?`: `Readonly`\<\{ `schema`: `Codec`\<`P`, `PI`\>; `catalog?`: (`value`) => [`Json`](#json); `read`: (`context`, `sessionId`) => `P` \| `Option`\<`P`\> \| `undefined`; \}\>; `prompt?`: (`context`, `run`) => \| readonly `Readonly`\<\{ `name`: `string`; `text`: `string`; \}\>[] \| `Promise`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[]\> \| `Effect`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[], [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\>; `tools?`: (`context`, `run`, `commands`) => \| `Readonly`\<\{ `[moduleBrand]`: `true`; \}\> \| `Promise`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `null`\> \| `Effect`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `Option`\<`Readonly`\<...\>\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `files?`: (`context`, `run`) => \| readonly `FileTool`[] \| `Promise`\<readonly `FileTool`[] \| `null`\> \| `Effect`\<readonly `FileTool`[] \| `Option`\<readonly ...[]\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `hooks?`: `Readonly`\<\{ `start?`: (`context`) => `void` \| `Promise`\<...\> \| `Effect`\<..., ..., ...\>; `onSettled?`: (`context`, `page`) => `void` \| `Effect`\<..., ..., ...\>; `onTimer?`: (`context`, `timer`) => `void` \| `Effect`\<..., ..., ...\>; \}\>; `timers?`: `true`; `attention?`: `true`; `compaction?`: (`context`) => `Readonly`\<\{ `consume`: (`view`) => \| [`CompactionHandoffResultV0`](#compactionhandoffresultv0) \| `Promise`\<...\> \| `Effect.Effect`\<..., ...\>; \}\>; \}\>, `"commands"`\> & `Readonly`\<\{ `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`NoInfer`\<`C`\>\> & `H` & [`CheckedCommandHandlers`](#checkedcommandhandlers)\<`H`\>; \}\>; \}\> & `object` |
+| Parameter       | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `definition`    | `Omit`\<`Readonly`\<\{ `catalog?`: [`Json`](#json); `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`C`\>; \}\>; `projection?`: `Readonly`\<\{ `schema`: `Codec`\<`P`, `PI`\>; `catalog?`: (`value`) => [`Json`](#json); `read`: (`context`, `sessionId`) => `P` \| `Option`\<`P`\> \| `undefined`; \}\>; `prompt?`: (`context`, `run`) => \| readonly `Readonly`\<\{ `name`: `string`; `text`: `string`; \}\>[] \| `Promise`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[]\> \| `Effect`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[], [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\>; `tools?`: (`context`, `run`, `commands`) => \| `Readonly`\<\{ `[moduleBrand]`: `true`; \}\> \| `Promise`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `null`\> \| `Effect`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `Option`\<`Readonly`\<...\>\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `files?`: (`context`, `run`) => \| readonly `FileTool`[] \| `Promise`\<readonly `FileTool`[] \| `null`\> \| `Effect`\<readonly `FileTool`[] \| `Option`\<readonly ...[]\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `hooks?`: `Readonly`\<\{ `start?`: (`context`) => `void` \| `Promise`\<...\> \| `Effect`\<..., ..., ...\>; `onSettled?`: (`context`, `page`) => `void` \| `Effect`\<..., ..., ...\>; `onTimer?`: \| `Readonly`\<\{ `prepare`: (`context`, `timer`) => ...; \}\> \| ((`context`, `timer`) => `void` \| `Effect`\<..., ..., ...\>); \}\>; `timers?`: `true`; `attention?`: `true`; `compaction?`: (`context`) => `Readonly`\<\{ `consume`: (`view`) => \| [`CompactionHandoffResultV0`](#compactionhandoffresultv0) \| `Promise`\<...\> \| `Effect.Effect`\<..., ...\>; \}\>; \}\>, `"commands"`\> & `Readonly`\<\{ `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`NoInfer`\<`C`\>\>; \}\>; \}\> & `Author` & `object` |
+| ...`validation` | `Author` _extends_ `Readonly`\<\{ `commands`: `Readonly`\<\{ `handlers`: (...`args`) => infer H; \}\>; \}\> ? `H` _extends_ [`CheckedCommandHandlers`](#checkedcommandhandlers)\<`H`\> ? \[\] : \[`never`\] : \[\]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 ###### Returns
 
@@ -547,9 +548,9 @@ Register contributions without commands or a client entry.
 
 ###### Parameters
 
-| Parameter    | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `definition` | `Omit`\<`Readonly`\<\{ `catalog?`: [`Json`](#json); `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`C`\>; \}\>; `projection?`: `Readonly`\<\{ `schema`: `Codec`\<`P`, `PI`\>; `catalog?`: (`value`) => [`Json`](#json); `read`: (`context`, `sessionId`) => `P` \| `Option`\<`P`\> \| `undefined`; \}\>; `prompt?`: (`context`, `run`) => \| readonly `Readonly`\<\{ `name`: `string`; `text`: `string`; \}\>[] \| `Promise`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[]\> \| `Effect`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[], [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\>; `tools?`: (`context`, `run`, `commands`) => \| `Readonly`\<\{ `[moduleBrand]`: `true`; \}\> \| `Promise`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `null`\> \| `Effect`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `Option`\<`Readonly`\<...\>\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `files?`: (`context`, `run`) => \| readonly `FileTool`[] \| `Promise`\<readonly `FileTool`[] \| `null`\> \| `Effect`\<readonly `FileTool`[] \| `Option`\<readonly ...[]\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `hooks?`: `Readonly`\<\{ `start?`: (`context`) => `void` \| `Promise`\<...\> \| `Effect`\<..., ..., ...\>; `onSettled?`: (`context`, `page`) => `void` \| `Effect`\<..., ..., ...\>; `onTimer?`: (`context`, `timer`) => `void` \| `Effect`\<..., ..., ...\>; \}\>; `timers?`: `true`; `attention?`: `true`; `compaction?`: (`context`) => `Readonly`\<\{ `consume`: (`view`) => \| [`CompactionHandoffResultV0`](#compactionhandoffresultv0) \| `Promise`\<...\> \| `Effect.Effect`\<..., ...\>; \}\>; \}\>, `"commands"`\> & `Readonly`\<\{ `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`NoInfer`\<`Readonly`\<...\>\>\> & `Readonly`\<`Record`\<`never`, `never`\>\> & [`CheckedCommandHandlers`](#checkedcommandhandlers)\<`Readonly`\<`Record`\<..., ...\>\>\>; \}\>; \}\> & `object` |
+| Parameter    | Type                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `definition` | `Omit`\<`Readonly`\<\{ `catalog?`: [`Json`](#json); `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`C`\>; \}\>; `projection?`: `Readonly`\<\{ `schema`: `Codec`\<`P`, `PI`\>; `catalog?`: (`value`) => [`Json`](#json); `read`: (`context`, `sessionId`) => `P` \| `Option`\<`P`\> \| `undefined`; \}\>; `prompt?`: (`context`, `run`) => \| readonly `Readonly`\<\{ `name`: `string`; `text`: `string`; \}\>[] \| `Promise`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[]\> \| `Effect`\<readonly `Readonly`\<\{ `name`: ...; `text`: ...; \}\>[], [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\>; `tools?`: (`context`, `run`, `commands`) => \| `Readonly`\<\{ `[moduleBrand]`: `true`; \}\> \| `Promise`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `null`\> \| `Effect`\< \| `Readonly`\<\{ `[moduleBrand]`: ...; \}\> \| `Option`\<`Readonly`\<...\>\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `files?`: (`context`, `run`) => \| readonly `FileTool`[] \| `Promise`\<readonly `FileTool`[] \| `null`\> \| `Effect`\<readonly `FileTool`[] \| `Option`\<readonly ...[]\> \| `null`, [`HookError`](#hookerror), [`ExtensionRead`](#extensionread)\> \| `null`; `hooks?`: `Readonly`\<\{ `start?`: (`context`) => `void` \| `Promise`\<...\> \| `Effect`\<..., ..., ...\>; `onSettled?`: (`context`, `page`) => `void` \| `Effect`\<..., ..., ...\>; `onTimer?`: \| `Readonly`\<\{ `prepare`: (`context`, `timer`) => ...; \}\> \| ((`context`, `timer`) => `void` \| `Effect`\<..., ..., ...\>); \}\>; `timers?`: `true`; `attention?`: `true`; `compaction?`: (`context`) => `Readonly`\<\{ `consume`: (`view`) => \| [`CompactionHandoffResultV0`](#compactionhandoffresultv0) \| `Promise`\<...\> \| `Effect.Effect`\<..., ...\>; \}\>; \}\>, `"commands"`\> & `Readonly`\<\{ `commands?`: `Readonly`\<\{ `specs`: `C`; `handlers`: (`context`) => [`CommandHandlersV0`](#commandhandlersv0)\<`NoInfer`\<`C`\>\>; \}\>; \}\> & `object` |
 
 ###### Returns
 
@@ -1174,27 +1175,82 @@ Host-authenticated caller context; never decoded from command JSON or HTTP.
 
 ---
 
+### ExtensionPreparationV0
+
+```ts
+type ExtensionPreparationV0<A, E> = Effect.Effect<
+  Effect.Effect<A, E, ExtensionTx | ExtensionRead>,
+  E,
+  ExtensionRead
+>;
+```
+
+Read external evidence first, then return one synchronous atomic decision.
+
+#### Type Parameters
+
+| Type Parameter |
+| -------------- |
+| `A`            |
+| `E`            |
+
+---
+
+### ExtensionTransactionV0
+
+```ts
+type ExtensionTransactionV0<A, E> =
+  | Effect.Effect<A, E, ExtensionTx | ExtensionRead>
+  | Readonly<{
+      prepare: ExtensionPreparationV0<A, E>;
+    }>;
+```
+
+Preparation has read access only; the returned body gets the write grant.
+
+#### Type Parameters
+
+| Type Parameter |
+| -------------- |
+| `A`            |
+| `E`            |
+
+---
+
 ### CommandHandlersV0
 
 ```ts
 type CommandHandlersV0<C> = {
-  readonly [K in keyof C]: (
-    call: Readonly<{
-      sessionId: CommandSessionIdsV0[C[K]["scope"]];
-      input: C[K]["input"]["Type"];
-      caller?: ExtensionCommandCallerV0;
-    }>,
-  ) =>
-    | C[K]["output"]["Type"]
-    | Effect.Effect<
-        C[K]["output"]["Type"],
-        ExtensionCommandError | ExtensionStateError | AdmissionError,
-        ExtensionTx | ExtensionRead
-      >;
+  readonly [K in keyof C]:
+    | ((
+        call: Readonly<{
+          sessionId: CommandSessionIdsV0[C[K]["scope"]];
+          input: C[K]["input"]["Type"];
+          caller?: ExtensionCommandCallerV0;
+        }>,
+      ) =>
+        | C[K]["output"]["Type"]
+        | Effect.Effect<
+            C[K]["output"]["Type"],
+            ExtensionCommandError | ExtensionStateError | AdmissionError,
+            ExtensionTx | ExtensionRead
+          >)
+    | Readonly<{
+        prepare: (
+          call: Readonly<{
+            sessionId: CommandSessionIdsV0[C[K]["scope"]];
+            input: C[K]["input"]["Type"];
+            caller?: ExtensionCommandCallerV0;
+          }>,
+        ) => ExtensionPreparationV0<
+          C[K]["output"]["Type"],
+          ExtensionCommandError | ExtensionStateError | AdmissionError
+        >;
+      }>;
 };
 ```
 
-Handlers for every declared command, run in one core transaction.
+Every handler commits once; prepared handlers may read outside that transaction.
 
 #### Type Parameters
 
@@ -1212,7 +1268,7 @@ type AttentionV0 = Readonly<{
     sessionId,
     item,
   ) => Effect.Effect<void, ExtensionStateError, ExtensionTx>;
-  awaitsPerson: (
+  awaitsDecision: (
     sessionId,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   clear: (
@@ -1247,6 +1303,23 @@ type ExtensionContextV0<S, Config, D> = Readonly<{
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   workSender: (
     run,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
+  sessionParent: (
+    sessionId,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
+  recipientStatus: (
+    recipient,
+  ) => Effect.Effect<RecipientStatus, ExtensionStateError, ExtensionRead>;
+  recipientParent: (
+    recipient,
   ) => Effect.Effect<
     AttentionRecipient | null,
     ExtensionStateError,
@@ -1308,9 +1381,7 @@ type AgentHooksV0<C, P> = Readonly<{
   onSettled?: (
     page,
   ) => Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
-  onTimer?: (
-    timer,
-  ) => Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
+  onTimer?: (timer) => ExtensionPreparationV0<void, HookError>;
   moduleForRun?: (
     run,
   ) => Effect.Effect<
@@ -1440,10 +1511,14 @@ type ExtensionDefinitionV0<S, C, P, PI, Config, D> = Readonly<{
       context,
       page,
     ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
-    onTimer?: (
-      context,
-      timer,
-    ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
+    onTimer?:
+      | ((
+          context,
+          timer,
+        ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>)
+      | Readonly<{
+          prepare: (context, timer) => ExtensionPreparationV0<void, HookError>;
+        }>;
   }>;
   timers?: true;
   attention?: true;
@@ -1480,15 +1555,23 @@ Contributions registered against the builder's captured metadata.
 
 ```ts
 type CheckedCommandHandlers<H> = {
-  readonly [K in keyof H]: H[K] extends (args: never[]) => infer Result
-    ? Result extends Promise<unknown>
-      ? never
-      : H[K]
+  readonly [K in keyof H]: H[K] extends infer Handler
+    ? Handler extends Readonly<{ prepare: infer Prepare }>
+      ? Prepare extends (args: never[]) => infer Result
+        ? Result extends Promise<unknown>
+          ? never
+          : Handler
+        : never
+      : Handler extends (args: never[]) => infer Result
+        ? Result extends Promise<unknown>
+          ? never
+          : Handler
+        : never
     : never;
 };
 ```
 
-Reject Promise-returning transactional commands even when output is `{}`.
+Preserve inferred command handlers while rejecting asynchronous atomic bodies.
 
 #### Type Parameters
 
@@ -1501,16 +1584,14 @@ Reject Promise-returning transactional commands even when output is `{}`.
 ### ExtensionAuthorDefinitionV0
 
 ```ts
-type ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D, H> = Omit<
+type ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D> = Omit<
   ExtensionDefinitionV0<S, C, P, PI, Config, D>,
   "commands"
 > &
   Readonly<{
     commands?: Readonly<{
       specs: C;
-      handlers: (
-        context,
-      ) => CommandHandlersV0<NoInfer<C>> & H & CheckedCommandHandlers<H>;
+      handlers: (context) => CommandHandlersV0<NoInfer<C>>;
     }>;
   }>;
 ```
@@ -1519,15 +1600,14 @@ Caller-owned extension metadata and handlers accepted by the v0 builder.
 
 #### Type Parameters
 
-| Type Parameter                                                 |
-| -------------------------------------------------------------- |
-| `S` _extends_ [`CollectionsV0`](#collectionsv0)                |
-| `C` _extends_ [`CommandsV0`](#commandsv0)                      |
-| `P`                                                            |
-| `PI`                                                           |
-| `Config` _extends_ [`Json`](#json)                             |
-| `D` _extends_ [`DocumentsV0`](index.md#documentsv0)            |
-| `H` _extends_ [`CommandHandlersV0`](#commandhandlersv0)\<`C`\> |
+| Type Parameter                                      |
+| --------------------------------------------------- |
+| `S` _extends_ [`CollectionsV0`](#collectionsv0)     |
+| `C` _extends_ [`CommandsV0`](#commandsv0)           |
+| `P`                                                 |
+| `PI`                                                |
+| `Config` _extends_ [`Json`](#json)                  |
+| `D` _extends_ [`DocumentsV0`](index.md#documentsv0) |
 
 ---
 
@@ -1735,16 +1815,15 @@ The exclusive compaction handoff callable of one extension.
 type RegisteredExtensionCommandV0 = (
   frame,
 ) => Result.Result<
-  () => Effect.Effect<
+  ExtensionPreparationV0<
     Json,
-    ExtensionCommandError | ExtensionStateError | AdmissionError,
-    ExtensionTx | ExtensionRead
+    ExtensionCommandError | ExtensionStateError | AdmissionError
   >,
   Schema.SchemaError
 >;
 ```
 
-A parsed invocation retains its typed handler until the transaction runs.
+Parsed input retains its typed preparation and atomic body.
 
 #### Parameters
 
@@ -1754,11 +1833,10 @@ A parsed invocation retains its typed handler until the transaction runs.
 
 #### Returns
 
-`Result.Result`\<() => `Effect.Effect`\<[`Json`](#json), \|
-[`ExtensionCommandError`](#extensioncommanderror) \|
+`Result.Result`\<[`ExtensionPreparationV0`](#extensionpreparationv0)\<[`Json`](#json),
+\| [`ExtensionCommandError`](#extensioncommanderror) \|
 [`ExtensionStateError`](#extensionstateerror) \|
-[`AdmissionError`](#admissionerror), [`ExtensionTx`](#extensiontx) \|
-[`ExtensionRead`](#extensionread)\>, `Schema.SchemaError`\>
+[`AdmissionError`](#admissionerror)\>, `Schema.SchemaError`\>
 
 ---
 
@@ -1890,6 +1968,26 @@ Decoded Agent Session an attention item waits on.
 
 ---
 
+### AttentionEscalation
+
+```ts
+type AttentionEscalation = typeof AttentionEscalationSchema.Type;
+```
+
+Authenticated actor and reason retained when an attention item moves upward.
+
+---
+
+### RecipientStatus
+
+```ts
+type RecipientStatus = "present" | "archived" | "absent" | "unknown";
+```
+
+Positive presence or absence evidence, or unknown without escalation.
+
+---
+
 ### AttentionItem
 
 ```ts
@@ -1946,6 +2044,24 @@ escalated.
 
 ---
 
+### AttentionEscalationSchema
+
+```ts
+const AttentionEscalationSchema: Struct<{
+  by: Struct<{
+    agentId: NonEmptyString;
+    sessionId: NonEmptyString;
+    name: NonEmptyString;
+  }>;
+  reason: Literals<readonly ["escalated", "sender_archived", "sender_absent"]>;
+  note: optionalKey<String>;
+}>;
+```
+
+The latest handoff, retained even when an item continues up the Agent chain.
+
+---
+
 ### AttentionItemSchema
 
 ```ts
@@ -1961,6 +2077,19 @@ const AttentionItemSchema: Struct<{
       agentId: NonEmptyString;
       sessionId: NonEmptyString;
       name: NonEmptyString;
+    }>
+  >;
+  escalated: optional<
+    Struct<{
+      by: Struct<{
+        agentId: NonEmptyString;
+        sessionId: NonEmptyString;
+        name: NonEmptyString;
+      }>;
+      reason: Literals<
+        readonly ["escalated", "sender_archived", "sender_absent"]
+      >;
+      note: optionalKey<String>;
     }>
   >;
 }>;

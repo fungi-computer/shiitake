@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Effect-native durable Session acceptance and bounded run orchestration",
   "type": "module",
@@ -30,6 +30,10 @@
     "./model-preference": {
       "types": "./dist/model-preference.d.ts",
       "import": "./dist/model-preference.js"
+    },
+    "./model-list": {
+      "types": "./dist/model-list.d.ts",
+      "import": "./dist/model-list.js"
     },
     "./http": {
       "types": "./dist/http.d.ts",

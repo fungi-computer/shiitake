@@ -166,6 +166,11 @@ function memoryHost(options?): Promise<Readonly<{
   agent: ShiitakeOwnerAgent;
   reconcile: () => Promise<void>;
   settle: (sessionId, maxTicks?, beforeRead?) => Promise<Readonly<{
+     parent?: {
+        agentId: string;
+        sessionId: string;
+        name: string;
+     };
      sessionId: string;
      cursor: string | null;
      hasMore: boolean;
@@ -251,18 +256,19 @@ privileges. No submitted JavaScript is evaluated by this helper.
 `Promise`\<`Readonly`\<\{ `agent`:
 [`ShiitakeOwnerAgent`](index.md#shiitakeowneragent); `reconcile`: () =>
 `Promise`\<`void`\>; `settle`: (`sessionId`, `maxTicks?`, `beforeRead?`) =>
-`Promise`\<`Readonly`\<\{ `sessionId`: `string`; `cursor`: `string` \| `null`;
-`hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`: readonly
-`Readonly`\<\{ `requestId?`: ... \| ...; `meta?`: ... \| ...; `data?`: ... \|
-...; `origin?`: ... \| ...; `id`: `string`; `sequence`: `number`; `commandId`:
-... \| ...; `value`: [`ModelMessage`](client.md#modelmessage); \}\>[];
-`terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`: ... \|
-... \| ... \| ...; `sequence`: `number`; `diagnostic`: ... \| ...; `meta?`: ...
-\| ...; \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: ...; `sequence`:
-...; `at`: ...; `tokensBefore`: ...; `tokensAfter`: ...; `trigger`: ...; \}\>[];
-`compactionNotices?`: readonly `Readonly`\<\{ `id`: ...; `sequence`: ...; `at`:
-...; `trigger`: ...; `result`: ...; `diagnostic`: ...; \}\>[];
-`sandboxFailures?`: readonly `object`[]; `pending`:
+`Promise`\<`Readonly`\<\{ `parent?`: \{ `agentId`: `string`; `sessionId`:
+`string`; `name`: `string`; \}; `sessionId`: `string`; `cursor`: `string` \|
+`null`; `hasMore`: `boolean`; `oldestCursor?`: `string` \| `null`; `messages`:
+readonly `Readonly`\<\{ `requestId?`: ... \| ...; `meta?`: ... \| ...; `data?`:
+... \| ...; `origin?`: ... \| ...; `id`: `string`; `sequence`: `number`;
+`commandId`: ... \| ...; `value`: [`ModelMessage`](client.md#modelmessage);
+\}\>[]; `terminals`: readonly `Readonly`\<\{ `commandId`: `string`; `outcome`:
+... \| ... \| ... \| ...; `sequence`: `number`; `diagnostic`: ... \| ...;
+`meta?`: ... \| ...; \}\>[]; `compactions?`: readonly `Readonly`\<\{ `id`: ...;
+`sequence`: ...; `at`: ...; `tokensBefore`: ...; `tokensAfter`: ...; `trigger`:
+...; \}\>[]; `compactionNotices?`: readonly `Readonly`\<\{ `id`: ...;
+`sequence`: ...; `at`: ...; `trigger`: ...; `result`: ...; `diagnostic`: ...;
+\}\>[]; `sandboxFailures?`: readonly `object`[]; `pending`:
 [`SessionPendingPrompts`](client.md#sessionpendingprompts); `activity`:
 [`SessionActivity`](client.md#sessionactivity); `progress`: \| `Readonly`\<\{
 `messageId`: `string`; `revision`: `number`; `text`: `string`; `thinking`:

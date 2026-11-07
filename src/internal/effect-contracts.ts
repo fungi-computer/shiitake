@@ -23,10 +23,8 @@ import type { Sandbox } from "@fungi.computer/mycelium/effect";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import type * as Scope from "effect/Scope";
-import type { WatchdogError } from "@fungi.computer/watchdog";
 import type {
-  WatchdogExecutionDecision,
-  WatchdogRunningJob,
+  EffectWatchdogExecutor,
   ConcurrentWatchdogRuntimeEffect,
 } from "@fungi.computer/watchdog/effect";
 
@@ -129,10 +127,12 @@ export type ToolSourceEffect = Readonly<{
 
 /** Effect-native owner for scheduling the opaque durable reconciler. */
 export type RuntimeHostEffect = Readonly<{
-  /** Bind the one repeatable zero-input reconciliation program. */
+  /** Bind independent Session and delivery programs under one wake and close owner. */
   bind: (
     input: Readonly<{
       reconcile: Effect.Effect<void, ShiitakeError>;
+      /** Independent delivery pass under the same host wake and close owner. */
+      reconcileHost: Effect.Effect<void, ShiitakeError> | undefined;
       pendingWork: Effect.Effect<RuntimePendingWork, ShiitakeError>;
     }>,
   ) => Effect.Effect<
@@ -172,12 +172,9 @@ export type ShiitakeEffectOptions = Readonly<{
   hostJobs?: Readonly<{
     lane: string;
     /** Open the host executor before persisted work is recovered. */
-    open: (runtime: ConcurrentWatchdogRuntimeEffect) => Readonly<{
-      /** Execute a job claimed for this host lane. */
-      execute: (
-        job: WatchdogRunningJob,
-      ) => Effect.Effect<WatchdogExecutionDecision, WatchdogError>;
-    }>;
+    open: (
+      runtime: ConcurrentWatchdogRuntimeEffect,
+    ) => Pick<EffectWatchdogExecutor, "execute" | "retryPolicy">;
   }>;
   /** Effect-native Pi model owner. */
   model: ModelSourceEffect;
@@ -192,6 +189,17 @@ export type ShiitakeEffectOptions = Readonly<{
    * extensions passes `{ roster: [], grants: [] }`.
    */
   extensions: ExtensionRosterV0;
+  /** Host presence check for routed attention. Omission means unknown. */
+  recipientStatus?: (
+    recipient: import("../session-attention.js").AttentionRecipient,
+  ) => Effect.Effect<import("../session-attention.js").RecipientStatus>;
+  /** Read the recipient's first delegator; null proves root, failure never does. */
+  recipientParent?: (
+    recipient: import("../session-attention.js").AttentionRecipient,
+  ) => Effect.Effect<
+    import("../session-attention.js").AttentionRecipient | null,
+    import("../extensions.js").ExtensionStateError
+  >;
   /**
    * Pi's bounded retry policy around each live assistant call. Omitted
    * means `piCodingAgentRetryDefaults` (Pi coding-agent's own numbers).

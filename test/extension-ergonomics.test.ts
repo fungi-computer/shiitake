@@ -8,6 +8,7 @@ import {
   defineCollection,
   defineExtension,
   type CommandsV0,
+  type CommandHandlersV0,
 } from "../src/extensions.js";
 import { callTool, echoSystemPrompt, memoryHost } from "../src/testing.js";
 
@@ -164,73 +165,86 @@ it("declares state by collections alone, reads it synchronously and projects a p
   }
 });
 
-it("exposes a command to the model as a tool that runs the same handler", async () => {
-  const commands = {
-    add: { scope: "session", input: Link, output: Bookmark },
-  } satisfies CommandsV0;
-  const bookmarks = defineExtension("bookmarks")
-    .state({
-      bookmarks: defineCollection(Bookmark, {
-        key: (b) => JSON.stringify([b.sessionId, b.url]),
-        index: (b) => b.sessionId,
-      }),
-    })
-    .define({
-      commands: {
-        specs: commands,
-        handlers: (ctx) => ({
-          add: ({ sessionId, input }) =>
-            Effect.gen(function* () {
-              const row = { ...input, sessionId };
-              yield* ctx.state.bookmarks.put(row);
-              yield* ctx.observe(sessionId);
-              return row;
-            }),
+it.each([false, true])(
+  "exposes a command through both doors (prepared: %s)",
+  async (prepared) => {
+    const commands = {
+      add: { scope: "session", input: Link, output: Bookmark },
+    } satisfies CommandsV0;
+    const bookmarks = defineExtension("bookmarks")
+      .state({
+        bookmarks: defineCollection(Bookmark, {
+          key: (b) => JSON.stringify([b.sessionId, b.url]),
+          index: (b) => b.sessionId,
         }),
-      },
-      tools: (_ctx, _run, commands) =>
-        Mycelium.module({
-          id: "example.bookmarks",
-          name: "bookmarks",
-          operations: {
-            add: commands.tool("add", {
-              description: "Save a link in this Session.",
-            }),
+      })
+      .define({
+        commands: {
+          specs: commands,
+          handlers: (ctx) => {
+            const ordinary = {
+              add: ({ sessionId, input }) =>
+                Effect.gen(function* () {
+                  const row = { ...input, sessionId };
+                  yield* ctx.state.bookmarks.put(row);
+                  yield* ctx.observe(sessionId);
+                  return row;
+                }),
+            } satisfies CommandHandlersV0<typeof commands>;
+            return {
+              add: prepared
+                ? {
+                    prepare: (call) =>
+                      Effect.promise(() => Promise.resolve(ordinary.add(call))),
+                  }
+                : ordinary.add,
+            };
           },
-        }),
-      projection: {
-        schema: Schema.Array(Bookmark),
-        read: (ctx, sessionId) =>
-          ctx.state.bookmarks.peekPage({ index: sessionId, limit: 32 }),
-      },
-    });
-  const host = await memoryHost({
-    extensions: [bookmarks],
-    script: [
-      callTool("bookmarks.add", { url: "https://a.example/", title: "A" }),
-      "Saved.",
-    ],
-  });
-  try {
-    const session = host.agent.session("cmd");
-    await session.send("Save A", { requestId: "a" });
-    await host.settle("cmd");
-    await session.extension(bookmarks.manifest.id).call("add", {
-      url: "https://b.example/",
-      title: "B",
-    });
-    const snapshot = await session.read();
-    expect(snapshot.extensions.bookmarks).toMatchObject({
-      status: "running",
-      value: [
-        { title: "A", sessionId: "cmd" },
-        { title: "B", sessionId: "cmd" },
+        },
+        tools: (_ctx, _run, commands) =>
+          Mycelium.module({
+            id: "example.bookmarks",
+            name: "bookmarks",
+            operations: {
+              add: commands.tool("add", {
+                description: "Save a link in this Session.",
+              }),
+            },
+          }),
+        projection: {
+          schema: Schema.Array(Bookmark),
+          read: (ctx, sessionId) =>
+            ctx.state.bookmarks.peekPage({ index: sessionId, limit: 32 }),
+        },
+      });
+    const host = await memoryHost({
+      extensions: [bookmarks],
+      script: [
+        callTool("bookmarks.add", { url: "https://a.example/", title: "A" }),
+        "Saved.",
       ],
     });
-  } finally {
-    await host.close();
-  }
-});
+    try {
+      const session = host.agent.session("cmd");
+      await session.send("Save A", { requestId: "a" });
+      await host.settle("cmd");
+      await session.extension(bookmarks.manifest.id).call("add", {
+        url: "https://b.example/",
+        title: "B",
+      });
+      const snapshot = await session.read();
+      expect(snapshot.extensions.bookmarks).toMatchObject({
+        status: "running",
+        value: [
+          { title: "A", sessionId: "cmd" },
+          { title: "B", sessionId: "cmd" },
+        ],
+      });
+    } finally {
+      await host.close();
+    }
+  },
+);
 
 const Note = Schema.Struct({ id: Schema.String });
 

@@ -3,6 +3,9 @@ import type { AttentionItem, AttentionRecipient } from "./session-attention.js";
 export {
   AttentionItemSchema,
   AttentionRecipientSchema,
+  AttentionEscalationSchema,
+  type AttentionEscalation,
+  type RecipientStatus,
   type AttentionItem,
   type AttentionRecipient,
   type SessionAttention,
@@ -421,22 +424,53 @@ export type ExtensionCommandCallerV0 = Readonly<{
   sessionId: string;
 }>;
 
-/** Handlers for every declared command, run in one core transaction. */
+/** Read external evidence first, then return one synchronous atomic decision. */
+export type ExtensionPreparationV0<A, E> = Effect.Effect<
+  Effect.Effect<A, E, ExtensionTx | ExtensionRead>,
+  E,
+  ExtensionRead
+>;
+
+/** Preparation has read access only; the returned body gets the write grant. */
+export type ExtensionTransactionV0<A, E> =
+  | Effect.Effect<A, E, ExtensionTx | ExtensionRead>
+  | Readonly<{ prepare: ExtensionPreparationV0<A, E> }>;
+
+/** Every handler commits once; prepared handlers may read outside that transaction. */
 export type CommandHandlersV0<C extends CommandsV0> = {
-  readonly [K in keyof C]: (
-    call: Readonly<{
-      sessionId: CommandSessionIdsV0[C[K]["scope"]];
-      input: C[K]["input"]["Type"];
-      /** Present only when the owning in-process host authenticates a caller. */
-      caller?: ExtensionCommandCallerV0;
-    }>,
-  ) =>
-    | C[K]["output"]["Type"]
-    | Effect.Effect<
-        C[K]["output"]["Type"],
-        ExtensionCommandError | ExtensionStateError | AdmissionError,
-        ExtensionTx | ExtensionRead
-      >;
+  readonly [K in keyof C]:
+    | ((
+        call: Readonly<{
+          /** Session selected by the command scope; null for an Agent-scoped command. */
+          sessionId: CommandSessionIdsV0[C[K]["scope"]];
+          /** Command input decoded by its declared schema. */
+          input: C[K]["input"]["Type"];
+          /** Present only when the owning in-process host authenticates a caller. */
+          caller?: ExtensionCommandCallerV0;
+        }>,
+      ) =>
+        | C[K]["output"]["Type"]
+        | Effect.Effect<
+            C[K]["output"]["Type"],
+            ExtensionCommandError | ExtensionStateError | AdmissionError,
+            ExtensionTx | ExtensionRead
+          >)
+    | Readonly<{
+        /** Read external evidence before returning the synchronous atomic handler. */
+        prepare: (
+          call: Readonly<{
+            /** Session selected by the command scope; null for an Agent-scoped command. */
+            sessionId: CommandSessionIdsV0[C[K]["scope"]];
+            /** Command input decoded by its declared schema. */
+            input: C[K]["input"]["Type"];
+            /** Present only when the owning in-process host authenticates a caller. */
+            caller?: ExtensionCommandCallerV0;
+          }>,
+        ) => ExtensionPreparationV0<
+          C[K]["output"]["Type"],
+          ExtensionCommandError | ExtensionStateError | AdmissionError
+        >;
+      }>;
 };
 /** Transaction-scoped, extension-owned attention on an existing Session. */
 export type AttentionV0 = Readonly<{
@@ -445,8 +479,8 @@ export type AttentionV0 = Readonly<{
     sessionId: string,
     item: AttentionItem,
   ) => Effect.Effect<void, ExtensionStateError, ExtensionTx>;
-  /** Whether any extension holds an inbox item asking a person to act (a question or approval). */
-  awaitsPerson: (
+  /** Whether a question or approval is open, waiting on a person or an Agent. */
+  awaitsDecision: (
     sessionId: string,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;
   /** Clear this extension’s item; other owners cannot be changed. */
@@ -496,6 +530,30 @@ export type ExtensionContextV0<
     ExtensionStateError,
     ExtensionRead
   >;
+  /** First delegator of this owner's Session, or null. Requires run_tools. */
+  sessionParent: (
+    sessionId: string,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
+  /** Host-observed presence; unavailable evidence is unknown. Requires run_tools. */
+  recipientStatus: (
+    recipient: AttentionRecipient,
+  ) => Effect.Effect<
+    import("./session-attention.js").RecipientStatus,
+    ExtensionStateError,
+    ExtensionRead
+  >;
+  /** Parent of another Agent's exact Session, read by the host. Unreadable is an error, never root. */
+  recipientParent: (
+    recipient: AttentionRecipient,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
   /** Whether this run durably recorded a successful tool outcome. Requires run_tools. */
   hasSuccessfulToolResult: (
     run: Pick<RunIdentityV0, "sessionId" | "workId">,
@@ -507,13 +565,15 @@ export type ExtensionContextV0<
   isObserved: (sessionId: string) => boolean;
   /**
    * Run one write transaction from outside a hook (for example a Mycelium
-   * tool execute). Core commits, publishes, and requests a wake when it
+   * tool execute), optionally after asynchronous read-only preparation.
+   * Re-read mutable state in the returned body before applying that evidence.
+   * Core commits, publishes, and requests a wake when it
    * admitted work or changed a timer. Fails with a `store`/`unavailable`
    * `ShiitakeError` when the stop this body caused could not be recorded
    * durably.
    */
   transact: <A, E>(
-    body: Effect.Effect<A, E, ExtensionTx | ExtensionRead>,
+    body: ExtensionTransactionV0<A, E>,
   ) => Effect.Effect<A, E | ExtensionStop | ShiitakeError>;
 }>;
 
@@ -533,10 +593,8 @@ export type AgentHooksV0<C extends CommandsV0, P> = Readonly<{
   onSettled?: (
     page: SettledPageV0,
   ) => Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
-  /** Handle one fired timer in its own transaction. */
-  onTimer?: (
-    timer: FiredTimerV0,
-  ) => Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
+  /** Prepare a timer's atomic body; core consumes the timer with that body. */
+  onTimer?: (timer: FiredTimerV0) => ExtensionPreparationV0<void, HookError>;
   /** Attach one Mycelium module to a run this extension participates in. */
   moduleForRun?: (
     run: RunIdentityV0,
@@ -663,11 +721,19 @@ export type ExtensionDefinitionV0<
       context: ExtensionContextV0<S, Config, D>,
       page: SettledPageV0,
     ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
-    /** Consume a timer and its state changes in the same transaction. */
-    onTimer?: (
-      context: ExtensionContextV0<S, Config, D>,
-      timer: FiredTimerV0,
-    ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>;
+    /** Consume a timer and its state changes atomically, after any read-only preparation. */
+    onTimer?:
+      | ((
+          context: ExtensionContextV0<S, Config, D>,
+          timer: FiredTimerV0,
+        ) => void | Effect.Effect<void, HookError, ExtensionTx | ExtensionRead>)
+      | Readonly<{
+          /** Read external evidence before consuming the timer atomically. */
+          prepare: (
+            context: ExtensionContextV0<S, Config, D>,
+            timer: FiredTimerV0,
+          ) => ExtensionPreparationV0<void, HookError>;
+        }>;
   }>;
   timers?: true;
   /** Request the generic human-attention door. */
@@ -687,12 +753,20 @@ export type ExtensionDefinitionV0<
   }>;
 }>;
 
-/** Reject Promise-returning transactional commands even when output is `{}`. */
+/** Preserve inferred command handlers while rejecting asynchronous atomic bodies. */
 export type CheckedCommandHandlers<H> = {
-  readonly [K in keyof H]: H[K] extends (...args: never[]) => infer Result
-    ? Result extends Promise<unknown>
-      ? never
-      : H[K]
+  readonly [K in keyof H]: H[K] extends infer Handler
+    ? Handler extends Readonly<{ prepare: infer Prepare }>
+      ? Prepare extends (...args: never[]) => infer Result
+        ? Result extends Promise<unknown>
+          ? never
+          : Handler
+        : never
+      : Handler extends (...args: never[]) => infer Result
+        ? Result extends Promise<unknown>
+          ? never
+          : Handler
+        : never
     : never;
 };
 
@@ -704,7 +778,6 @@ export type ExtensionAuthorDefinitionV0<
   PI,
   Config extends Json,
   D extends DocumentsV0,
-  H extends CommandHandlersV0<C>,
 > = Omit<ExtensionDefinitionV0<S, C, P, PI, Config, D>, "commands"> &
   Readonly<{
     commands?: Readonly<{
@@ -712,7 +785,7 @@ export type ExtensionAuthorDefinitionV0<
       /** Register the author's schema-checked transaction handlers. */
       handlers: (
         context: ExtensionContextV0<S, Config, D>,
-      ) => CommandHandlersV0<NoInfer<C>> & H & CheckedCommandHandlers<H>;
+      ) => CommandHandlersV0<NoInfer<C>>;
     }>;
   }>;
 
@@ -804,20 +877,24 @@ export class ExtensionBuilderV0<
     });
   }
   /** Register commands without a client entry. */
-  define<
-    C extends CommandsV0,
-    P,
-    PI,
-    H extends CommandHandlersV0<C> = CommandHandlersV0<C>,
-  >(
-    definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D, H> & {
-      readonly commands: Readonly<{
-        specs: C;
-        handlers: (
-          context: ExtensionContextV0<S, Config, D>,
-        ) => CommandHandlersV0<NoInfer<C>> & H & CheckedCommandHandlers<H>;
-      }>;
-    },
+  define<C extends CommandsV0, P, PI, Author>(
+    definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D> &
+      Author & {
+        readonly commands: Readonly<{
+          specs: C;
+          handlers: (
+            context: ExtensionContextV0<S, Config, D>,
+          ) => CommandHandlersV0<NoInfer<C>>;
+        }>;
+      },
+    // Keep validation separate so handler inputs retain contextual typing.
+    ...validation: Author extends Readonly<{
+      commands: Readonly<{ handlers: (...args: never[]) => infer H }>;
+    }>
+      ? H extends CheckedCommandHandlers<H>
+        ? []
+        : [never]
+      : []
   ): DefinedExtensionV0<C, P, PI>;
   /** Register contributions without commands or a client entry. */
   define<P, PI>(
@@ -827,24 +904,15 @@ export class ExtensionBuilderV0<
       P,
       PI,
       Config,
-      D,
-      EmptyExtensionFieldsV0
+      D
     > & {
       readonly commands?: never;
     },
   ): DefinedExtensionV0<EmptyExtensionFieldsV0, P, PI>;
-  define<
-    C extends CommandsV0,
-    P,
-    PI,
-    H extends CommandHandlersV0<C> = CommandHandlersV0<C>,
-  >(
-    definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D, H>,
+  define<C extends CommandsV0, P, PI>(
+    definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D>,
   ): DefinedExtensionV0<C | EmptyExtensionFieldsV0, P, PI> {
-    return compileExtension<S, C, P, PI, Config, D, H>(
-      this.metadata,
-      definition,
-    );
+    return compileExtension<S, C, P, PI, Config, D>(this.metadata, definition);
   }
 }
 
@@ -884,10 +952,9 @@ function compileExtension<
   PI,
   Config extends Json,
   D extends DocumentsV0,
-  H extends CommandHandlersV0<C>,
 >(
   metadata: ExtensionMetadataV0<S, Config, D>,
-  definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D, H>,
+  definition: ExtensionAuthorDefinitionV0<S, C, P, PI, Config, D>,
 ): DefinedExtensionV0<C | EmptyExtensionFieldsV0, P, PI> {
   if (
     definition.projection?.catalog !== undefined &&
@@ -961,7 +1028,11 @@ function compileExtension<
         if (onTimer !== undefined)
           Object.assign(result, {
             onTimer: (timer: FiredTimerV0) =>
-              invokeTransactionHook(() => onTimer(context, timer)),
+              "prepare" in onTimer
+                ? Effect.suspend(() => onTimer.prepare(context, timer))
+                : Effect.succeed(
+                    invokeTransactionHook(() => onTimer(context, timer)),
+                  ),
           });
         if (tools !== undefined)
           Object.assign(result, {

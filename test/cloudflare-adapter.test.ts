@@ -707,6 +707,10 @@ it("does not disarm a command committed after the current reconciliation inspect
     let holdIdle = true;
     let holdCommand = false;
     storage.transaction = async (operation) => {
+      // Claim this barrier on entry: another idle pass can finish its
+      // transaction after the command starts without becoming the command.
+      const isCommand = holdCommand;
+      if (isCommand) holdCommand = false;
       // Hold before the idle transaction begins: a real command transaction
       // remains free to commit while this older reconciliation is suspended.
       if (holdIdle) {
@@ -716,21 +720,21 @@ it("does not disarm a command committed after the current reconciliation inspect
       }
       const result = await transaction(operation);
       // Hold after commit, before the command can request its live wake.
-      if (holdCommand) {
-        holdCommand = false;
+      if (isCommand) {
         commandCommitted.release();
         await allowCommand.promise;
       }
       return result;
     };
+    const beforeAlarm = tasks.length;
     await agent.alarm();
     await idleReached.promise;
-    const staleReconciliation = tasks.at(-1);
+    const staleReconciliations = tasks.slice(beforeAlarm);
     holdCommand = true;
     touched = agent.extensions.call("test-wake", "arm", { dueAt: 0 });
     await commandCommitted.promise;
     allowIdle.release();
-    await staleReconciliation;
+    await Promise.all(staleReconciliations);
     expect(await storage.getAlarm()).not.toBeNull();
   } finally {
     allowIdle.release();
@@ -1239,7 +1243,15 @@ it("close joins both active passes even when one recovery alarm fails", async ()
   };
   const logs = vi.spyOn(console, "log").mockImplementation(() => undefined);
   const faux = fauxModel([]);
-  faux.setResponses([fauxAssistantMessage("finished after release")]);
+  // Hold the acquired provider, whose custody close must drain. Instruction
+  // loading is cancellable preparation and no longer holds an active run open.
+  faux.setResponses([
+    async () => {
+      agentEntered.release();
+      await releaseAgent.promise;
+      return fauxAssistantMessage("finished after release");
+    },
+  ]);
   const agent = await makeCloudflareShiitake(
     {
       storage,
@@ -1251,11 +1263,7 @@ it("close joins both active passes even when one recovery alarm fails", async ()
       extensions: noExtensions,
       model: fixedModelSource(faux),
       instructions: {
-        load: async () => {
-          agentEntered.release();
-          await releaseAgent.promise;
-          return { revision: "held-close", text: "Wait." };
-        },
+        load: () => Promise.resolve({ revision: "held-close", text: "Wait." }),
       },
       tools: [],
       hostWork: [
@@ -1298,22 +1306,17 @@ it("close joins both active passes even when one recovery alarm fails", async ()
       )
       .toBe(true);
     failAlarm.release();
-    // Observe the failed pass itself before checking that close still joins the Agent.
-    await expect
-      .poll(async () => {
-        const outcomes = await Promise.race(
-          tasks
-            .map((task) =>
-              task.then(
-                () => "success",
-                () => "failed",
-              ),
-            )
-            .filter((_, index) => index >= baseline),
-        );
-        return outcomes;
-      })
-      .toBe("failed");
+    // Other reconciliation passes may already have succeeded. Observe the failed
+    // pass itself rather than repeatedly racing it against an earlier success.
+    let failedPass = false;
+    for (const task of tasks.slice(baseline))
+      void task.then(
+        () => undefined,
+        () => {
+          failedPass = true;
+        },
+      );
+    await expect.poll(() => failedPass).toBe(true);
     expect(closeDone).toBe(false);
     releaseAgent.release();
     expect(await closing).toBe("failed");

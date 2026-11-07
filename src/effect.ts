@@ -16,6 +16,7 @@ import {
   readSessionFactPage,
   readSessionInbox,
   readStoredSessionAttention,
+  readStoredSessionParent as readParentFromStore,
 } from "./internal/woodstock/index.js";
 
 export type {
@@ -164,6 +165,11 @@ export function readStoredSessionStates(owner: SqliteOwner, after?: string) {
 /** One saved conversation's open attention items, read from the store alone. */
 export function readStoredAttention(owner: SqliteOwner, sessionId: string) {
   return readStoredSessionAttention(owner, sessionId);
+}
+
+/** First-delegator identity, or null for a root Session; a failed read stays failed. */
+export function readStoredSessionParent(owner: SqliteOwner, sessionId: string) {
+  return readParentFromStore(owner, sessionId);
 }
 
 export { sqliteRowSchema } from "./internal/contracts.js";

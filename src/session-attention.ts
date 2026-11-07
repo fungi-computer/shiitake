@@ -16,6 +16,17 @@ export const AttentionRecipientSchema = Schema.Struct({
 /** Decoded Agent Session an attention item waits on. */
 export type AttentionRecipient = typeof AttentionRecipientSchema.Type;
 
+/** The latest handoff, retained even when an item continues up the Agent chain. */
+export const AttentionEscalationSchema = Schema.Struct({
+  by: AttentionRecipientSchema,
+  reason: Schema.Literals(["escalated", "sender_archived", "sender_absent"]),
+  note: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(1000))),
+});
+/** Authenticated actor and reason retained when an attention item moves upward. */
+export type AttentionEscalation = typeof AttentionEscalationSchema.Type;
+/** Positive presence or absence evidence, or unknown without escalation. */
+export type RecipientStatus = "present" | "archived" | "absent" | "unknown";
+
 /**
  * An extension-owned request for human attention; expiry is owned by its timer.
  * Items marked `inbox: false` remain visible without changing the inbox state.
@@ -32,6 +43,7 @@ export const AttentionItemSchema = Schema.Struct({
   inbox: Schema.optional(Schema.Literal(false)),
   /** The Agent this item waits on; absent means a person. */
   waitingOn: Schema.optional(AttentionRecipientSchema),
+  escalated: Schema.optional(AttentionEscalationSchema),
 });
 
 /** Input to the granted attention door, scoped to the calling extension. */

@@ -112,6 +112,7 @@ it("publishes raw activity facts and decides no readout", () => {
         attempt: 1,
         maxAttempts: 3,
         delayMs: 2_000,
+        dueAt: 3_000,
         errorMessage: "503 Service Unavailable\n  try again",
       },
     });

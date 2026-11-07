@@ -9,18 +9,22 @@ import {
   openMuleRecorder,
   loadAcceptedRun,
   prepareWoodstockSchema,
+  recordLiveRetryEvent,
+  toLiveRetryEvent,
 } from "../src/internal/woodstock/index.js";
 import { readProcessProgress } from "../src/internal/woodstock/progress.js";
 import { readSelectedPath } from "../src/internal/woodstock/session-store.js";
 import { admitStoredCommand } from "./fixtures/admission-door.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
+const model = { provider: "anthropic", id: "requested-alias" };
+
 const digest = "a".repeat(64);
 const contract = {
   core: digest,
   extensions: [],
 } as const;
-const run = { kind: "run", value: "recorder-run" } as const;
+const run = { kind: "run", value: "recorder-run", parent: undefined } as const;
 const turn = { kind: "turn", value: "recorder-turn", parent: run } as const;
 const message = {
   kind: "message",
@@ -54,7 +58,12 @@ it("retains the store rejection behind a failed Mule recording", async () => {
     const result = await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
-          const record = yield* openMuleRecorder(owner, accepted, contract);
+          const record = yield* openMuleRecorder(
+            owner,
+            accepted,
+            contract,
+            model,
+          );
           return yield* Effect.match(record({ type: "run_start", run }), {
             onFailure: (error) => error,
             onSuccess: () => undefined,
@@ -136,6 +145,7 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
             fixture.owner,
             accepted,
             contract,
+            model,
           );
           const events: readonly MuleEvent[] = [
             { type: "run_start", run },
@@ -237,3 +247,122 @@ it("records one Mule run as exact durable messages plus bounded live progress", 
     fixture.close();
   }
 });
+
+it.each(["retry_scheduled", "retry_finished"] as const)(
+  "commits the failed assistant and %s together or neither",
+  async (type) => {
+    const fixture = createNativeSqliteOwnerFixture();
+    try {
+      Effect.runSync(prepareWoodstockSchema(fixture.owner));
+      const sessionId = "atomic-retry";
+      const accepted = admitStoredCommand(
+        fixture.owner,
+        sessionId,
+        {
+          requestId: "atomic-retry-command",
+          delivery: "followUp",
+          type: "prompt",
+          text: "retry",
+        },
+        { contract, enqueue: () => undefined },
+      ).accepted;
+      const value: AssistantMessage = {
+        ...assistant("failed", "stop"),
+        stopReason: "error",
+        errorMessage: "private provider error",
+      };
+      const retry =
+        type === "retry_scheduled"
+          ? {
+              type,
+              run,
+              turn,
+              attempt: 1,
+              maxAttempts: 2,
+              delayMs: 100,
+              dueAt: 1234,
+              errorMessage: "private provider error",
+            }
+          : {
+              type,
+              run,
+              turn,
+              attempt: 0,
+              success: false,
+              finalError: "private provider error",
+            };
+      await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            yield* loadAcceptedRun(fixture.owner, {
+              sessionId,
+              commandFactId: accepted.commandId,
+            });
+            const record = yield* openMuleRecorder(
+              fixture.owner,
+              accepted,
+              contract,
+              model,
+            );
+            yield* record({ type: "run_start", run });
+            yield* record({ type: "turn_start", run, turn });
+            yield* record({ type: "message_start", run, turn, message, value });
+            fixture.owner.sql
+              .exec(`CREATE TRIGGER refuse_retry BEFORE INSERT ON session_entries
+          WHEN NEW.type = 'live_retry' BEGIN SELECT RAISE(ABORT, 'retry refused'); END`);
+            const completed: MuleEvent = {
+              type: "message_end",
+              run,
+              turn,
+              message,
+              value,
+              retry,
+            };
+            const result = yield* Effect.result(record(completed));
+            expect(result._tag).toBe("Failure");
+            expect(
+              readSelectedPath(fixture.owner, { sessionId }).map(
+                ({ entry }) => entry.kind,
+              ),
+            ).toEqual(["command", "run_started", "turn_started"]);
+            fixture.owner.sql.exec("DROP TRIGGER refuse_retry");
+            yield* record(completed);
+            yield* record(completed);
+            yield* recordLiveRetryEvent(
+              fixture.owner,
+              accepted,
+              toLiveRetryEvent(retry, model),
+              turn,
+            );
+            const path = readSelectedPath(fixture.owner, { sessionId });
+            expect(path.map(({ entry }) => entry.kind)).toEqual([
+              "command",
+              "run_started",
+              "turn_started",
+              "message",
+              "live_retry",
+            ]);
+            expect(path.at(-2)?.entry).toMatchObject({
+              kind: "message",
+              value,
+            });
+            expect(path.at(-1)?.entry).toMatchObject({
+              kind: "live_retry",
+              event:
+                type === "retry_scheduled"
+                  ? {
+                      type: "auto_retry_start",
+                      attempt: 1,
+                      maxAttempts: 2,
+                      dueAt: 1234,
+                    }
+                  : { type: "auto_retry_end", attempt: 0, success: false },
+            });
+          }),
+        ),
+      );
+    } finally {
+      fixture.close();
+    }
+  },
+);

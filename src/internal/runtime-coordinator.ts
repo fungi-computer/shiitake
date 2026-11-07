@@ -10,6 +10,9 @@ import {
 } from "@fungi.computer/watchdog/effect";
 import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
+import * as Exit from "effect/Exit";
+import * as Cause from "effect/Cause";
+import type { RunCustody } from "./run-scope.js";
 
 import type { AgentRunningWork } from "../client.js";
 import { readSessionPhase } from "./session-status.js";
@@ -39,6 +42,7 @@ import {
   advanceCursor,
   createSessionWithinTransaction,
   deliverSessionGrants,
+  extensionTimerLane,
   prepareExtensionStore,
   recordSessionDelegator,
   projectSessionRun,
@@ -140,7 +144,10 @@ export function openRuntimeCoordinator(
   mailRoom?: BirdDogEffect,
 ): Effect.Effect<RuntimeCoordinator, ShiitakeError> {
   return Effect.gen(function* () {
-    if (options.hostJobs?.lane === "default")
+    if (
+      options.hostJobs?.lane === "default" ||
+      options.hostJobs?.lane === extensionTimerLane
+    )
       return yield* Effect.fail(
         runtimeFailure("Host lane conflicts with Agent work"),
       );
@@ -176,6 +183,7 @@ export function openRuntimeCoordinator(
     const hostExecutor: HostExecutorCell = { current: undefined };
     const activeSessions = new Set<string>();
     const runningSlots = new Map<"serial" | "host", ExecutorWork>();
+    const runCustody = new Map<string, RunCustody>();
     const watchdogOptions: EffectWatchdogOptions = {
       owner: options.store,
       // Each Watchdog slot serializes ticks and inspects only its partition. A claim
@@ -183,62 +191,109 @@ export function openRuntimeCoordinator(
       // Hosts must keep one runtime per SQLite owner, never two live coordinators.
       isAlive: () => Effect.succeed(false),
       executor: {
-        execute: (job) =>
-          Effect.acquireUseRelease(
-            Effect.sync(() => {
-              const runningWork: ExecutorWork =
-                job.lane === options.hostJobs?.lane
-                  ? { kind: "host", lane: job.lane, jobId: job.jobId }
-                  : {
-                      kind: "session",
-                      sessionId: job.queue,
-                      commandId: job.jobId,
-                    };
-              runningSlots.set(
-                runningWork.kind === "host" ? "host" : "serial",
-                runningWork,
-              );
-              if (runningWork.kind === "session") activeSessions.add(job.queue);
-              // A different Session's wait changes when this executor changes.
-              publishAgentExecutionChange(options.store);
-            }),
-            () =>
-              job.lane === options.hostJobs?.lane
-                ? (hostExecutor.current?.execute(job) ??
-                  Effect.fail(new WatchdogError("execution_failed")))
-                : Effect.gen(function* () {
-                    const pending = pendingConfiguration;
-                    if (pending !== undefined) {
-                      yield* pending.apply;
-                      const { tools: oldTools, ...base } = options;
-                      void oldTools;
-                      turnOptions = { ...base, ...pending.configuration };
-                      pendingConfiguration = undefined;
-                    }
-                    return yield* executeAcceptedRun(
-                      turnOptions,
-                      coreDigest,
-                      job,
-                      extensionsRef.current,
-                    );
-                  }).pipe(
-                    Effect.tapError((error) =>
-                      Effect.logError("configuration_apply_failed", error),
-                    ),
-                    Effect.mapError(
-                      () => new WatchdogError("execution_failed"),
-                    ),
+        replaySafe: (job) => job.lane === extensionTimerLane,
+        retryPolicy: (job) =>
+          job.lane === options.hostJobs?.lane
+            ? (hostExecutor.current?.retryPolicy?.(job) ??
+              Effect.succeed(undefined))
+            : Effect.succeed(undefined),
+        isDrained: (job) =>
+          Effect.sync(() => {
+            if (job.lane === extensionTimerLane) return true;
+            const custody = runCustody.get(job.jobId);
+            runCustody.delete(job.jobId);
+            return custody?.released === true;
+          }),
+        execute: (job, attempt) =>
+          job.lane === extensionTimerLane
+            ? Effect.suspend(
+                () =>
+                  extensionsRef.current?.executeTimer(job) ??
+                  Effect.fail(
+                    runtimeFailure("Extension runtime is unavailable"),
                   ),
-            () =>
-              Effect.sync(() => {
-                if (job.lane !== options.hostJobs?.lane)
-                  activeSessions.delete(job.queue);
-                runningSlots.delete(
-                  job.lane === options.hostJobs?.lane ? "host" : "serial",
-                );
-                publishAgentExecutionChange(options.store);
-              }),
-          ),
+              ).pipe(
+                Effect.as({ kind: "completed" as const }),
+                Effect.mapError(
+                  (error) => new WatchdogError("execution_failed", error),
+                ),
+              )
+            : Effect.acquireUseRelease(
+                Effect.sync(() => {
+                  const runningWork: ExecutorWork =
+                    job.lane === options.hostJobs?.lane
+                      ? { kind: "host", lane: job.lane, jobId: job.jobId }
+                      : {
+                          kind: "session",
+                          sessionId: job.queue,
+                          commandId: job.jobId,
+                        };
+                  runningSlots.set(
+                    runningWork.kind === "host" ? "host" : "serial",
+                    runningWork,
+                  );
+                  const custody: RunCustody = {
+                    isStopping: () => lifecycleState !== "open",
+                    released: false,
+                  };
+                  if (runningWork.kind === "session") {
+                    activeSessions.add(job.queue);
+                    runCustody.set(job.jobId, custody);
+                  }
+                  // A different Session's wait changes when this executor changes.
+                  publishAgentExecutionChange(options.store);
+                  return custody;
+                }),
+                (custody) =>
+                  job.lane === options.hostJobs?.lane
+                    ? (hostExecutor.current?.execute(job, attempt) ??
+                      Effect.fail(new WatchdogError("execution_failed")))
+                    : Effect.gen(function* () {
+                        const pending = pendingConfiguration;
+                        if (pending !== undefined) {
+                          yield* pending.apply;
+                          const { tools: oldTools, ...base } = options;
+                          void oldTools;
+                          turnOptions = { ...base, ...pending.configuration };
+                          pendingConfiguration = undefined;
+                        }
+                        return yield* executeAcceptedRun(
+                          turnOptions,
+                          coreDigest,
+                          job,
+                          extensionsRef.current,
+                          custody,
+                        );
+                      }).pipe(
+                        Effect.tapError((error) =>
+                          Effect.logError("configuration_apply_failed", error),
+                        ),
+                        Effect.mapError(
+                          () => new WatchdogError("execution_failed"),
+                        ),
+                      ),
+                () =>
+                  Effect.sync(() => {
+                    if (job.lane !== options.hostJobs?.lane)
+                      activeSessions.delete(job.queue);
+                    runningSlots.delete(
+                      job.lane === options.hostJobs?.lane ? "host" : "serial",
+                    );
+                    publishAgentExecutionChange(options.store);
+                  }),
+              ).pipe(
+                Effect.onExit((exit) =>
+                  Effect.sync(() => {
+                    // Only an interrupted execution needs a subsequent drain answer.
+                    if (
+                      lifecycleState === "open" ||
+                      Exit.isSuccess(exit) ||
+                      !Cause.hasInterrupts(exit.cause)
+                    )
+                      runCustody.delete(job.jobId);
+                  }),
+                ),
+              ),
       },
       wake: {
         recompute: () =>
@@ -251,6 +306,7 @@ export function openRuntimeCoordinator(
         projectSessionRun(options.store, transition, Date.now());
       },
     };
+    let tickHostJobs: Effect.Effect<void, ShiitakeError> = Effect.void;
     const openWatchdog =
       options.hostJobs === undefined
         ? makeWatchdogRuntime(watchdogOptions)
@@ -261,6 +317,12 @@ export function openRuntimeCoordinator(
             Effect.tap((runtime) =>
               Effect.sync(() => {
                 hostExecutor.current = options.hostJobs?.open(runtime);
+                tickHostJobs = runtime.tickConcurrent().pipe(
+                  Effect.asVoid,
+                  Effect.mapError(() =>
+                    runtimeFailure("Host delivery is unavailable"),
+                  ),
+                );
               }),
             ),
           );
@@ -366,11 +428,14 @@ export function openRuntimeCoordinator(
     });
     const extensions = yield* openExtensionRuntime({
       owner: options.store,
+      watchdog: watchdog.transactional,
       readQueueHead: (sessionId) =>
         watchdog.transactional.readQueueHead(sessionId),
       door,
       admitted,
       requestWake: requestBoundWake,
+      recipientStatus: options.recipientStatus,
+      recipientParent: options.recipientParent,
     });
     extensionsRef.current = extensions;
     const reconcile = reconcileRuntime({
@@ -381,8 +446,8 @@ export function openRuntimeCoordinator(
       mailRoom,
     }).pipe(Effect.tapError(retainFailure));
     const pendingWork = Effect.gen(function* () {
-      const watchdogPending = yield* watchdog.hasPendingWork;
       const now = Date.now();
+      const watchdogWake = yield* watchdog.wakeState(now);
       const cursors = yield* Effect.try({
         try: () => [
           readCursor(options.store, coreConsumer) ?? 0,
@@ -392,41 +457,20 @@ export function openRuntimeCoordinator(
         catch: () => runtimeFailure("Settled cursor is unavailable"),
       });
       const settledLag =
-        (yield* watchdog.readSettled(1, Math.min(...cursors))).length > 0;
-      const timers = yield* Effect.try({
-        try: () => extensions.timerWake(now),
-        catch: () => runtimeFailure("Extension timers are unavailable"),
-      });
-      const mailWake =
-        mailRoom === undefined
-          ? undefined
-          : yield* mailRoom
-              .nextWakeAt()
-              .pipe(
-                Effect.mapError(() =>
-                  runtimeFailure("Reply retry wake is unavailable"),
-                ),
-              );
-      // Carrier owns reply retry state. Keep it in the same durable answer
-      // as runtime work, so a host cannot erase its wake with an idle result.
-      const nextWakeAt =
-        timers.nextWakeAt === null
-          ? (mailWake ?? null)
-          : mailWake === undefined
-            ? timers.nextWakeAt
-            : Math.min(timers.nextWakeAt, mailWake);
+        (yield* watchdog.readSettled(1, Math.min(...cursors), "default"))
+          .length > 0;
       return {
-        pending:
-          watchdogPending ||
-          settledLag ||
-          timers.due ||
-          (mailWake !== undefined && mailWake <= now),
-        nextWakeAt,
+        pending: watchdogWake.pending || settledLag,
+        nextWakeAt: watchdogWake.nextWakeAt,
       };
     });
     const bound = yield* options.runtime
       .bind({
         reconcile,
+        reconcileHost:
+          options.hostJobs === undefined
+            ? undefined
+            : tickHostJobs.pipe(Effect.tapError(retainFailure)),
         pendingWork: pendingWork.pipe(
           Effect.mapError(() => runtimeFailure("Pending work is unavailable")),
         ),
@@ -588,7 +632,9 @@ export function openRuntimeCoordinator(
       signalCancellation: (jobId, cancellationId) =>
         watchdog.cancel({ jobId, cancellationId }).pipe(
           Effect.flatMap((result) =>
-            result.status === "recorded" || result.status === "replayed"
+            result.status === "recorded" ||
+            result.status === "replayed" ||
+            result.status === "decided"
               ? Effect.void
               : Effect.fail(runtimeFailure("Cancellation is unavailable")),
           ),
@@ -607,24 +653,48 @@ export function openRuntimeCoordinator(
       requestWake,
       close: beginClose.pipe(
         Effect.andThen(
-          Effect.matchCauseEffect(bound.close, {
-            onFailure: (cause) =>
-              extensions.close.pipe(
-                Effect.andThen(
-                  retainedBeforeClose === undefined
-                    ? Effect.failCause(cause)
-                    : Effect.fail(retainedBeforeClose),
+          Effect.matchCauseEffect(
+            // Stop host admission as execution drains. Join both exits even when
+            // one fails, so neither a recovery alarm nor a provider outlives close.
+            Effect.all(
+              [
+                Effect.exit(
+                  watchdog.close.pipe(
+                    Effect.mapError(() =>
+                      runtimeFailure("Runtime execution did not drain"),
+                    ),
+                  ),
                 ),
-              ),
-            onSuccess: () =>
-              extensions.close.pipe(
-                Effect.andThen(
-                  retainedBeforeClose === undefined
-                    ? Effect.void
-                    : Effect.fail(retainedBeforeClose),
+                Effect.exit(bound.close),
+              ],
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.flatMap((exits) => {
+                const failed = exits.find(Exit.isFailure);
+                return failed === undefined
+                  ? Effect.void
+                  : Effect.failCause(failed.cause);
+              }),
+            ),
+            {
+              onFailure: (cause) =>
+                extensions.close.pipe(
+                  Effect.andThen(
+                    retainedBeforeClose === undefined
+                      ? Effect.failCause(cause)
+                      : Effect.fail(retainedBeforeClose),
+                  ),
                 ),
-              ),
-          }),
+              onSuccess: () =>
+                extensions.close.pipe(
+                  Effect.andThen(
+                    retainedBeforeClose === undefined
+                      ? Effect.void
+                      : Effect.fail(retainedBeforeClose),
+                  ),
+                ),
+            },
+          ),
         ),
         Effect.ensuring(
           Effect.sync(() => {

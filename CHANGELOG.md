@@ -1,5 +1,56 @@
 # @fungi.computer/shiitake
 
+## 0.12.0
+
+### Minor Changes
+
+- Changes since 0.11.1:
+
+  - fix(shiitake): preserve absent host lanes and deterministic alarm proof
+  - fix(shiitake)!: keep delivery independent and join shutdown custody
+  - fix(durability): move Pi consumers to the Watchdog-owned schema
+  - fix(shiitake): preserve timer authority across revision restarts
+  - fix(durability): give Watchdog delivery and timer readiness
+  - fix(durability): preserve retry decisions and drain ownership across restart
+  - fix(docs): align setup guides with current behavior
+  - fix(shiitake): assert durable settlement failure in crash proof
+  - fix(watchdog): retain execution decisions across settlement failures
+  - fix(spore): give first-time users actionable setup recovery
+  - fix(runtime): keep public attention contracts fully documented
+  - fix(subagents): keep escalation provenance in composer questions
+  - fix(runtime): align attention fixtures and unsafe command inventory
+  - fix(runtime): keep escalation wire facts JSON-safe
+  - fix(questions): prepare host reads before atomic decisions
+  - feat(board): expose a stable headless attention snapshot
+  - fix(goals): authorize exact delegator pause resume and clear
+  - fix(questions): retain routed decisions and bubble explicit escalations
+  - fix(shiitake): wait for agent decisions and expose parent presence
+  - fix(shiitake): route delegated extension turns to their parent
+  - fix(grove): retain readonly host models and await catalog closure
+  - feat(grove): pick host-admitted Agent models through shared Session command
+  - fix(subagents): retain promotion reasons and join Pi timers
+  - fix(grove): merge integration and restore composer model picker
+  - fix(subagents): merge integration and finish active footer counts
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.7.2
+  - @fungi.computer/bird-dog@0.3.4
+  - @fungi.computer/carrier@0.2.2
+  - @fungi.computer/gills@0.2.2
+  - @fungi.computer/mule@0.2.3
+  - @fungi.computer/mycelium@0.3.5
+  - @fungi.computer/watchdog@0.1.1
+  - @fungi.computer/seam@0.2.3
+  - @fungi.computer/knapsack@0.4.6
+
 ## 0.11.1
 
 ### Patch Changes

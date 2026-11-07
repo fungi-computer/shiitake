@@ -446,7 +446,7 @@ export function agentMailRoute(
 /** The host's one Post lane, as Agent mail borrows it. */
 export type AgentMailPost = Pick<
   PostRuntime<{ agentMail: ReturnType<typeof agentMailRoute> }>,
-  "send" | "read" | "nextWake" | "deadLetters"
+  "send" | "read" | "deadLetters"
 >;
 
 /** Recipient-owned replies and receipt-bearing submissions over the host's one Post lane. */
@@ -604,13 +604,6 @@ export class AgentMail {
       stageAcceptedNotice: (mail, scopeId) => {
         this.stageAcceptedNotice(mail, scopeId);
       },
-      drainOutbox: () => Effect.void,
-      nextWakeAt: () =>
-        Effect.try({
-          try: () => this.deps.post().nextWake() ?? undefined,
-          catch: (cause) =>
-            new BirdDogError("Agent reply wake is unavailable", { cause }),
-        }),
     };
   }
 }

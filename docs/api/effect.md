@@ -126,15 +126,17 @@ type ShiitakeEffectOptions = Readonly<{
   compaction?: CompactionOptions;
   hostJobs?: Readonly<{
     lane: string;
-    open: (runtime) => Readonly<{
-      execute: (job) => Effect.Effect<WatchdogExecutionDecision, WatchdogError>;
-    }>;
+    open: (runtime) => Pick<EffectWatchdogExecutor, "execute" | "retryPolicy">;
   }>;
   model: ModelSourceEffect;
   instructions: InstructionSourceEffect;
   tools?: ToolSourceEffect;
   runtime: RuntimeHostEffect;
   extensions: ExtensionRosterV0;
+  recipientStatus?: (recipient) => Effect.Effect<RecipientStatus>;
+  recipientParent?: (
+    recipient,
+  ) => Effect.Effect<AttentionRecipient | null, ExtensionStateError>;
   retry?: RetryPolicy;
   modelStreamIdleTimeoutMs?: number;
 }>;
@@ -633,6 +635,40 @@ One saved conversation's open attention items, read from the store alone.
 
 `Effect`\<readonly `object`[], [`ShiitakeError`](index.md#shiitakeerror),
 `never`\>
+
+---
+
+### readStoredSessionParent()
+
+```ts
+function readStoredSessionParent(
+  owner,
+  sessionId,
+): Effect<
+  {
+    agentId: string;
+    sessionId: string;
+    name: string;
+  } | null,
+  ShiitakeError,
+  never
+>;
+```
+
+First-delegator identity, or null for a root Session; a failed read stays
+failed.
+
+#### Parameters
+
+| Parameter   | Type                                  |
+| ----------- | ------------------------------------- |
+| `owner`     | [`SqliteOwner`](index.md#sqliteowner) |
+| `sessionId` | `string`                              |
+
+#### Returns
+
+`Effect`\< \| \{ `agentId`: `string`; `sessionId`: `string`; `name`: `string`;
+\} \| `null`, [`ShiitakeError`](index.md#shiitakeerror), `never`\>
 
 ## References
 

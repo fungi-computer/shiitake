@@ -63,7 +63,7 @@ export async function killed(
   }
 }
 
-export async function finished(
+export async function finishedValue(
   databasePath: string,
   mode = "finish",
   fixture = "restart-process",
@@ -72,10 +72,20 @@ export async function finished(
   try {
     const snapshot = await execution.message;
     expect(await execution.exited).toEqual([0, null]);
-    return Schema.decodeUnknownSync(SessionSnapshotSchema)(snapshot);
+    return snapshot;
   } finally {
     await execution.stop();
   }
+}
+
+export async function finished(
+  databasePath: string,
+  mode = "finish",
+  fixture = "restart-process",
+) {
+  return Schema.decodeUnknownSync(SessionSnapshotSchema)(
+    await finishedValue(databasePath, mode, fixture),
+  );
 }
 
 export async function withDatabase(test: (path: string) => Promise<void>) {

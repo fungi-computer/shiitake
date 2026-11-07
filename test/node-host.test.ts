@@ -1,6 +1,7 @@
 import {
   linkSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -10,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { rejectingSandbox } from "@fungi.computer/mycelium/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -244,6 +246,7 @@ it("retries after a failed pass even when the failure observer throws", async ()
       throw new Error("observer broke");
     });
     await host.runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciles += 1;
         return reconciles === 1
@@ -277,6 +280,7 @@ it("keeps the earliest requested wake when a later one arrives", async () => {
     let reconciles = 0;
     const host = nodeRuntimeHost(() => undefined);
     await host.runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciles += 1;
         return Promise.resolve();
@@ -313,6 +317,7 @@ it("caps far-future wake chunks and reconciles only after the original deadline"
   const maximumDelay = 2_147_483_647;
   try {
     await host.runtime.bind({
+      reconcileHost: undefined,
       reconcile,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
     });
@@ -389,6 +394,7 @@ it("cancels a rearmed far-future chunk when the bound host closes", async () => 
   const maximumDelay = 2_147_483_647;
   try {
     await host.runtime.bind({
+      reconcileHost: undefined,
       reconcile,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
     });
@@ -428,6 +434,7 @@ it("replaces a capped chunk with an earlier hint without postponing it for a lat
   const maximumDelay = 2_147_483_647;
   try {
     await host.runtime.bind({
+      reconcileHost: undefined,
       reconcile,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
     });
@@ -489,10 +496,119 @@ it("opens a store with one broken Session, refusing that Session by file", async
   const reopened = await openNodeShiitake(options(path, "unused"));
   try {
     await expect(reopened.agent.session(broken).read()).rejects.toThrow(
-      `Store file ${path}: Woodstock Session ${broken} holds a broken lineage (this store has 1 damaged Session, first ${broken}); a store never repairs itself — delete this Session with deleteSession("${broken}"), or reset the owning store:`,
+      `Store file ${realpathSync(path)}: Woodstock Session ${broken} holds a broken lineage (this store has 1 damaged Session, first ${broken}); a store never repairs itself — delete this Session with deleteSession("${broken}"), or reset the owning store:`,
     );
     await expect(reopened.agent.session(healthy).read()).resolves.toBeDefined();
   } finally {
     await reopened.close();
+  }
+});
+
+it("drains an active provider before releasing the Node owner and resumes without a crash charge", async () => {
+  const path = storePath();
+  const configured = options(path, "unused");
+  let markStarted: () => void = () => undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const first = await openNodeShiitake({
+    ...configured,
+    model: {
+      acquire: async (input) => {
+        const acquired = await configured.model.acquire(input);
+        return {
+          ...acquired,
+          stream: (_model, _context, streamOptions) => {
+            const events = createAssistantMessageEventStream();
+            streamOptions?.signal?.addEventListener(
+              "abort",
+              () => {
+                events.end(fauxAssistantMessage("", { stopReason: "aborted" }));
+              },
+              { once: true },
+            );
+            markStarted();
+            return events;
+          },
+        };
+      },
+    },
+  });
+  const sessionId = await first.agent.createSession("active-stop");
+  const accepted = await first.agent
+    .session(sessionId)
+    .send("Continue later", { requestId: "active-stop" });
+  await started;
+  await first.close();
+  const stored = new DatabaseSync(path);
+  try {
+    expect(
+      stored
+        .prepare(
+          "SELECT state, recovery_count FROM watchdog_jobs WHERE job_id = ?",
+        )
+        .get(accepted.commandId),
+    ).toMatchObject({ state: "queued", recovery_count: 0 });
+  } finally {
+    stored.close();
+  }
+  const reopened = await openNodeShiitake(options(path, "resumed after drain"));
+  try {
+    await vi.waitFor(
+      async () => {
+        const snapshot = await reopened.agent.session(sessionId).read();
+        expect(snapshot.activity.queue.state).toBe("idle");
+        expect(snapshot.messages.at(-1)?.value).toMatchObject({
+          role: "assistant",
+          content: [{ type: "text", text: "resumed after drain" }],
+        });
+      },
+      { timeout: 5_000 },
+    );
+  } finally {
+    await reopened.close();
+  }
+}, 10_000);
+
+it("keeps Session passes moving while delivery is held and joins delivery on close", async () => {
+  let releaseDelivery: () => void = () => undefined;
+  let markEntered: () => void = () => undefined;
+  const delivery = new Promise<void>((resolve) => {
+    releaseDelivery = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    markEntered = resolve;
+  });
+  const failure = vi.fn();
+  const host = nodeRuntimeHost(failure);
+  let reconciles = 0;
+  try {
+    const bound = await host.runtime.bind({
+      reconcile: () => {
+        reconciles += 1;
+        return Promise.resolve();
+      },
+      reconcileHost: async () => {
+        markEntered();
+        await delivery;
+      },
+      pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
+    });
+    await entered;
+    await expect.poll(() => reconciles).toBe(1);
+    await bound.requestWake();
+    await expect.poll(() => reconciles).toBe(2);
+    let closed = false;
+    const closing = host.close().then(() => {
+      closed = true;
+    });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    releaseDelivery();
+    await closing;
+    expect(failure).not.toHaveBeenCalled();
+  } finally {
+    releaseDelivery();
+    await host.close();
   }
 });

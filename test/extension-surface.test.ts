@@ -1,4 +1,8 @@
-import { createMemoryOutbox } from "@fungi.computer/carrier/testing";
+import { createPost, definePostRoute } from "@fungi.computer/carrier/post";
+import {
+  WatchdogError,
+  type ConcurrentWatchdogRuntimeEffect,
+} from "@fungi.computer/watchdog";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import { make as makeBirdDog } from "@fungi.computer/bird-dog/effect";
 import {
@@ -169,40 +173,95 @@ it("stops only the extension whose hook dies, with a visible reason, and resume 
   }
 });
 
-it("shares the earliest wake between extension timers and reply retries", async () => {
+it("shares one Watchdog deadline between extension timers and real Post retries", async () => {
   const fixture = createNativeSqliteOwnerFixture();
-  const extensionAt = Date.now() + 60_000;
-  let mailAt: number | undefined = extensionAt + 1_000;
+  const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+  let available = false;
+  const routes = {
+    mail: definePostRoute({
+      addressKind: "test-mail",
+      address: Schema.String,
+      event: Schema.String,
+      name: (id) => id,
+      namespace: {
+        getByName: () => ({
+          deliver: () =>
+            available
+              ? Promise.resolve("accepted")
+              : Promise.reject(new Error("offline")),
+        }),
+      },
+    }),
+  };
+  let post: ReturnType<typeof createPost<typeof routes>> | undefined;
+  let jobs: ConcurrentWatchdogRuntimeEffect | undefined;
   const { core, host } = await openCore(
     fixture.owner,
     grantAll([recorderExtension()]),
+    undefined,
     {
-      fanOut: () => Effect.void,
-      postMail: () => Effect.void,
-      drainOutbox: () => Effect.void,
-      nextWakeAt: () => Effect.sync(() => mailAt),
+      lane: "post",
+      open: (runtime) => {
+        jobs = runtime;
+        const owner = createPost({
+          owner: fixture.owner,
+          routes,
+          transactional: runtime.transactional,
+          now: Date.now,
+          scheduleWake: () => Promise.resolve(),
+        });
+        post = owner;
+        return {
+          retryPolicy: (job) =>
+            Effect.tryPromise({
+              try: () => owner.retryPolicy(job),
+              catch: (error) => new WatchdogError("execution_failed", error),
+            }),
+          execute: (job, attempt) =>
+            Effect.tryPromise({
+              try: (signal) => owner.execute(job, attempt, signal),
+              catch: (error) => new WatchdogError("execution_failed", error),
+            }),
+        };
+      },
     },
   );
   try {
     await Effect.runPromise(
-      core.agent.session("timers").extension("test-recorder").call("arm", {
-        key: "later",
-        dueAt: extensionAt,
-      }),
+      core.agent
+        .session("timers")
+        .extension("test-recorder")
+        .call("arm", { key: "later", dueAt: 6000 }),
     );
     expect(await host.pendingWork()).toEqual({
       pending: false,
-      nextWakeAt: extensionAt,
+      nextWakeAt: 6000,
     });
-    mailAt = extensionAt - 1_000;
+    if (post === undefined || jobs === undefined)
+      throw new Error("Post did not open");
+    fixture.owner.transactionSync(() =>
+      post?.send({
+        key: "reply",
+        kind: "mail",
+        address: "recipient",
+        event: "hello",
+      }),
+    );
+    expect((await host.pendingWork()).pending).toBe(true);
+    expect((await Effect.runPromise(jobs.tickConcurrent())).status).toBe(
+      "requeued",
+    );
     expect(await host.pendingWork()).toEqual({
       pending: false,
-      nextWakeAt: mailAt,
+      nextWakeAt: 3000,
     });
-    mailAt = undefined;
+    available = true;
+    clock.mockReturnValue(3000);
+    await Effect.runPromise(jobs.tickConcurrent());
+    expect(post.read("reply")).toEqual({ state: "delivered" });
     expect(await host.pendingWork()).toEqual({
       pending: false,
-      nextWakeAt: extensionAt,
+      nextWakeAt: 6000,
     });
   } finally {
     await Effect.runPromise(core.agent.close);
@@ -765,30 +824,20 @@ it("selects an extension added after queued admission at execution", async () =>
 });
 
 function memoryMailRoom() {
-  const rows = createMemoryOutbox();
   const posted: BirdDogMail[] = [];
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key) => Effect.promise(() => rows.read(key)),
-        put: (key, value) => Effect.promise(() => rows.put(key, value)),
-        list: (limit, afterKey) =>
-          Effect.promise(() => rows.list(limit, afterKey)),
-        delete: (key) => Effect.promise(() => rows.delete(key)),
-      },
-      post: (mail) =>
+      stage: (mail) =>
         Effect.sync(() => {
-          posted.push(mail);
-          return true;
+          posted.push(...mail);
         }),
-      scheduleWake: () => Effect.void,
       now: () => 100,
     }),
   );
-  return { room, rows, posted };
+  return { room, posted };
 }
 
-// 200 mails through the paged outbox take ~4s alone; 5s default flakes under load.
+// Exercise the existing bounded settlement cursors through several pages.
 it("does not re-fan mail or re-deliver settled runs after a cold reopen", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const mail = memoryMailRoom();
@@ -816,11 +865,8 @@ it("does not re-fan mail or re-deliver settled runs after a cold reopen", async 
         }),
       );
     await first.host.drain();
-    // BirdDog drains its outbox in bounded pages on later ticks.
-    for (let pass = 0; pass < 8 && mail.posted.length < 200; pass += 1)
-      await first.host.reconcile();
     expect(mail.posted).toHaveLength(200);
-    const outboxRows = (await mail.rows.list(1_000)).length;
+    expect(new Set(mail.posted.map(({ key }) => key)).size).toBe(200);
     await Effect.runPromise(first.core.agent.close);
 
     const second = await openCore(fixture.owner, roster(), mail.room);
@@ -830,7 +876,6 @@ it("does not re-fan mail or re-deliver settled runs after a cold reopen", async 
     });
     await second.host.reconcile();
     expect(mail.posted).toHaveLength(200);
-    expect((await mail.rows.list(1_000)).length).toBe(outboxRows);
     await expect(
       Effect.runPromise(
         second.core.agent.extensions.call("test-recorder", "seen", {}),

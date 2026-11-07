@@ -258,19 +258,6 @@ function settleTargetedControls(
   });
 }
 
-function drainMail(
-  mailRoom: BirdDogEffect | undefined,
-): Effect.Effect<void, ShiitakeError> {
-  if (mailRoom === undefined) return Effect.void;
-  return mailRoom
-    .drainOutbox()
-    .pipe(
-      Effect.mapError(() =>
-        runtimeFailure("Agent reply delivery is unavailable"),
-      ),
-    );
-}
-
 /**
  * Whether the settled work belongs to a Session the lineage audit refused.
  * Nothing more can be recorded in that Session: its Watchdog settlement, with
@@ -385,7 +372,7 @@ function settleCore(
 
 /**
  * One reconcile tick. Each step is its own Exit boundary: a failed extension
- * stops only itself, and mail always drains. Only a core failure fails the
+ * stops only itself. Delivery progresses through Watchdog. Only a core failure fails the
  * tick, so the host backs off only for core.
  */
 export function reconcileRuntime(
@@ -399,6 +386,7 @@ export function reconcileRuntime(
 ): Effect.Effect<void, ShiitakeError> {
   return Effect.gen(function* () {
     const result = yield* input.watchdog.tick();
+    if (result.status === "stopped") return;
     if (result.status === "busy")
       return yield* Effect.fail(
         runtimeFailure("Runtime reconciliation is already active"),
@@ -417,7 +405,7 @@ export function reconcileRuntime(
       reportCursor,
       ...consumers.map(({ cursor }) => cursor),
     );
-    const page = yield* input.watchdog.readSettled(pageSize, after);
+    const page = yield* input.watchdog.readSettled(pageSize, after, "default");
     const core = yield* Effect.exit(
       settleCore(
         input.store,
@@ -448,9 +436,7 @@ export function reconcileRuntime(
         ),
       ),
     );
-    const moreTimers = yield* input.extensions.fireDueTimers(Date.now());
-    if (page.length === pageSize || moreTimers) yield* input.requestWake;
-    yield* drainMail(input.mailRoom);
+    if (page.length === pageSize) yield* input.requestWake;
     if (Exit.isFailure(core)) return yield* Effect.failCause(core.cause);
     if (Exit.isFailure(reports)) return yield* Effect.failCause(reports.cause);
   }).pipe(

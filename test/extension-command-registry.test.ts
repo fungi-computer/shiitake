@@ -43,7 +43,12 @@ it("captures each command's decoder, typed handler and encoder before dispatch",
   if (prepared?._tag !== "Success")
     throw new Error("Expected a prepared command");
   expect(
-    Effect.runSync(prepared.success().pipe(Effect.provide(services))),
+    Effect.runSync(
+      prepared.success.pipe(
+        Effect.flatMap((body) => body),
+        Effect.provide(services),
+      ),
+    ),
   ).toBe("13");
   expect(invoked).toHaveBeenCalledExactlyOnceWith("session-one", 12);
   expect(increment?.({ sessionId: null, input: { value: "12" } })._tag).toBe(
@@ -58,7 +63,12 @@ it("captures each command's decoder, typed handler and encoder before dispatch",
   expect(invoked).toHaveBeenCalledTimes(1);
   const echo = commands.get("echo")?.({ sessionId: null, input: "hello" });
   if (echo?._tag !== "Success") throw new Error("Expected a prepared echo");
-  expect(Effect.runSync(echo.success().pipe(Effect.provide(services)))).toBe(
-    "hello",
-  );
+  expect(
+    Effect.runSync(
+      echo.success.pipe(
+        Effect.flatMap((body) => body),
+        Effect.provide(services),
+      ),
+    ),
+  ).toBe("hello");
 });

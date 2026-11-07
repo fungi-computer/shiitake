@@ -5,6 +5,7 @@ import {
 } from "../../session-attention.js";
 import type { SqliteOwner } from "../contracts.js";
 import { readSessionAttention } from "./session-attention.js";
+import { readSessionDelegator } from "./session-delegator.js";
 
 /** The most open items one settlement names as waiting on its sender. */
 const maximumWaitingOnYou = 8;
@@ -24,6 +25,28 @@ const decodeRow = Schema.decodeUnknownSync(
   }),
 );
 const decodeRecipient = Schema.decodeUnknownSync(AttentionRecipientSchema);
+
+/** The first delegating Agent Session; later senders never move this relationship. */
+export function readSessionParent(
+  owner: SqliteOwner,
+  sessionId: string,
+): AttentionRecipient | undefined {
+  const parent = readSessionDelegator(owner, sessionId)?.replyTo[0];
+  if (parent === undefined) return undefined;
+  const raw = owner.sql
+    .exec(
+      "SELECT agent_id, sender_session_id, name FROM session_work_senders WHERE session_id = ? AND agent_id = ? AND sender_session_id = ? LIMIT 1",
+      sessionId,
+      parent.agentId,
+      parent.sessionId,
+    )
+    .toArray()[0];
+  return decodeRecipient({
+    agentId: parent.agentId,
+    sessionId: parent.sessionId,
+    name: raw === undefined ? parent.agentId : decodeRow(raw).name,
+  });
+}
 
 /**
  * Woodstock records which Agent Session sent each accepted run, beside the

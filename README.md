@@ -21,7 +21,9 @@ To add your own behaviour, start the extension guide at
 
 **Use the terminal agent.** Run Shiitake in your project folder, on your Claude
 or ChatGPT subscription, a provider key or Fungi hosted models. Needs Node 22.13
-or newer on Linux or macOS.
+or newer on Linux x64/arm64 with glibc 2.35+, or macOS 13.5+ on Apple Silicon or
+Intel. Windows and Alpine/musl are not supported. On Apple Silicon, use arm64
+Node rather than an x64 installation under Rosetta.
 
 ```sh
 npm i -g @fungi.computer/spore
@@ -253,9 +255,17 @@ The `tools` builder's third argument exposes a declared command to the model:
 same handler in the same transaction, scoped to the run's Session.
 
 Commands, settled hooks and timer hooks run synchronously within the owner
-transaction. Prompt and tool builders run outside that write transaction.
-Activation resources use the Effect scope. An extension failure records a stop
-reason. Resuming it replays missed settled work through its cursor.
+transaction. A command may instead declare `{ prepare: (call) => ... }`, and a
+timer `{ prepare: (context, timer) => ... }`. Preparation is an Effect with read
+access only: it may await host evidence, then returns the synchronous Effect to
+commit. Re-read mutable rows in that body before applying captured evidence.
+Timer consumption still commits or rolls back with its body. Model tools use
+`context.transact({ prepare: ... })` for the same two phases; plain
+`context.transact(effect)` needs no preparation. Asynchronous work in an atomic
+body still stops the extension and rolls back. Prompt and tool builders run
+outside that write transaction. Activation resources use the Effect scope. An
+extension failure records a stop reason. Resuming it replays missed settled work
+through its cursor.
 
 `context.send({ sessionId, requireExistingSession: true, ... })` opts into an
 existing target: the admission transaction rejects an absent Session with
@@ -399,6 +409,14 @@ independently; both share one durable alarm. During a live tool, its armed
 five-second heartbeat requests delivery processing after an attention write.
 Receiver duration and ordinary retry policy still apply. A failed pass retains
 its retry until that pass succeeds, and close joins both active passes.
+
+Both Node and Cloudflare bind separate `reconcile` (Session) and `reconcileHost`
+(delivery) programs through `RuntimeHost.bind`. A held delivery must not block
+the next Session pass. Custom hosts schedule both independently, use the shared
+`pendingWork` answer for wakes, and join both on close. Without a delivery lane,
+`reconcileHost` is undefined and no second pass runs. Shutdown stops host
+callbacks while draining execution and waits for both outcomes, even when one
+fails.
 
 ## Run it on Node
 

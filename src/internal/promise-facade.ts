@@ -1,6 +1,8 @@
-import type { Json } from "../extensions.js";
+import { WatchdogError } from "@fungi.computer/watchdog";
+import { ExtensionStateError, type Json } from "../extensions.js";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type { ModuleRegistration } from "@fungi.computer/mycelium";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
@@ -13,6 +15,7 @@ import type {
   CommandSettlement,
   RuntimeHost,
   ShiitakeOptions,
+  ShiitakeHostJobs,
   ShiitakeOwnerAgent,
 } from "./contracts.js";
 import {
@@ -194,11 +197,15 @@ function liftRuntime(
   }).pipe(
     Effect.map(({ receiver, bind }) =>
       Object.freeze({
-        bind: ({ reconcile, pendingWork }) =>
+        bind: ({ reconcile, reconcileHost, pendingWork }) =>
           Effect.try({
             try: () =>
               bind.call(receiver, {
                 reconcile: () => runShiitakePromise(reconcile),
+                reconcileHost:
+                  reconcileHost === undefined
+                    ? undefined
+                    : () => runShiitakePromise(reconcileHost),
                 pendingWork: () => runShiitakePromise(pendingWork),
               }),
             catch: runtimeUnavailable,
@@ -214,6 +221,38 @@ function liftRuntime(
       }),
     ),
   );
+}
+
+/** The native Promise hosts share one adaptation of their Watchdog executor. */
+export function liftHostJobs(
+  hostJobs: ShiitakeHostJobs,
+): NonNullable<ShiitakeEffectOptions["hostJobs"]> {
+  return {
+    lane: hostJobs.lane,
+    open: (watchdog) => {
+      const host = hostJobs.open({
+        transactional: watchdog.transactional,
+        readJob: (id) => runShiitakePromise(watchdog.read(id)),
+        tickConcurrent: () => runShiitakePromise(watchdog.tickConcurrent()),
+      });
+      return {
+        retryPolicy: (job) => {
+          const policy = host.retryPolicy;
+          return policy === undefined
+            ? Effect.succeed(undefined)
+            : Effect.tryPromise({
+                try: () => policy(job),
+                catch: (error) => new WatchdogError("execution_failed", error),
+              });
+        },
+        execute: (job, attempt) =>
+          Effect.tryPromise({
+            try: (signal) => host.execute(job, signal, attempt),
+            catch: (error) => new WatchdogError("execution_failed", error),
+          }),
+      };
+    },
+  };
 }
 
 function liftOptions(
@@ -250,6 +289,47 @@ function liftOptions(
     },
     model: adaptModelSource(options.model),
   };
+  const recipientStatus = options.recipientStatus;
+  const recipientParent = options.recipientParent;
+  if (recipientParent !== undefined)
+    Object.assign(base, {
+      recipientParent: (
+        recipient: import("../session-attention.js").AttentionRecipient,
+      ) =>
+        Effect.tryPromise(() => recipientParent(recipient)).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning(
+              "recipient.parent_unavailable",
+              Redacted.make(cause),
+            ).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new ExtensionStateError({
+                    reason: "unavailable",
+                    message: "Recipient parent is unavailable",
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+    });
+  if (recipientStatus !== undefined)
+    Object.assign(base, {
+      recipientStatus: (
+        recipient: import("../session-attention.js").AttentionRecipient,
+      ) =>
+        Effect.tryPromise(() => recipientStatus(recipient)).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning(
+              "recipient.status_unavailable",
+              Redacted.make(cause),
+            ).pipe(Effect.as("unknown" as const)),
+          ),
+        ),
+    });
+  if (options.hostJobs !== undefined)
+    Object.assign(base, { hostJobs: liftHostJobs(options.hostJobs) });
   if (options.meta !== undefined) Object.assign(base, { meta: options.meta });
   if (options.storagePressure !== undefined)
     Object.assign(base, { storagePressure: options.storagePressure });

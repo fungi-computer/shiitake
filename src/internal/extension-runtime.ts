@@ -1,4 +1,8 @@
-import type { WatchdogQueueHead } from "@fungi.computer/watchdog/effect";
+import type {
+  WatchdogQueueHead,
+  WatchdogRunningJob,
+  WatchdogTransactionalProjection,
+} from "@fungi.computer/watchdog/effect";
 import {
   AttentionItemSchema,
   maximumExtensionAttention,
@@ -34,6 +38,7 @@ import {
   type ExtensionCapabilityV0,
   type ExtensionFingerprint,
   type ExtensionId,
+  type ExtensionTransactionV0,
   type ExtensionSlotV0,
   type ExtensionStatusV0,
   type Json,
@@ -59,7 +64,7 @@ import {
   invokeSyncHandler,
 } from "./extension-hook.js";
 import {
-  hasSessionAttention,
+  hasSessionDecision,
   setSessionAttention,
   clearSessionAttention,
   projectSessionAttention,
@@ -69,6 +74,7 @@ import {
   readSessionLineage,
   hasPendingSessionSteer,
   readWorkSender,
+  readSessionParent,
   hasSuccessfulToolResult,
   advanceCursor,
   declareSessionDocument,
@@ -78,15 +84,16 @@ import {
   deleteRecord,
   deleteTimer,
   deleteExtensionTimers,
+  cancelExtensionTimers,
+  resumeExtensionTimers,
   readAllRecords,
   readCursor,
-  readDueTimers,
+  readTimerJob,
   readRecord,
   readRecordPage,
   readStateLedger,
   readStatus,
   readTimer,
-  readTimerWake,
   writeRecord,
   writeStateLedger,
   writeStatus,
@@ -191,12 +198,8 @@ export type ExtensionRuntime = Readonly<{
     runs: readonly SettledRunV0[],
     throughSequence: number,
   ) => Effect.Effect<void, ShiitakeError>;
-  /** Fire up to 64 due timers; reports whether more may be due. */
-  fireDueTimers: (now: number) => Effect.Effect<boolean, ShiitakeError>;
-  /** Timer wake state across running extensions. */
-  timerWake: (
-    now: number,
-  ) => Readonly<{ due: boolean; nextWakeAt: number | null }>;
+  /** Execute one exact timer pointer in its existing extension transaction. */
+  executeTimer: (job: WatchdogRunningJob) => Effect.Effect<void, ShiitakeError>;
   /** Projection slots for one Session; call inside the snapshot transaction. */
   project: (sessionId: string) => Readonly<Record<string, ExtensionSlotV0>>;
   /** Run one command in its own transaction and return its encoded output. */
@@ -325,10 +328,13 @@ function commandFailure(failure: CommandFailure): ShiitakeError {
 export function openExtensionRuntime(
   input: Readonly<{
     owner: SqliteOwner;
+    watchdog: WatchdogTransactionalProjection;
     door: AdmissionDoor;
     readQueueHead: (sessionId: string) => WatchdogQueueHead;
     admitted: readonly AdmittedExtensionV0[];
     requestWake: Effect.Effect<void, ShiitakeError>;
+    recipientStatus?: import("./effect-contracts.js").ShiitakeEffectOptions["recipientStatus"];
+    recipientParent?: import("./effect-contracts.js").ShiitakeEffectOptions["recipientParent"];
   }>,
 ): Effect.Effect<ExtensionRuntime, ShiitakeError> {
   const { owner } = input;
@@ -571,7 +577,7 @@ export function openExtensionRuntime(
           ),
           Effect.flatMap((frame) =>
             storeStep(() => {
-              writeTimer(owner, id, key, dueAt);
+              writeTimer(owner, input.watchdog, id, key, dueAt);
               frame.timersChanged = true;
             }),
           ),
@@ -581,7 +587,7 @@ export function openExtensionRuntime(
           Effect.tap(() => grantGuard(member, "timers")),
           Effect.flatMap((frame) =>
             storeStep(() => {
-              deleteTimer(owner, id, key);
+              deleteTimer(owner, input.watchdog, id, key);
               frame.timersChanged = true;
             }),
           ),
@@ -589,7 +595,9 @@ export function openExtensionRuntime(
       read: (key: string) =>
         requireRead(id).pipe(
           Effect.andThen(grantGuard(member, "timers")),
-          Effect.andThen(storeStep(() => readTimer(owner, id, key))),
+          Effect.andThen(
+            storeStep(() => readTimer(owner, input.watchdog, id, key)),
+          ),
           Effect.map(Option.fromNullishOr),
         ),
     });
@@ -641,12 +649,10 @@ export function openExtensionRuntime(
               setSessionAttention(owner, sessionId, id, decoded.success);
             });
       },
-      awaitsPerson: (sessionId) =>
+      awaitsDecision: (sessionId) =>
         requireRead(id).pipe(
           Effect.tap(() => grantGuard(member, "attention")),
-          Effect.andThen(
-            storeStep(() => hasSessionAttention(owner, sessionId)),
-          ),
+          Effect.andThen(storeStep(() => hasSessionDecision(owner, sessionId))),
         ),
       clear: (sessionId, itemId) =>
         boundedKey(itemId, "An attention id").pipe(
@@ -789,6 +795,37 @@ export function openExtensionRuntime(
     });
   }
 
+  /** Host I/O finishes before SQLite opens; only the returned decision may write. */
+  function runPreparedTransaction<A, E>(
+    member: Member,
+    work: ExtensionTransactionV0<A, E>,
+    boundary: AdmissionBoundary,
+  ): Effect.Effect<Exit.Exit<A, E>, ShiitakeError> {
+    if (Effect.isEffect(work)) return runTransaction(member, work, boundary);
+    return Effect.exit(
+      work.prepare.pipe(
+        Effect.provideService(
+          ExtensionRead,
+          readServiceFor(member.admitted.id),
+        ),
+      ),
+    ).pipe(
+      Effect.flatMap((prepared) => {
+        if (Exit.isFailure(prepared))
+          return Effect.succeed(Exit.failCause(prepared.cause));
+        if (member.status !== "running")
+          return Effect.fail(
+            new ShiitakeError(
+              "extensions",
+              "unavailable",
+              "Extension is stopped",
+            ),
+          );
+        return runTransaction(member, prepared.value, boundary);
+      }),
+    );
+  }
+
   /** Refresh at most the extension's outstanding resource ceiling, in bounded pages. */
   function refreshAttentionOwner(extensionId: string): void {
     let after = "";
@@ -842,6 +879,7 @@ export function openExtensionRuntime(
             stoppedAt,
             revision: member.admitted.revision,
           });
+          cancelExtensionTimers(owner, input.watchdog, member.admitted.id);
           refreshAttentionOwner(member.admitted.id);
         };
         if (within === "own-transaction") owner.transactionSync(run);
@@ -886,6 +924,7 @@ export function openExtensionRuntime(
         stoppedAt: member.stoppedAt,
         revision: member.admitted.revision,
       });
+      cancelExtensionTimers(owner, input.watchdog, member.admitted.id);
       refreshAttentionOwner(member.admitted.id);
     };
     try {
@@ -1061,6 +1100,39 @@ export function openExtensionRuntime(
               ),
             ),
           ),
+        sessionParent: (sessionId: string) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "run_tools")),
+            Effect.andThen(
+              storeStep(
+                () =>
+                  readSessionParent(owner, decodeClientSessionId(sessionId)) ??
+                  null,
+              ),
+            ),
+          ),
+        recipientStatus: (
+          recipient: import("../session-attention.js").AttentionRecipient,
+        ) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "run_tools")),
+            Effect.andThen(
+              input.recipientStatus?.(recipient) ??
+                Effect.succeed("unknown" as const),
+            ),
+          ),
+        recipientParent: (
+          recipient: import("../session-attention.js").AttentionRecipient,
+        ) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "run_tools")),
+            Effect.andThen(
+              input.recipientParent?.(recipient) ??
+                Effect.fail(
+                  stateError("unavailable", "Recipient parent is unavailable"),
+                ),
+            ),
+          ),
         hasSuccessfulToolResult: (
           run: Pick<RunIdentityV0, "sessionId" | "workId">,
           toolCallId: string,
@@ -1085,13 +1157,13 @@ export function openExtensionRuntime(
             }),
           ),
         transact: <A, E>(
-          body: Effect.Effect<A, E, ExtensionTx | ExtensionRead>,
+          body: ExtensionTransactionV0<A, E>,
         ): Effect.Effect<A, E | ExtensionStop | ShiitakeError> => {
           const run: Effect.Effect<
             Exit.Exit<A, E>,
             ExtensionStop
           > = member.status === "running"
-            ? runTransaction(member, body, "request").pipe(Effect.orDie)
+            ? runPreparedTransaction(member, body, "request").pipe(Effect.orDie)
             : Effect.fail(
                 new ExtensionStop({
                   reason: member.reason ?? "Extension is stopped",
@@ -1407,6 +1479,7 @@ export function openExtensionRuntime(
                 stoppedAt: null,
                 revision: admitted.revision,
               });
+              resumeExtensionTimers(owner, input.watchdog, admitted.id);
               refreshAttentionOwner(admitted.id);
             });
           },
@@ -1518,7 +1591,7 @@ export function openExtensionRuntime(
                   owner.transactionSync(() => {
                     for (const [id, member] of members)
                       if (!target.has(member.admitted.id))
-                        deleteExtensionTimers(owner, id);
+                        deleteExtensionTimers(owner, input.watchdog, id);
                     const changed = replaceAttentionGrants(
                       owner,
                       admitted
@@ -1723,35 +1796,54 @@ export function openExtensionRuntime(
             }),
           { discard: true },
         ),
-      fireDueTimers: (now) =>
+      executeTimer: (job) =>
         Effect.gen(function* () {
-          const ids = running("timers").map(({ admitted }) => admitted.id);
-          const due = readDueTimers(owner, ids, now, maximumPage);
-          for (const timer of due) {
-            const member = members.get(timer.extensionId);
-            if (member?.status !== "running") continue;
-            const hook = member.hooks?.onTimer;
-            const body = Effect.suspend(() => {
-              if (
-                readTimer(owner, timer.extensionId, timer.key) !== timer.dueAt
-              )
-                return Effect.void;
-              deleteTimer(owner, timer.extensionId, timer.key);
-              return hook === undefined
-                ? Effect.void
-                : hook({ key: timer.key, dueAt: timer.dueAt, firedAt: now });
-            });
-            const exit = yield* runTransaction(member, body, "reconcile");
-            yield* stopFromExit(member, "onTimer", exit);
-          }
-          return due.length === maximumPage;
+          const timer = Schema.decodeUnknownSync(
+            Schema.Struct({ extensionId: Schema.String, key: Schema.String }),
+          )(job.payload);
+          const member = members.get(timer.extensionId);
+          if (
+            member?.status !== "running" ||
+            !member.admitted.grants.has("timers")
+          )
+            return;
+          if (readTimerJob(owner, timer.extensionId, timer.key) !== job.jobId)
+            return;
+          const hook = member.hooks?.onTimer;
+          const prepare =
+            hook === undefined
+              ? Effect.succeed(Effect.void)
+              : hook({
+                  key: timer.key,
+                  dueAt: job.notBefore ?? 0,
+                  firedAt: Date.now(),
+                });
+          const exit = yield* runPreparedTransaction(
+            member,
+            {
+              prepare: prepare.pipe(
+                Effect.map((action) =>
+                  Effect.suspend(() => {
+                    if (
+                      readTimerJob(owner, timer.extensionId, timer.key) !==
+                      job.jobId
+                    )
+                      return Effect.void;
+                    deleteTimer(
+                      owner,
+                      input.watchdog,
+                      timer.extensionId,
+                      timer.key,
+                    );
+                    return action;
+                  }),
+                ),
+              ),
+            },
+            "reconcile",
+          );
+          yield* stopFromExit(member, "onTimer", exit);
         }),
-      timerWake: (now) =>
-        readTimerWake(
-          owner,
-          running("timers").map(({ admitted }) => admitted.id),
-          now,
-        ),
       project: (sessionId) => {
         const slots: Record<string, ExtensionSlotV0> = {};
         for (const member of members.values()) {
@@ -1924,8 +2016,11 @@ export function openExtensionRuntime(
                 "Extension command input is invalid",
               ),
             );
-          const body = prepared.success();
-          const exit = yield* runTransaction(member, body, "request");
+          const exit = yield* runPreparedTransaction(
+            member,
+            { prepare: prepared.success },
+            "request",
+          );
           if (Exit.isSuccess(exit)) return exit.value;
           const failure = Cause.findErrorOption(exit.cause);
           if (Option.isSome(failure) && !shouldStop(exit.cause))
@@ -1962,6 +2057,11 @@ export function openExtensionRuntime(
                     stoppedAt: null,
                     revision: member.admitted.revision,
                   });
+                  resumeExtensionTimers(
+                    owner,
+                    input.watchdog,
+                    member.admitted.id,
+                  );
                   refreshAttentionOwner(member.admitted.id);
                 });
               },

@@ -537,6 +537,12 @@ async function compactPromise(
   return composeCompactionResult(preparation, historyResult, turnPrefixResult);
 }
 
+/** Run scope owns both the release budget and the incomplete-cleanup observation. */
+export type CompactionCleanup = Readonly<{
+  graceMs: number;
+  onUndrained: Effect.Effect<void>;
+}>;
+
 /** Generate Pi's history and optional split-turn summaries, in order. */
 export function compact(
   preparation: CompactionPreparation,
@@ -544,12 +550,49 @@ export function compact(
   streamFn?: MuleStreamFunction,
   /** A manual compaction's focus, appended to the history summary prompt. */
   instructions?: string,
+  cleanup?: CompactionCleanup,
 ): Effect.Effect<CompactionResult, ShiitakeError> {
-  return Effect.tryPromise({
-    try: (effectSignal) =>
-      compactPromise(preparation, model, effectSignal, instructions, streamFn),
-    catch: (error) =>
-      failure(error instanceof Error ? error.message : String(error)),
+  return Effect.suspend(() => {
+    let pending: Promise<CompactionResult> | undefined;
+    return Effect.tryPromise({
+      try: (effectSignal) => {
+        const result = compactPromise(
+          preparation,
+          model,
+          effectSignal,
+          instructions,
+          streamFn,
+        );
+        pending = result;
+        return result;
+      },
+      catch: (error) =>
+        failure(error instanceof Error ? error.message : String(error)),
+    }).pipe(
+      Effect.onInterrupt(() => {
+        const result = pending;
+        if (result === undefined || cleanup === undefined) return Effect.void;
+        // The summary's foreign Promise, not Effect interruption, proves drain.
+        // Retain the run owner's one-second grace for an abort-aware producer.
+        return Effect.promise(
+          () =>
+            new Promise<boolean>((resolve) => {
+              const timer = setTimeout(() => {
+                resolve(false);
+              }, cleanup.graceMs);
+              const settled = () => {
+                clearTimeout(timer);
+                resolve(true);
+              };
+              void result.then(settled, settled);
+            }),
+        ).pipe(
+          Effect.flatMap((drained) =>
+            drained ? Effect.void : cleanup.onUndrained,
+          ),
+        );
+      }),
+    );
   });
 }
 

@@ -55,6 +55,7 @@ it("exposes the current tool tail without persisting updates, then clears after 
             fixture.owner,
             accepted,
             contract,
+            { provider: "faux", id: "tool-output" },
           );
           const run = { kind: "run", value: "run" } as const;
           const turn = { kind: "turn", value: "turn", parent: run } as const;
