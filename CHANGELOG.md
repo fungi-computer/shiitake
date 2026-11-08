@@ -1,5 +1,24 @@
 # @fungi.computer/shiitake
 
+## 0.12.2
+
+### Patch Changes
+
+- Changes since 0.12.1:
+
+  - fix(docs): build each package before its own docs check
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.8.0
+  - @fungi.computer/mycelium@0.3.7
+  - @fungi.computer/watchdog@0.1.3
+  - @fungi.computer/knapsack@0.4.8
+  - @fungi.computer/bird-dog@0.3.6
+  - @fungi.computer/carrier@0.2.4
+  - @fungi.computer/seam@0.2.5
+
 ## 0.12.1
 
 ### Patch Changes

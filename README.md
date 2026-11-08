@@ -60,66 +60,6 @@ try {
 Run it with `node --import tsx hello.ts`; the last message is the reply
 `Ready.`.
 
-## Community-funded
-
-We don't take VC money. Fungi is built in the open and proudly backed by its
-community.
-
-## Observe a Session
-
-`session.watch()` returns an owner-atomic snapshot and live `changes`; close the
-watch when the consumer leaves. `session.subscribe({ after })` replays strictly
-after an opaque Woodstock cursor, then joins the same per-Session live feed.
-Woodstock remains the only durable history owner.
-
-Watchers share one projection producer and encoded frame per Session. Each
-watcher can retain at most 256 frames or 1 MiB of encoded UTF-8, whichever comes
-first. Overflow drops that backlog and delivers one `reset` with a fresh
-snapshot, even if no later write arrives. There are at most 64 live watchers per
-Agent; closing one releases its capacity. Closing the last watcher stops the
-Session's producer and heartbeat.
-
-The byte limit also applies to a single frame: an encoded frame over 1 MiB
-cannot enter even an empty watcher queue. Every watcher whose frame exceeds that
-limit resets, including an otherwise fast watcher. This is a per-watcher check,
-not a reset of other Sessions or of watchers whose filtered frame and backlog
-fit. The fresh Woodstock baseline is the recovery path; silently exceeding the
-queue bound or adding a second chunked wire protocol is not.
-
-A typed `{ kind: "heartbeat" }` arrives every 15 seconds. It is not durable and
-never carries or advances a cursor. Durable rows deduplicate by owner sequence;
-message progress uses message identity and revision, not the durable cursor. The
-HTTP client treats 45 seconds without a delivered event as an unavailable,
-possibly busy feed. Silence does not prove the service stopped: Local clients
-must check the service owner's database lease before claiming that.
-
-## Recover an uncertain send
-
-Both local and HTTP Sessions expose
-`session.withdraw(requestId): Promise<WithdrawResult>`:
-
-```ts
-type WithdrawResult =
-  { status: "accepted"; commandId: string } | { status: "unknown" };
-```
-
-Shiitake resolves this inside the admission owner's transaction. An existing
-admission wins and is **not cancelled**. Otherwise the owner commits a durable
-withdrawal fence; every later admission under that Session and request ID is
-refused, including after owner restart. Calls are idempotent and Session-scoped.
-A recorded operator line also wins over withdrawal, with its durable entry ID.
-
-Restore a pending draft only after `unknown` from this committed withdrawal,
-never after a failed transport or an empty observation page. If recovery itself
-fails, retain the request ID and exact text and retry recovery when connected. A
-user retry after withdrawal needs a **new** request ID. Recall can use this same
-primitive, then call `cancel({ commandId, onlyIfPending: true })` for an
-accepted queued command; withdrawal itself never cancels admitted work.
-
-Observation messages for prompts and operator lines carry `requestId`; pending
-prompts carry it too. Clients can therefore reconcile watch-first delivery
-without waiting for the command response or matching text.
-
 ## Set up
 
 ```sh
@@ -321,102 +261,62 @@ permission code; a `confirm` operation is still refused unless the host supplies
 `access.confirm`. A Files extension still requires a host tool runtime.
 Extension tool authority and final external access remain host decisions.
 
-## Host metadata
+## Agent fleet
 
-Tool display payloads use `SessionMessage.data`, directly, not `value.details`
-or a `data.details` envelope. Woodstock stores the same payload on each tool
-outcome/completed-message entry's `data`; model context and compaction inputs
-use only the message content. Recovery can reconstruct a tool's application
-result without putting its display payload into the next model request. Images
-remain model image content; their display metadata is application data. Live
-output counters use the tool event's `result.data`.
+`@fungi.computer/shiitake/fleet` owns Agent directory reservations, replay
+receipts, erasure addresses, granted Session operations and hosted BirdDog
+delegation. Hosts supply grants containing Agent scope, actions, expiry and
+provenance. Fleet operations do not read Team, billing or broker policy. Usage
+has no fleet cap; the host's inference admission remains the credit authority.
 
-`data` is independent of host `meta` even when their keys overlap. It is not
-host attribution and does not inherit the 4096-byte metadata cap. The ordinary
-bounded Session read still accounts for the complete projected payload.
-Woodstock schema 3 refuses older preview stores instead of migrating them on
-open; the host retains custody of incompatible storage. This is a storage
-contract, not permission to reset or migrate any live data.
+`createAgentDirectory(sql)` runs mutations inside the caller's transaction and
+returns lifecycle facts so host projections commit with the directory change.
+`createFleetSessions(open)` lists, creates, reads and deletes Sessions, and
+`send(grant, agentId, sessionId, message)` admits replayable work. An omitted
+Session is created with the message's request identity.
+`createFleetDelegation({storage, deliver, open, readSettlement})` records the
+grant's parent Session and freezes BirdDog mail before delivery.
+`start(grant, task)` returns the admission receipt; `delegate(grant, task)`
+returns Agar Pending until the exact command settles, then its terminal, final
+text, native usage facts and tool-call count. The host-only
+`readSettlement(sessionId, commandId)` reads exact work rows, independently of
+transcript pagination and branch selection. Poll with the same request identity
+and task. Closing a client never cancels work.
 
-A host attaches its own data to a prompt or operator line, such as who sent it
-or which channel it came from, with `agent.withMeta(meta)`. Shiitake checks the
-value against the host's `meta.schema`, caps it at 4096 bytes of JSON, stores it
-beside the message and returns it as `SessionMessage.meta`. It does not own the
-metadata's domain grammar. Only the in-process owner returned by `Shiitake.make`
-has `withMeta`: no request body can carry metadata, because every command schema
-is closed. Over HTTP the host's own middleware sets the `shiitakeMeta` Hono
-variable, and the session resolver receives it:
+Host metadata stays opaque. An in-process `open` adapter applies it with
+`agent.withMeta(meta)`; a remote host attaches it at its authenticated transport
+edge. Cancellation returns the cancellation entry's metadata, allowing the host
+to name the canceller in the reply text without making them its author.
 
-```ts
-const routes = createShiitakeHttpRoutes(
-  (id, meta) => (meta === undefined ? agent : agent.withMeta(meta)).session(id),
-  agent.listSessions,
-  agent.createSession,
-  agent.deleteSession,
-  () => agent.extensions,
-);
-const app = new Hono<ShiitakeHttpEnv>()
-  .use(async (c, next) => {
-    c.set("shiitakeMeta", await authenticatedMeta(c.req.raw));
-    await next();
-  })
-  .route("/", routes);
-```
+### Delegated replies
 
-Every accepted command takes the same path: a prompt, a steer, an operator line,
-a cancel and an abort each store their metadata on the entry they write, so a
-restart loses none of it. A cancelled run's `SessionTerminal.meta` is its
-cancellation's metadata. Addressed mail work stores the metadata its host passes
-to `ShiitakeHost.acceptMail(mail, meta)`; a mail's sender cannot set it, and a
-reply never carries the settled work's metadata (see
-[Delegated replies](#delegated-replies)). A retried request id replays only with
-the same metadata. A Cloudflare owner exposes its whole HTTP surface (Session
-routes and ACP) as the protected `shiitakeApp()` Hono app, so a host mounts it
-behind its own identity middleware; ACP receives each request's metadata, so a
-host can serve each author over `withMeta`. The host's metadata schema may be an
-Effect schema or any synchronous Standard Schema, such as Zod 4.
+A `followUp` delegation returns `{status: "accepted", commandId}` at once. The
+child's result arrives later as one new user-role line in the parent Session. It
+is ordinary follow-up work: an idle parent wakes a new run, and an active parent
+queues it behind the running work, which it never interrupts, so it runs next.
+Each fact on that line has one setter:
 
-For a multi-author host, `meta.identityPath` selects the host's stable principal
-ID using SQLite's JSON decoder (for example, `$.author.id`). On a
-`withMeta`-bound Session, `latestPending()` returns just that principal's newest
-owner-admitted pending prompt, or `null`. It is independent of the bounded
-oldest-first pending page and preserves the exact text, supported images and
-metadata. Steers and follow-ups are eligible; extension work, compactions and
-started commands are not.
+| Fact                                | Setter                                                                               | Rule                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Content                             | BirdDog `settlementReplies`                                                          | The child's last assistant text, or the host's cancellation text such as `Work cancelled by Ada.`, verbatim; with neither, one sentence naming the outcome.                                                                                                                                                                  |
+| `reply.commandId`                   | BirdDog, from the child's accepted command                                           | Settled work replies carry the parent's `agents.send` receipt `commandId`; undeliverable replies have no command ID.                                                                                                                                                                                                         |
+| `reply.outcome`, `reply.diagnostic` | BirdDog, from the exact Watchdog outcome and the child Session's terminal diagnostic | `completed`, `failed`, `interrupted`, `cancelled` and `outcome_unknown` stay distinct. Only `failed`, `interrupted` and `outcome_unknown` carry a diagnostic, bounded by `boundedDiagnostic`. `undeliverable` instead carries `recipient_offline` or `recipient_left`.                                                       |
+| Authentication                      | `fleet.authenticateReply(mail)` at the parent's host                                 | The key is the frozen send's `<key>:reply:0`, `replyTo` is empty, and `from`/`to` mirror the frozen send exactly. Settled replies correlate with the receipt's `commandId`; undeliverable replies correlate only by the frozen mail key and typed reason. Otherwise the result is `undefined` and the host refuses the mail. |
+| Author and `meta.delegation.reply`  | The parent's host, only after authentication                                         | The author is the replying child Agent. The settling actor, a human canceller and the parent never author a reply.                                                                                                                                                                                                           |
+| Model-visible provenance            | Shiitake, from the `reply` the host passes to `acceptMail(mail, meta, reply)`        | The model sees the line inside `<fungi_agent_reply agent_id=… session_id=… [command_id=…] outcome=… [diagnostic=…] [reason=…]>`.                                                                                                                                                                                             |
 
-The same identity check protects `cancel` and raw
-`command({ type: "cancel", ... })`, including Accepted replay after reopening.
-Display names are not identity. The host must authenticate and bind each
-request, and recheck live Agent/Session access before forwarding it. An unbound
-in-process owner retains operational cancellation authority. A single-user Local
-host need not configure `identityPath`. Pending-only cancellation remains
-`cancel({ commandId, onlyIfPending: true })`; lookup does not reserve the work,
-so a claim race can still return TooLate.
-[Host metadata tests](test/host-meta.test.ts) cover each rule.
+The provider role stays `user`. Shiitake renders the tag from the verified
+facts, never from the text, and neutralizes the tag in every other user-role
+line (typed prompts, unverified mail, operator lines) and inside the reply body.
+Typed or mailed text that copies the tag therefore never reads as a verified
+reply. The stored line keeps the child's text verbatim; clients join it to the
+send on `meta.delegation.reply.commandId` through agar's
+`messageDelegationReply`, never on its text. `acceptMail` refuses a `reply` that
+does not name its mail's sender or that arrives on mail with a `replyTo`.
 
-A `ShiitakeDO` subclass serves its own routes in front of Shiitake's by
-overriding the protected `hostFetch(request)`: it returns a response, or
-`undefined` to let Shiitake serve the request.
-
-Cloudflare hosts may supply `initialize(extensions)` to commit an ordinary
-Agent-scope extension command before queued or host work resumes. Failure closes
-the incomplete runtime and leaves its durable work for a later open.
-
-Cloudflare hosts may configure `hostJobs` to open a concurrent Watchdog lane.
-Their `hostWork` pass stages and recovers delivery, then calls that lane's
-`tickConcurrent`. Every wake requests Agent reconciliation and host work
-independently; both share one durable alarm. During a live tool, its armed
-five-second heartbeat requests delivery processing after an attention write.
-Receiver duration and ordinary retry policy still apply. A failed pass retains
-its retry until that pass succeeds, and close joins both active passes.
-
-Both Node and Cloudflare bind separate `reconcile` (Session) and `reconcileHost`
-(delivery) programs through `RuntimeHost.bind`. A held delivery must not block
-the next Session pass. Custom hosts schedule both independently, use the shared
-`pendingWork` answer for wakes, and join both on close. Without a delivery lane,
-`reconcileHost` is undefined and no second pass runs. Shutdown stops host
-callbacks while draining execution and waits for both outcomes, even when one
-fails.
+Apps exposing an Agent extension import `agentExtensionMethods` from
+`@fungi.computer/shiitake/agar-extension` and spread the result into Agar's
+`defineAppBackend({methods})`. Agar itself has no Shiitake dependency.
 
 ## Run it on Node
 
@@ -490,7 +390,7 @@ cancelled and interrupted commands return no text, and `agents.read` stays the
 full bounded Session read. Hosted ACP sessions use the Agent and Team layers;
 they do not select a person's saved model preference.
 
-## API and examples
+## API reference and examples
 
 The [generated API reference](docs/api/README.md) covers the public exports in
 [package.json](package.json):
@@ -508,115 +408,6 @@ a host-supplied fetch.
 [Restart tests](test/resume-after-restart-tool-outcomes.test.ts) exercise
 interrupted tools against the existing replay rules. They are local proofs, not
 a guarantee about another deployment's storage or sandbox.
-
-## Breaking live-progress API
-
-The S4 offset/append contract replaces cumulative progress frames:
-
-- `progress` frames carry `SessionProgressDelta`, with separate text and
-  thinking `{ offset, append }` channels. Offsets count UTF-16 code units.
-- `SessionProgress` is the bounded snapshot shape and now requires `textOffset`
-  and `thinkingOffset`, alongside its truncation flags.
-- `appendSessionProgress(current, delta)` is the new shared fold for progress
-  frames. Seed it from the **same watch's `snapshot.progress`**, replace it on a
-  reset, and retain it across unrelated updates until the message completes or
-  the queue becomes idle. A separate earlier `read()` is not a watch baseline.
-- The visitor stream sends live `activity` frames as well as `progress` frames.
-  An activity frame updates activity facts; it is not a replacement snapshot.
-
-All producers and consumers must use this contract together. There is no
-cumulative-frame compatibility format.
-
-## Client entries
-
-A host selects client entries separately from its durable extension roster.
-`defineClientEntry(contract, callbacks)` captures the projection decoder for the
-extension. The installed entry has only `protocol`, `id`, optional `attach`, and
-optional `contribute`. At least one callback is required. The host admits
-exactly `shiitake.client/v1`; it does not accept the superseded client shape.
-
-`contribute` is a synchronous, pure function of the extension's typed view. It
-returns display-only chips, pinned panel rows, committed timeline cells, and an
-optional waiting summary/cancel action. It has no renderer nodes, subscriptions,
-Session transport, or action closures. Parakeet evaluates changed slots once
-outside rendering and decodes the result at that seam. Invalid output retires
-that entry's rows and reports its error without disabling other entries.
-
-This illustrative author uses the same factory exercised by
-[test/client-entry.test.ts](test/client-entry.test.ts):
-
-```ts
-import { ExtensionId } from "@fungi.computer/shiitake/extensions";
-import { defineClientEntry } from "@fungi.computer/shiitake/client-entry";
-import * as Schema from "effect/Schema";
-
-const contract = {
-  id: ExtensionId.make("progress"),
-  commands: {},
-  projection: { schema: Schema.Struct({ title: Schema.String }) },
-};
-export default defineClientEntry(contract, {
-  contribute: (view) => ({
-    chips: [],
-    panel:
-      view.status === "running" && view.value !== null
-        ? [{ id: "progress", title: view.value.title }]
-        : [],
-    timeline: { cells: [], omitted: 0 },
-    waiting: null,
-  }),
-});
-```
-
-Attachment authors may return `void`, a Promise, or a scoped Effect. The context
-supplies `activity`, `signal`, and `onError`; it supplies no Session authority.
-Each `for await` over activity creates an independent subscription with one
-sliding latest-value slot. A slow consumer sees the latest value. The selected
-Session's detach aborts the signal and ends every iterator, discarding buffered
-activity. Ordinary async authors use that signal for their own resource cleanup.
-
-Actions are `{ id, label, input? }` data from `@fungi.computer/gills`. Their IDs
-must occur in the same entry's running advertised Whistle catalog, and input
-must be a JSON object. Hosts execute the catalog command with its existing
-prompts and notices; there is no second action registry. Offline and stale
-actions refuse locally. Waiting cancellation preserves notices but rejects
-prompts without opening a dialog. Browser rows use ordinary buttons. The TUI
-renders current extension rows compactly below its footer hints; each row moves
-the footer upward. Loop and its next run share one row. Ordinary notices can be
-dismissed with Esc after interactions, queued messages, active work and
-extension waiting controls have priority. Live extension state is not
-dismissible. In the TUI, the **Row actions** palette command uses the existing
-keyboard choice dialogs. Rows may also carry a typed Session open target. The
-host supplies the generic open callback and authorizes that target before
-navigation. The TUI opens the target through its pane registry and reports a
-refused open as a notice.
-
-V1 permits four chips, sixteen panel rows, thirty-two timeline cells, and two
-hundred rows total per entry. Labels contain at most 4,096 characters. Chips
-carry no actions or open targets. `ClientChipV1.compact` is optional label data
-that browser and TUI renderers do not display; they use the chip row’s title. A
-cell's ID is its positive safe integer sequence written as decimal text.
-Producer history commits in the same owner transaction as its state change,
-deduplicates unchanged state, and retains at most thirty-two events and 32 KiB
-with an explicit omitted count. A real command ID anchors cells after its last
-loaded durable row; an unloaded anchor stays hidden until its page loads.
-Alternatively, a cell may supply `afterSequence` with `commandId: null` to
-choose a fixed committed Session position. This is not its producer-local event
-sequence. Zero places it before the first Session entry; unloaded positions stay
-hidden until their page loads. Without either anchor, a cell appears under
-**Extension changes**. An event may not choose both anchor kinds.
-
-Goal uses the fixed-position addition: its host reads `ctx.sessionPosition`
-inside the ending transaction and persists that position. Later output from the
-same running work cannot move the ending line. Renderers resolve it using the
-same row visibility policy and split tool groups at that position.
-
-The frozen client V1 contract includes fields, placements, bounds, identities,
-ordering, admission, dispatch, detach, and history laws. Host extension V0 and
-client presentation V1 are independent protocols. A breaking client change
-requires a new client protocol; supported additions require an explicit contract
-decision and proof. Producer schema changes bump their own extension/state
-versions. Pre-launch data uses the current contract, without a dual reader.
 
 ## Limits and errors
 
@@ -643,60 +434,3 @@ pnpm --dir packages/shiitake run docs
 
 The native merge proof needs the configured Workers-compatible runtime. Unit
 tests alone do not qualify that host. MIT. See [LICENSE](LICENSE).
-
-## Agent fleet
-
-`@fungi.computer/shiitake/fleet` owns Agent directory reservations, replay
-receipts, erasure addresses, granted Session operations and hosted BirdDog
-delegation. Hosts supply grants containing Agent scope, actions, expiry and
-provenance. Fleet operations do not read Team, billing or broker policy. Usage
-has no fleet cap; the host's inference admission remains the credit authority.
-
-`createAgentDirectory(sql)` runs mutations inside the caller's transaction and
-returns lifecycle facts so host projections commit with the directory change.
-`createFleetSessions(open)` lists, creates, reads and deletes Sessions, and
-`send(grant, agentId, sessionId, message)` admits replayable work. An omitted
-Session is created with the message's request identity.
-`createFleetDelegation({storage, deliver, open, readSettlement})` records the
-grant's parent Session and freezes BirdDog mail before delivery.
-`start(grant, task)` returns the admission receipt; `delegate(grant, task)`
-returns Agar Pending until the exact command settles, then its terminal, final
-text, native usage facts and tool-call count. The host-only
-`readSettlement(sessionId, commandId)` reads exact work rows, independently of
-transcript pagination and branch selection. Poll with the same request identity
-and task. Closing a client never cancels work.
-
-Host metadata stays opaque. An in-process `open` adapter applies it with
-`agent.withMeta(meta)`; a remote host attaches it at its authenticated transport
-edge. Cancellation returns the cancellation entry's metadata, allowing the host
-to name the canceller in the reply text without making them its author.
-
-### Delegated replies
-
-A `followUp` delegation returns `{status: "accepted", commandId}` at once. The
-child's result arrives later as one new user-role line in the parent Session. It
-is ordinary follow-up work: an idle parent wakes a new run, and an active parent
-queues it behind the running work, which it never interrupts, so it runs next.
-Each fact on that line has one setter:
-
-| Fact                                | Setter                                                                               | Rule                                                                                                                                                                                                                                                                                                                         |
-| ----------------------------------- | ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Content                             | BirdDog `settlementReplies`                                                          | The child's last assistant text, or the host's cancellation text such as `Work cancelled by Ada.`, verbatim; with neither, one sentence naming the outcome.                                                                                                                                                                  |
-| `reply.commandId`                   | BirdDog, from the child's accepted command                                           | Settled work replies carry the parent's `agents.send` receipt `commandId`; undeliverable replies have no command ID.                                                                                                                                                                                                         |
-| `reply.outcome`, `reply.diagnostic` | BirdDog, from the exact Watchdog outcome and the child Session's terminal diagnostic | `completed`, `failed`, `interrupted`, `cancelled` and `outcome_unknown` stay distinct. Only `failed`, `interrupted` and `outcome_unknown` carry a diagnostic, bounded by `boundedDiagnostic`. `undeliverable` instead carries `recipient_offline` or `recipient_left`.                                                       |
-| Authentication                      | `fleet.authenticateReply(mail)` at the parent's host                                 | The key is the frozen send's `<key>:reply:0`, `replyTo` is empty, and `from`/`to` mirror the frozen send exactly. Settled replies correlate with the receipt's `commandId`; undeliverable replies correlate only by the frozen mail key and typed reason. Otherwise the result is `undefined` and the host refuses the mail. |
-| Author and `meta.delegation.reply`  | The parent's host, only after authentication                                         | The author is the replying child Agent. The settling actor, a human canceller and the parent never author a reply.                                                                                                                                                                                                           |
-| Model-visible provenance            | Shiitake, from the `reply` the host passes to `acceptMail(mail, meta, reply)`        | The model sees the line inside `<fungi_agent_reply agent_id=… session_id=… [command_id=…] outcome=… [diagnostic=…] [reason=…]>`.                                                                                                                                                                                             |
-
-The provider role stays `user`. Shiitake renders the tag from the verified
-facts, never from the text, and neutralizes the tag in every other user-role
-line (typed prompts, unverified mail, operator lines) and inside the reply body.
-Typed or mailed text that copies the tag therefore never reads as a verified
-reply. The stored line keeps the child's text verbatim; clients join it to the
-send on `meta.delegation.reply.commandId` through agar's
-`messageDelegationReply`, never on its text. `acceptMail` refuses a `reply` that
-does not name its mail's sender or that arrives on mail with a `replyTo`.
-
-Apps exposing an Agent extension import `agentExtensionMethods` from
-`@fungi.computer/shiitake/agar-extension` and spread the result into Agar's
-`defineAppBackend({methods})`. Agar itself has no Shiitake dependency.
