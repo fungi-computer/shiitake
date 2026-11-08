@@ -1,5 +1,23 @@
 # @fungi.computer/shiitake
 
+## 0.12.1
+
+### Patch Changes
+
+- Changes since 0.12.0:
+
+  - fix(shiitake): nudge textless delegated work once for a reply
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/mycelium@0.3.6
+  - @fungi.computer/watchdog@0.1.2
+  - @fungi.computer/knapsack@0.4.7
+  - @fungi.computer/agar@0.7.3
+  - @fungi.computer/bird-dog@0.3.5
+  - @fungi.computer/carrier@0.2.3
+  - @fungi.computer/seam@0.2.4
+
 ## 0.12.0
 
 ### Minor Changes

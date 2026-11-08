@@ -157,6 +157,7 @@ it("a goal stretch whose last turn says nothing reports the READY from an earlie
       fauxAssistantMessage("Working"),
       fauxAssistantMessage("READY: goal verified"),
       fauxAssistantMessage(""),
+      fauxAssistantMessage(""), // The one reply nudge also receives no text.
     ],
     continuing,
   );
@@ -195,7 +196,11 @@ it.each([
   ],
 ] as const)("a stretch %s", async (_law, texts, expected) => {
   const fixture = await replyFixture(
-    texts.map((text) => fauxAssistantMessage(text)),
+    texts.flatMap((text) =>
+      text.trim() === ""
+        ? [fauxAssistantMessage(text), fauxAssistantMessage("")]
+        : [fauxAssistantMessage(text)],
+    ),
     continuing,
   );
   try {
@@ -208,8 +213,11 @@ it.each([
   }
 });
 
-it("a work with no text at all still says 'ended completed without reply text'", async () => {
-  const fixture = await replyFixture([fauxAssistantMessage("")]);
+it("a work still empty after its reply nudge reports no reply text", async () => {
+  const fixture = await replyFixture([
+    fauxAssistantMessage(""),
+    fauxAssistantMessage(""),
+  ]);
   try {
     await fixture.start();
     await fixture.host.drain();
@@ -227,7 +235,9 @@ it.each(["person", "mail"] as const)(
     const fixture = await replyFixture(
       [
         fauxAssistantMessage("READY: previous stretch"),
-        ...Array.from({ length: 5 }, () => fauxAssistantMessage("")),
+        // Four delegated continuation works each get one empty reply nudge;
+        // the new person/mail work has no sender and gets no nudge.
+        ...Array.from({ length: 9 }, () => fauxAssistantMessage("")),
       ],
       continuing,
     );

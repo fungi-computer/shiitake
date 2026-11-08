@@ -35,6 +35,7 @@ import {
 } from "./compaction/session-compaction.js";
 import { openCompactionSettings } from "./compaction/settings.js";
 import { acquireOwnedModel } from "./model-acquisition.js";
+import { openReplyOwed } from "./reply-owed.js";
 import {
   returnedFailureReason,
   unavailableRunReason,
@@ -316,6 +317,7 @@ export function runAcceptedCommand(
       );
       let failureReason: string | undefined;
       let failedModelAttempts = 0;
+      const replyOwed = openReplyOwed(options.store, prepared);
       const run = yield* runWithCompaction({
         cleanup: {
           graceMs: runFinalizerGraceMs,
@@ -409,6 +411,7 @@ export function runAcceptedCommand(
             resume: continuation,
             tools,
             getSteeringMessages: () => controlMessages("steer"),
+            getFollowUpMessages: replyOwed,
             prepareNextTurn: (turn) =>
               betweenTurns(turn.context, turn.newMessages.length).pipe(
                 Effect.mapError((error): MuleError => ({
