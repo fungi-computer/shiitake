@@ -1,5 +1,16 @@
 # @fungi.computer/shiitake
 
+## 0.12.3
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.9.0
+  - @fungi.computer/gills@0.3.0
+  - @fungi.computer/mycelium@0.3.8
+  - @fungi.computer/knapsack@0.4.9
+
 ## 0.12.2
 
 ### Patch Changes
