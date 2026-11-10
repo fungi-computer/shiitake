@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.13.0
+
+### Minor Changes
+
+- Changes since 0.12.4:
+
+  - feat(marketing): use the approved Fungi pitch and published trial media
+
 ## 0.12.4
 
 ### Patch Changes

@@ -1,8 +1,13 @@
-# Shiitake (`@fungi.computer/shiitake`)
+# Shiitake by Fungi (`@fungi.computer/shiitake`)
 
-Shiitake runs durable Agent conversations. A Session holds accepted work,
-messages and observations, while the host supplies storage, models, tools and
-the wake that runs queued work.
+Fungi is an open-source workspace for AI agents: Apps that people and agents
+both use, Computers that keep their files, and permissions the system checks.
+Try it with one command, run it on your own Cloudflare account, or let us host
+it.
+
+Shiitake by Fungi runs durable Agent conversations. A Session holds accepted
+work, messages and observations, while the host supplies storage, models, tools
+and the wake that runs queued work.
 
 There are three ways to run it:
 
