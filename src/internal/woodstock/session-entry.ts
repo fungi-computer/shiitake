@@ -487,6 +487,27 @@ const StoredSessionEntrySchema = Schema.Union([
       ),
     }),
   }),
+  // A finished summary pinned before its handoff and placement (Pi Durable's
+  // committed summary result). It has no model contribution: reopening after a
+  // crash places this summary instead of paying for another one. Placement
+  // (`compaction`) or a dropped-summary `compaction_notice` after it settles it.
+  Schema.Struct({
+    ...common,
+    kind: Schema.Literal("compaction_checkpoint"),
+    trigger: CompactionTriggerSchema,
+    resumesRun: Schema.Boolean,
+    /** First kept entry the summary was cut at. */
+    head: boundedId,
+    /** The last row the summary saw: the placed entry's `contextRevision`. */
+    contextRevision: boundedId,
+    summary: Schema.String,
+    tokensBefore: Schema.Number,
+    usage,
+    details: Schema.Struct({
+      readFiles: Schema.Array(Schema.String),
+      modifiedFiles: Schema.Array(Schema.String),
+    }),
+  }),
   // A compaction that committed nothing: a manual request with nothing to
   // summarize, any compaction that failed, or a finished summary dropped
   // unplaced: stale (its head is off the selected lineage or older than the

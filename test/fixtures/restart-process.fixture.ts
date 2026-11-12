@@ -116,12 +116,24 @@ const stopAtExhaustion =
   mode === "crash-exhausted-decision-zero" ||
   mode === "crash-exhausted-decision-one";
 let interceptRetryCommit = false;
+// Stop right after a finished summary is pinned, before its placement.
+const stopAtPinnedSummary = mode === "crash-pinned";
 const store =
-  mode === "crash-retry-decision" || stopAtExhaustion
+  mode === "crash-retry-decision" || stopAtExhaustion || stopAtPinnedSummary
     ? {
         ...fixture.owner,
         transactionSync: <A>(operation: () => A): A => {
           const result = fixture.owner.transactionSync(operation);
+          if (stopAtPinnedSummary) {
+            const tail = readSelectedPath(fixture.owner, {
+              sessionId: "restart",
+            }).at(-1)?.entry;
+            if (tail?.kind === "compaction_checkpoint") {
+              process.send?.("summary-pinned");
+              process.kill(process.pid, "SIGSTOP");
+            }
+            return result;
+          }
           if (!interceptRetryCommit) return result;
           const path = readSelectedPath(fixture.owner, {
             sessionId: "restart",
@@ -174,6 +186,8 @@ const faux = fauxModel(
     mode === "crash-summary" ||
     mode === "crash-summary-resume" ||
     mode === "finish-summary" ||
+    mode === "crash-pinned" ||
+    mode === "finish-pinned" ||
     mode === "compact-recovered"
     ? {
         models: [{ id: "faux-1", contextWindow: 30_000, maxTokens: 100_000 }],
@@ -217,7 +231,11 @@ if (
       errorMessage: "503 Service Unavailable",
     }),
   ]);
-if (mode === "crash-compaction" || mode === "crash-summary")
+if (
+  mode === "crash-compaction" ||
+  mode === "crash-summary" ||
+  mode === "crash-pinned"
+)
   faux.setResponses([
     fauxAssistantMessage("x".repeat(100_000), { stopReason: "length" }),
     fauxAssistantMessage("restart summary"),
@@ -255,6 +273,16 @@ if (
         !JSON.stringify(messages).includes("restart summary")
       )
         throw new Error("Compaction summary was lost");
+      return fauxAssistantMessage("verified recovered context");
+    },
+  ]);
+// After a pinned summary the restart must place it: exactly one request, the
+// answer, with the pinned summary in its context and no second summary call.
+if (mode === "finish-pinned")
+  faux.setResponses([
+    (context) => {
+      if (!JSON.stringify(requestMessages(context)).includes("restart summary"))
+        throw new Error("The pinned summary was not placed");
       return fauxAssistantMessage("verified recovered context");
     },
   ]);
@@ -387,7 +415,11 @@ const agent = await makeAgent({
               }) + "\n",
             );
           }
-          if (mode === "crash-completion" || mode === "finish-completion")
+          if (
+            mode === "crash-completion" ||
+            mode === "finish-completion" ||
+            mode === "finish-pinned"
+          )
             appendFileSync(databasePath + ".requests", "request\n");
           if (
             mode === "crash-abnormal" ||

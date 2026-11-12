@@ -1,5 +1,19 @@
 # @fungi.computer/shiitake
 
+## 0.14.0
+
+### Minor Changes
+
+- Changes since 0.13.1:
+
+  - feat(shiitake): pin finished compaction summaries so a crash cannot lose
+    them
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.10.1
+
 ## 0.13.1
 
 ### Patch Changes

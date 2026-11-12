@@ -3774,6 +3774,68 @@ export function appendCompactionNoticeOwned(
   });
 }
 
+/** One finished summary, pinned before its handoff and placement. */
+export type CompactionCheckpointInput = Readonly<{
+  sessionId: string;
+  workId: string;
+  trigger: CompactionTrigger;
+  resumesRun: boolean;
+  head: string;
+  contextRevision: string;
+  summary: string;
+  tokensBefore: number;
+  usage: Usage;
+  details: Readonly<{
+    readFiles: readonly string[];
+    modifiedFiles: readonly string[];
+  }>;
+}>;
+
+/** Append a completed summary on the selected lineage; it enters no context. */
+export function appendCompactionCheckpointOwned(
+  owner: SqliteOwner,
+  input: CompactionCheckpointInput,
+): StoredSessionRow {
+  return owner.transactionSync(() =>
+    appendSessionEntry(owner, {
+      sessionId: input.sessionId,
+      id: sessionIds.fact.generate(),
+      entry: {
+        kind: "compaction_checkpoint",
+        workId: input.workId,
+        trigger: input.trigger,
+        resumesRun: input.resumesRun,
+        head: input.head,
+        contextRevision: input.contextRevision,
+        summary: input.summary,
+        tokensBefore: input.tokensBefore,
+        usage: input.usage,
+        details: input.details,
+      },
+    }),
+  );
+}
+
+/**
+ * The newest pinned summary nothing has settled yet: no later placed
+ * compaction and no later notice on the lineage. A crash between the summary
+ * and its placement leaves exactly this.
+ */
+export function unsettledCompactionCheckpoint(
+  path: readonly StoredSessionRow[],
+):
+  | Extract<StoredSessionRow["entry"], { kind: "compaction_checkpoint" }>
+  | undefined {
+  for (let index = path.length - 1; index >= 0; index -= 1) {
+    const entry = path[index]?.entry;
+    if (entry === undefined) continue;
+    if (entry.kind === "compaction" || entry.kind === "compaction_notice")
+      return undefined;
+    if (entry.kind === "compaction_checkpoint") return entry;
+  }
+  return undefined;
+}
+
 /** Atomically append one compaction transition using the selected leaf CAS. */
 export function appendCompactionTransitionOwned(
   owner: SqliteOwner,

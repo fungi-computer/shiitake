@@ -203,7 +203,7 @@ async function assertInitialCompaction(
     ({ entry }) => entry.kind === "run_terminal",
   );
   expect(compactionIndex).toBeGreaterThan(terminalIndex);
-  expect(run.scenario.handoffLeafKinds).toEqual(["run_terminal"]);
+  expect(run.scenario.handoffLeafKinds).toEqual(["compaction_checkpoint"]);
   expect(run.scenario.received?.sessionId).toBe("real-compaction-caller");
   expect(run.scenario.received?.messagesToSummarize).toBeDefined();
   expect(run.scenario.received?.result.summary).toContain("durable summary");
@@ -362,7 +362,7 @@ it("excludes stale usage through the persisted Session caller", async () => {
       }
     }
     expect(preRunRequest).toBeGreaterThanOrEqual(0);
-    expect(scenario.handoffLeafKinds.at(-1)).toBe("command");
+    expect(scenario.handoffLeafKinds.at(-1)).toBe("compaction_checkpoint");
     const afterFailure = readSelectedPath(scenario.fixture.owner, {
       sessionId: "real-compaction-caller",
     });

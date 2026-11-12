@@ -4,6 +4,7 @@ import {
   finished,
   withDatabase,
   expectOutcome,
+  expectVerifiedAnswer,
 } from "./fixtures/restart.fixture.js";
 import { readFile } from "node:fs/promises";
 import * as Schema from "effect/Schema";
@@ -75,6 +76,38 @@ it(
         outcome: "interrupted",
         diagnostic: "Restart recovery budget exhausted (2 recoveries)",
       });
+    }),
+  60_000,
+);
+
+it(
+  "places a summary pinned before a crash without paying for a second one",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-pinned", "summary-pinned");
+      const snapshot = await finished(path, "finish-pinned");
+      expectVerifiedAnswer(snapshot);
+      // One request after the restart: the answer. A second summary call
+      // would have been a second request.
+      expect(await readFile(path + ".requests", "utf8")).toBe("request\n");
+      const fixture = createNativeSqliteOwnerFixture(path);
+      try {
+        const { id } = decodeSessionRow(
+          fixture.owner.sql.exec("SELECT id FROM sessions").one(),
+        );
+        const kinds = woodstock
+          .readSelectedPath(fixture.owner, { sessionId: id })
+          .map(({ entry }) => entry.kind);
+        expect(
+          kinds.filter((kind) => kind === "compaction_checkpoint"),
+        ).toHaveLength(1);
+        expect(kinds.filter((kind) => kind === "compaction")).toHaveLength(1);
+        expect(kinds.indexOf("compaction")).toBeGreaterThan(
+          kinds.indexOf("compaction_checkpoint"),
+        );
+      } finally {
+        fixture.close();
+      }
     }),
   60_000,
 );

@@ -9,7 +9,9 @@ import type { SqliteOwner } from "../contracts.js";
  * claim until release it holds the only extra decoded copy of a
  * conversation the owner may have: the summary fiber while it runs, then the
  * summary it hands back. Every other trigger joins it instead of starting a
- * second one. Process memory only: a crash loses it, unwritten.
+ * second one. Process memory only while it runs; a finished summary is
+ * pinned as a `compaction_checkpoint` entry when it leaves the slot, so a
+ * crash after that point does not lose it.
  *
  * Deliberate Shiitake difference, not Pi parity: Pi Durable's background
  * compaction is a durable task that survives a Conversation abort and

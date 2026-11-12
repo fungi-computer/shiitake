@@ -53,6 +53,8 @@ import {
   commandContextMessage,
   operatorContextMessage,
   placeCompactionTransition,
+  appendCompactionCheckpointOwned,
+  unsettledCompactionCheckpoint,
   promptCommand,
   readSessionContextPath,
   type AppendCompactionInput,
@@ -230,6 +232,84 @@ function tokensAfterCompaction(
   );
 }
 
+/** The stored checkpoint a crash could leave: a completed summary, pinned. */
+type CompactionCheckpoint = NonNullable<
+  ReturnType<typeof unsettledCompactionCheckpoint>
+>;
+
+/**
+ * Pin a finished summary on the lineage before its handoff and placement, so a
+ * crash after the model call is paid cannot lose it. Returns the checkpoint row.
+ */
+function pinSummary(
+  input: CommitInput,
+  result: CompactionResult,
+  request: CommitRequest,
+  contextRevision: string,
+): Effect.Effect<StoredSessionRow, ShiitakeError> {
+  return Effect.try({
+    try: () =>
+      appendCompactionCheckpointOwned(input.store, {
+        sessionId: input.sessionId,
+        workId: input.workId,
+        trigger: request.trigger,
+        resumesRun: request.resumesRun,
+        head: result.firstKeptEntryId,
+        contextRevision,
+        summary: result.summary,
+        tokensBefore: result.tokensBefore,
+        usage: result.usage,
+        details: result.details,
+      }),
+    catch: (error) =>
+      error instanceof ShiitakeError
+        ? error
+        : runtimeFailure("Woodstock compaction checkpoint append failed"),
+  });
+}
+
+/**
+ * Place the summary a crash left pinned, without another model call. The cut is
+ * the one pinned: its preparation is rebuilt from the rows the summary saw, and
+ * a cut that no longer matches or lies off the lineage is dropped as stale.
+ */
+function recoverCheckpoint(
+  input: CommitInput,
+  path: readonly StoredSessionRow[],
+  checkpoint: CompactionCheckpoint,
+  request: CommitRequest,
+): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
+  const result: CompactionResult = {
+    summary: checkpoint.summary,
+    firstKeptEntryId: checkpoint.head,
+    tokensBefore: checkpoint.tokensBefore,
+    usage: checkpoint.usage,
+    details: checkpoint.details,
+  };
+  const seen = path.findIndex(({ id }) => id === checkpoint.contextRevision);
+  const preparation =
+    seen < 0
+      ? undefined
+      : prepareCompaction(
+          sourceEntries(path.slice(0, seen + 1), input.workId),
+          input.settings,
+        );
+  if (preparation?.firstKeptEntryId !== checkpoint.head)
+    return recordDropped(input, result, "stale");
+  return handOffPinned(
+    input,
+    preparation,
+    result,
+    checkpoint.contextRevision,
+  ).pipe(
+    Effect.flatMap((handedOff) =>
+      handedOff === undefined
+        ? Effect.succeed(undefined)
+        : appendPlaced(input, handedOff, request),
+    ),
+  );
+}
+
 /** One exact preparation, handoff, CAS append, and authoritative rebuild. */
 function commitCompaction(
   input: CommitInput,
@@ -269,10 +349,11 @@ function commitCompactionEffect(
       request.instructions,
       input.cleanup,
     );
+    const pinned = yield* pinSummary(input, result, request, expected.id);
     const receipt = yield* handOff(input, preparation, result, expected.id);
     return yield* appendSummary(
       input,
-      path,
+      [...path, pinned],
       result,
       request,
       expected.id,
@@ -523,6 +604,8 @@ type BackgroundCompaction = {
   readonly scope: Scope.Scope;
   slot: BackgroundSlot | undefined;
   stopped: boolean;
+  /** A summary a crash left pinned: placed without another model call. */
+  recovered: CompactionCheckpoint | undefined;
 };
 
 const thresholdRequest: CommitRequest = {
@@ -632,6 +715,23 @@ function settleBackground(
   join: boolean,
 ): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
   return Effect.suspend(() => {
+    const recovered = background.recovered;
+    if (recovered !== undefined && background.slot === undefined) {
+      background.recovered = undefined;
+      return readPath(input.store, input.sessionId, input.workId).pipe(
+        Effect.flatMap((path) =>
+          recoverCheckpoint(input, path, recovered, request),
+        ),
+        Effect.result,
+        Effect.flatMap((placed) => {
+          if (placed._tag === "Success") return Effect.succeed(placed.success);
+          background.stopped = true;
+          return recordNotice(input, recovered.trigger, placed.failure).pipe(
+            Effect.as(undefined),
+          );
+        }),
+      );
+    }
     const slot = background.slot;
     const fiber = slot?.fiber;
     if (
@@ -676,7 +776,7 @@ function settleBackground(
  * over the limit.
  */
 function recordDropped(
-  input: SessionCompactionInput,
+  input: CommitInput,
   result: CompactionResult,
   reason: "stale" | "insufficient",
 ): Effect.Effect<undefined, ShiitakeError> {
@@ -708,6 +808,25 @@ function handOffSummary(
   const summary = takeSummary(slot);
   if (summary === undefined) return Effect.succeed(undefined);
   const { result, selectionTail } = summary;
+  return pinSummary(input, result, thresholdRequest, selectionTail).pipe(
+    Effect.flatMap(() =>
+      handOffPinned(input, summary.preparation, result, selectionTail),
+    ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        releaseSlot(input.store, slot);
+      }),
+    ),
+  );
+}
+
+/** Head check, then the archive handoff, of a summary already pinned. */
+function handOffPinned(
+  input: CommitInput,
+  preparation: CompactionPreparation,
+  result: CompactionResult,
+  selectionTail: string,
+): Effect.Effect<HandedOff | undefined, ShiitakeError> {
   return Effect.try({
     try: () =>
       compactionHeadState(input.store, {
@@ -722,14 +841,9 @@ function handOffSummary(
     Effect.flatMap((head) =>
       head === "stale"
         ? recordDropped(input, result, "stale")
-        : handOff(input, summary.preparation, result, selectionTail).pipe(
+        : handOff(input, preparation, result, selectionTail).pipe(
             Effect.map((receipt) => ({ result, selectionTail, receipt })),
           ),
-    ),
-    Effect.ensuring(
-      Effect.sync(() => {
-        releaseSlot(input.store, slot);
-      }),
     ),
   );
 }
@@ -748,7 +862,7 @@ function handOffSummary(
  * (compaction.ts:282), so that ordinary path could never help.
  */
 function appendPlaced(
-  input: SessionCompactionInput,
+  input: CommitInput,
   handedOff: HandedOff,
   request: CommitRequest,
 ): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
@@ -800,6 +914,14 @@ function preRunMessages(
 ): Effect.Effect<CompactionContext, ShiitakeError> {
   const unchanged = { path: input.path, messages: input.messages };
   if (input.resuming === true) return Effect.succeed(unchanged);
+  if (background.recovered !== undefined)
+    return settleBackground(input, background, thresholdRequest, true).pipe(
+      Effect.flatMap((placed) =>
+        placed === undefined
+          ? preRunMessages(input, background)
+          : Effect.succeed(placed),
+      ),
+    );
   const tokens = estimateContextTokens(input.messages).tokens;
   if (!shouldCompact(tokens, input.model.contextWindow, input.settings))
     return startBackground(
@@ -998,6 +1120,7 @@ export function runWithCompaction(
       scope: yield* Effect.scope,
       slot: undefined,
       stopped: false,
+      recovered: unsettledCompactionCheckpoint(input.path),
     };
     const initial = input.settings.enabled
       ? yield* preRunMessages(input, background)
@@ -1038,6 +1161,19 @@ export function compactSession(
     )
   )
     return Effect.succeed("compacted");
+  const manual: CommitRequest = { trigger: "manual", resumesRun: false };
+  const pinned = unsettledCompactionCheckpoint(input.path);
+  if (pinned?.workId === input.workId)
+    return recoverCheckpoint(input, input.path, pinned, manual).pipe(
+      Effect.tapError((error) => recordNotice(input, "manual", error)),
+      Effect.flatMap((committed) =>
+        committed === undefined
+          ? recordNotice(input, "manual", undefined).pipe(
+              Effect.as("nothing_to_compact" as const),
+            )
+          : Effect.succeed("compacted" as const),
+      ),
+    );
   return commitCompaction(input, input.path, {
     trigger: "manual",
     resumesRun: false,
