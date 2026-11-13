@@ -3774,6 +3774,57 @@ export function appendCompactionNoticeOwned(
   });
 }
 
+/** One run that ended failed: where, when and its bounded diagnostic. No content. */
+export type FailedRunFact = Readonly<{
+  sessionId: string;
+  workId: string;
+  at: number;
+  diagnostic: string | null;
+}>;
+const decodeFailedRun = Schema.decodeUnknownResult(
+  Schema.Struct({
+    session_id: Schema.String,
+    work_id: Schema.String,
+    timestamp: Schema.Number,
+    diagnostic: Schema.NullOr(Schema.String),
+  }),
+  closed,
+);
+
+/**
+ * The newest failed run terminals, newest first, for operator support. Reads
+ * only the terminal fact: no message, prompt or tool content leaves the store.
+ */
+export function readRecentFailedRuns(
+  owner: SqliteOwner,
+  limit: number,
+): readonly FailedRunFact[] {
+  const bounded = Math.max(1, Math.min(Math.trunc(limit), 50));
+  return owner.sql
+    .exec(
+      `SELECT session_id, work_id, timestamp,
+              json_extract(data_json, '$.diagnostic') AS diagnostic
+         FROM session_entries
+        WHERE type = 'run_terminal'
+          AND json_extract(data_json, '$.outcome') = 'failed'
+        ORDER BY timestamp DESC, sequence DESC
+        LIMIT ?`,
+      bounded,
+    )
+    .toArray()
+    .map((raw) => {
+      const decoded = decodeFailedRun(raw);
+      if (decoded._tag === "Failure")
+        throw unavailable("Stored run terminal is invalid");
+      return {
+        sessionId: decoded.success.session_id,
+        workId: decoded.success.work_id,
+        at: decoded.success.timestamp,
+        diagnostic: decoded.success.diagnostic,
+      };
+    });
+}
+
 /** One finished summary, pinned before its handoff and placement. */
 export type CompactionCheckpointInput = Readonly<{
   sessionId: string;

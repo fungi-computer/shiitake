@@ -59,6 +59,7 @@ import {
   readSessionInboxChanges,
   readSessionSummary,
   readSessionInboxSummary,
+  readRecentFailedRuns,
   type SessionInboxChanges,
 } from "./internal/woodstock/index.js";
 
@@ -745,6 +746,12 @@ export abstract class ShiitakeOwner<
     );
   }
 
+  /** Newest failed run terminals (no content), for operator support reads. */
+  public async readFailedRuns(limit: number) {
+    await this.shiitake();
+    return readRecentFailedRuns(this.named.storage, limit);
+  }
+
   /** Latest inbox revision; read only after the owner has opened. */
   public readInboxRevision(): number {
     return readSessionInboxChanges(
@@ -879,6 +886,9 @@ export abstract class ShiitakeDO<Env> extends DurableObject<Env> {
   }
   protected readInboxChanges(after: number, limit: number) {
     return this.runtimeOwner().readInboxChanges(after, limit);
+  }
+  protected readFailedRuns(limit: number) {
+    return this.runtimeOwner().readFailedRuns(limit);
   }
   protected readInboxRevision() {
     return this.runtimeOwner().readInboxRevision();

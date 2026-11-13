@@ -157,6 +157,30 @@ carries no SQL, transaction or write.
 `string`; `bytes`: `number`; `lastActivityAt`: `number`; `idle`: `boolean`;
 \}\>[]; `next?`: `string`; \}\>\>
 
+##### readFailedRuns()
+
+```ts
+readFailedRuns(limit): Promise<readonly Readonly<{
+  sessionId: string;
+  workId: string;
+  at: number;
+  diagnostic: string | null;
+}>[]>;
+```
+
+Newest failed run terminals (no content), for operator support reads.
+
+###### Parameters
+
+| Parameter | Type     |
+| --------- | -------- |
+| `limit`   | `number` |
+
+###### Returns
+
+`Promise`\<readonly `Readonly`\<\{ `sessionId`: `string`; `workId`: `string`;
+`at`: `number`; `diagnostic`: `string` \| `null`; \}\>[]\>
+
 ##### readInboxRevision()
 
 ```ts

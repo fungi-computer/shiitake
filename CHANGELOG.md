@@ -1,5 +1,20 @@
 # @fungi.computer/shiitake
 
+## 0.15.0
+
+### Minor Changes
+
+- Changes since 0.14.2:
+
+  - feat(hub): add a read-only operator Team readout and CLI printer
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.12.1
+  - @fungi.computer/mycelium@0.3.10
+  - @fungi.computer/knapsack@0.4.11
+
 ## 0.14.2
 
 ### Patch Changes
