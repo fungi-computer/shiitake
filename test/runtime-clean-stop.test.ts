@@ -229,6 +229,76 @@ it.each([false, true])(
   },
 );
 
+it("drains when a foreign instruction load settles after the stop, releasing its late snapshot", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = createCompatibilityRuntimeHost();
+  const faux = fauxModel([]);
+  let markStarted: () => void = () => undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let finishLoad: () => void = () => undefined;
+  const loading = new Promise<void>((resolve) => {
+    finishLoad = resolve;
+  });
+  let released = 0;
+  const agent = await Shiitake.make({
+    store: fixture.owner,
+    runtime: runtime.runtime,
+    extensions: noExtensions,
+    instructions: {
+      load: async () => {
+        markStarted();
+        await loading;
+        return {
+          revision: "late",
+          text: "Late instructions",
+          release: () => {
+            released++;
+          },
+        };
+      },
+    },
+    model: {
+      acquire: () =>
+        Promise.resolve({
+          model: faux.model,
+          stream: faux.stream,
+          retryable: () => false,
+          release: () => Promise.resolve(),
+        }),
+    },
+  });
+  try {
+    const accepted = await agent
+      .session("instructions")
+      .send("Wait", { requestId: "instructions" });
+    const result = runtime.runNext().then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await started;
+    const closing = agent.close();
+    // The host's load answers shortly after the stop, well inside the grace.
+    setTimeout(finishLoad, 20);
+    await expect(closing).resolves.toBeUndefined();
+    expect(await result).toBeUndefined();
+    expect(released).toBe(1);
+    expect(
+      fixture.owner.sql
+        .exec(
+          "SELECT state, recovery_count FROM watchdog_jobs WHERE job_id = ?",
+          accepted.commandId,
+        )
+        .one(),
+    ).toEqual({ state: "queued", recovery_count: 0 });
+    expect(faux.state.callCount).toBe(0);
+  } finally {
+    finishLoad();
+    fixture.close();
+  }
+});
+
 it("does not claim drain while foreign instruction acquisition is still pending", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const runtime = createCompatibilityRuntimeHost();

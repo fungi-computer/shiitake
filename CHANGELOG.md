@@ -1,5 +1,17 @@
 # @fungi.computer/shiitake
 
+## 0.14.1
+
+### Patch Changes
+
+- Changes since 0.14.0:
+
+  - fix(shiitake): prove a stopped run drained only when a foreign load really
+    is pending
+
+- Updated dependencies
+  - @fungi.computer/agar@0.11.0
+
 ## 0.14.0
 
 ### Minor Changes

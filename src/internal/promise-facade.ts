@@ -28,6 +28,7 @@ import type {
   ShiitakeEffectOwner,
   ShiitakeEffectOptions,
 } from "./effect-contracts.js";
+import { acquireInstructionPromise } from "./instruction-acquisition.js";
 import { adaptModelSource } from "./model-acquisition.js";
 
 function boundary(
@@ -266,13 +267,13 @@ function liftOptions(
     runtime,
     extensions: options.extensions,
     instructions: {
-      load: ({ sessionId, commandId }) =>
-        Effect.tryPromise({
-          try: (signal) =>
+      load: ({ sessionId, commandId, track }) =>
+        acquireInstructionPromise(
+          (signal) =>
             options.instructions.load({ sessionId, commandId, signal }),
-          catch: () =>
-            boundary("instructions", "Instruction acquisition failed"),
-        }).pipe(
+          () => boundary("instructions", "Instruction acquisition failed"),
+          track,
+        ).pipe(
           Effect.flatMap((value) => {
             const decoded = decodeInstructions(value);
             return decoded._tag === "Success"

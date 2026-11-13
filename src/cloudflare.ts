@@ -48,6 +48,7 @@ import type {
   ShiitakeEffectOptions,
   ToolSourceEffect,
 } from "./internal/effect-contracts.js";
+import { acquireInstructionPromise } from "./internal/instruction-acquisition.js";
 import { adaptModelSource } from "./internal/model-acquisition.js";
 import { decodeClientSessionId } from "./internal/client-boundary.js";
 import {
@@ -476,17 +477,18 @@ function effectOptions(
     runtime,
     extensions: options.extensions,
     instructions: {
-      load: ({ sessionId, commandId }) =>
-        Effect.tryPromise({
-          try: (signal) =>
+      load: ({ sessionId, commandId, track }) =>
+        acquireInstructionPromise(
+          (signal) =>
             options.instructions.load({ sessionId, commandId, signal }),
-          catch: () =>
+          () =>
             new ShiitakeError(
               "instructions",
               "rejected",
               "Instruction acquisition failed",
             ),
-        }),
+          track,
+        ),
     },
     model: adaptModelSource(options.model),
   };

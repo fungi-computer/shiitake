@@ -99,7 +99,15 @@ export type ModelSourceEffect = Readonly<{
 export type InstructionSourceEffect = Readonly<{
   /** Load the session's bounded instruction snapshot. */
   load: (
-    input: Readonly<{ sessionId: string; commandId: string }>,
+    input: Readonly<{
+      sessionId: string;
+      commandId: string;
+      /**
+       * Hand over a foreign Promise this load left pending when it was
+       * interrupted, so the runtime can wait for it before claiming a drain.
+       */
+      track?: (pending: Promise<void>) => void;
+    }>,
   ) => Effect.Effect<InstructionSnapshot, ShiitakeError, Scope.Scope>;
 }>;
 

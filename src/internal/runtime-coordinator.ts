@@ -12,7 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Latch from "effect/Latch";
 import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
-import type { RunCustody } from "./run-scope.js";
+import { runFinalizerGraceMs, type RunCustody } from "./run-scope.js";
 
 import type { AgentRunningWork } from "../client.js";
 import { readSessionPhase } from "./session-status.js";
@@ -198,11 +198,21 @@ export function openRuntimeCoordinator(
               Effect.succeed(undefined))
             : Effect.succeed(undefined),
         isDrained: (job) =>
-          Effect.sync(() => {
-            if (job.lane === extensionTimerLane) return true;
+          Effect.suspend(() => {
+            if (job.lane === extensionTimerLane) return Effect.succeed(true);
             const custody = runCustody.get(job.jobId);
             runCustody.delete(job.jobId);
-            return custody?.released === true;
+            if (custody?.released !== true) return Effect.succeed(false);
+            // A foreign load the interruption left pending proves a drain only
+            // once it settles, within the same grace a finalizer gets.
+            return custody.pending.length === 0
+              ? Effect.succeed(true)
+              : Effect.raceFirst(
+                  Effect.promise(() => Promise.all(custody.pending)).pipe(
+                    Effect.as(true),
+                  ),
+                  Effect.sleep(runFinalizerGraceMs).pipe(Effect.as(false)),
+                );
           }),
         execute: (job, attempt) =>
           job.lane === extensionTimerLane
@@ -234,7 +244,12 @@ export function openRuntimeCoordinator(
                   );
                   const custody: RunCustody = {
                     isStopping: () => lifecycleState !== "open",
-                    released: false,
+                    pending: [],
+                    // A run owns nothing foreign until it acquires it, so an
+                    // interruption before then leaves nothing undrained. Each
+                    // foreign acquisition (instructions, model, tools) and
+                    // finalizer reports its own failure to drain.
+                    released: true,
                   };
                   if (runningWork.kind === "session") {
                     activeSessions.add(job.queue);

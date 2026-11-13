@@ -61,6 +61,9 @@ export const runFinalizerGraceMs = 1_000;
 /** One execution's cleanup evidence, observed only after its fiber has ended. */
 export type RunCustody = {
   readonly isStopping: () => boolean;
+  /** Foreign Promises an interruption left pending; drain waits for them. */
+  readonly pending: Promise<void>[];
+  /** False once any foreign acquisition or release of this run failed to drain. */
   released: boolean;
 };
 
@@ -248,7 +251,12 @@ export function runAcceptedCommand(
 ) {
   return Effect.scoped(
     Effect.gen(function* () {
+      // A Promise host source may outlive an interruption; its adapter hands
+      // the pending load to the custody and releases any late snapshot.
       const instructions = yield* options.instructions.load({
+        track: (pending) => {
+          custody.pending.push(pending);
+        },
         sessionId: prepared.command.sessionId,
         commandId: prepared.command.entry.workId,
       });
@@ -263,8 +271,6 @@ export function runAcceptedCommand(
           ),
         );
       // Preparatory ports have returned and instruction release is owned.
-      // An interrupted foreign acquisition before this point proves no drain.
-      custody.released = true;
       const acquired = yield* acquireRunModel(options, prepared, custody);
       const tools = yield* acquiredTools(
         options,
@@ -507,7 +513,6 @@ export function runAcceptedCompaction(
 ): Effect.Effect<ManualCompactionOutcome, ShiitakeError> {
   return Effect.scoped(
     Effect.gen(function* () {
-      custody.released = true;
       const acquired = yield* acquireRunModel(options, prepared, custody);
       const entry = prepared.command.entry;
       return yield* compactSession({
