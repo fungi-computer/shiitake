@@ -1628,3 +1628,151 @@ it("requires host request ownership before advertising send and recall", async (
   );
   expect(advertised).toEqual([false, false]);
 });
+
+it("agents.status shows an Agent that ended its turn with work still assigned, apart from working, waiting and finished ones", async () => {
+  const goalSlot = (
+    state: "active" | "paused",
+    pauseCause: { kind: string; detail: string | null } | null,
+  ) => ({
+    status: "running" as const,
+    revision: "r",
+    value: {
+      goal: {
+        revision: "g",
+        objective: "Land the mesh lane",
+        state,
+        startedAt: 1,
+        pauseCause,
+      },
+      ended: [],
+      omitted: 0,
+    },
+  });
+  const person = { agentId: "director", sessionId: "director-session" };
+  const snapshots = {
+    acked: {
+      parent: { ...person, name: "director" },
+      extensions: { "botanical-session-goal": goalSlot("active", null) },
+    },
+    blocked: {
+      parent: { ...person, name: "director" },
+      extensions: {
+        "botanical-session-goal": goalSlot("paused", {
+          kind: "blocked",
+          detail: null,
+        }),
+      },
+    },
+    busy: { parent: { ...person, name: "director" } },
+    asks: {
+      parent: { ...person, name: "director" },
+      attention: [
+        {
+          id: "ask-1",
+          kind: "question",
+          summary: "Which branch?",
+          since: 1,
+          extensionId: "botanical-session-question",
+          inbox: false,
+          waitingOn: { ...person, name: "director" },
+        },
+      ],
+    },
+    done: { parent: { ...person, name: "director" } },
+    stranger: {
+      parent: { agentId: "other", sessionId: "other-session", name: "other" },
+      extensions: { "botanical-session-goal": goalSlot("active", null) },
+    },
+  } satisfies Record<string, Partial<SessionSnapshot>>;
+  const rowState = {
+    acked: "done",
+    blocked: "done",
+    busy: "running",
+    asks: "done",
+    done: "done",
+    stranger: "done",
+  } as const;
+  const agent: ShiitakeAgent = {
+    createSession: () => Promise.reject(new Error("unused")),
+    deleteSession: () => Promise.reject(new Error("unused")),
+    listSessions: () =>
+      Promise.resolve({
+        sessions: Object.entries(rowState).map(([sessionId, state]) => ({
+          sessionId,
+          createdAt: 1,
+          lastActivityAt: 2,
+          settledAt: 2,
+          title: sessionId,
+          state,
+        })),
+        next: undefined,
+      }),
+    extensions: {
+      list: () => Promise.reject(new Error("unused")),
+      resume: () => Promise.reject(new Error("unused")),
+      call: () => Promise.reject(new Error("unused")),
+    },
+    session: (sessionId) => ({
+      ...testSession(),
+      read: () =>
+        Promise.resolve({
+          ...baseline,
+          sessionId,
+          ...Object.entries(snapshots).find(([id]) => id === sessionId)?.[1],
+        }),
+    }),
+    close: () => Promise.resolve(),
+  };
+  let status: unknown;
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      open: () => Promise.resolve({ agent, release: () => Promise.resolve() }),
+    },
+    async (tools) => {
+      if (tools.status === undefined) throw new Error("status missing");
+      status = await tools.status({ agentId: "worker" });
+      return null;
+    },
+    "director-session",
+  );
+  expect(status).toEqual({
+    truncated: false,
+    sessions: [
+      {
+        sessionId: "acked",
+        title: "acked",
+        lastActivityAt: 2,
+        state: "stopped_with_work_assigned",
+        objective: "Land the mesh lane",
+      },
+      {
+        sessionId: "blocked",
+        title: "blocked",
+        lastActivityAt: 2,
+        state: "stopped_with_work_assigned",
+        objective: "Land the mesh lane",
+        pausedBy: "blocked",
+      },
+      {
+        sessionId: "busy",
+        title: "busy",
+        lastActivityAt: 2,
+        state: "working",
+      },
+      {
+        sessionId: "asks",
+        title: "asks",
+        lastActivityAt: 2,
+        state: "waiting",
+        waitingOn: "director",
+      },
+      {
+        sessionId: "done",
+        title: "done",
+        lastActivityAt: 2,
+        state: "finished",
+      },
+    ],
+  });
+});

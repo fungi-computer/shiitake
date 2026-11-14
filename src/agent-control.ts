@@ -256,6 +256,51 @@ const sessionsOutput = z.strictObject({
   sessions: z.array(sessionSummaryOutput),
   next: pageCursor.nullable(),
 });
+/**
+ * The goal extension's Session slot, read only for what a director needs. The
+ * id is pinned to the extension's own contract by a test in shiitake-extensions.
+ */
+const goalExtensionId = "botanical-session-goal";
+const goalSlotValue = z.looseObject({
+  goal: z
+    .looseObject({
+      objective: z.string(),
+      state: z.enum(["active", "paused"]),
+      pauseCause: z.looseObject({ kind: z.string() }).nullable(),
+    })
+    .nullable(),
+});
+/** Most Sessions one `agents.status` reads, so a long history stays cheap. */
+const statusSessionLimit = 32;
+/** Most Sessions one `agents.status` opens to find the directed ones. */
+const statusReadLimit = 128;
+/** Wire schema for one directed Session's state. */
+export const statusRow = z.strictObject({
+  sessionId: id,
+  title: z.string(),
+  lastActivityAt: z.number(),
+  state: z.enum([
+    "working",
+    "stopped_with_work_assigned",
+    "waiting",
+    "finished",
+    "failed",
+  ]),
+  /** The work still assigned when the turn ended. */
+  objective: z.string().exactOptional(),
+  /** Why an assigned Session stopped: a paused goal's typed cause. */
+  pausedBy: z.string().exactOptional(),
+  /** Who a waiting Session waits on: an Agent's name, or a person. */
+  waitingOn: z.string().exactOptional(),
+});
+/** Wire schema for `agents.status`. */
+export const statusOutput = z.strictObject({
+  sessions: z.array(statusRow).max(statusSessionLimit),
+  /** True when more Sessions exist than this call read. */
+  truncated: z.boolean(),
+});
+/** Bounded, owner-decided state of the Sessions the caller delegated. */
+export type AgentControlStatus = z.infer<typeof statusOutput>;
 const terminalIdentityOutput = z.strictObject({
   commandId: id,
   outcome: z.enum(["completed", "cancelled", "failed", "interrupted"]),
@@ -580,6 +625,44 @@ async function withAgent<Value>(
   }
 }
 
+/** Classify one directed Session from its owner row and snapshot. */
+function directedStatus(
+  row: Extract<
+    Awaited<ReturnType<ShiitakeAgent["listSessions"]>>["sessions"][number],
+    { title: string }
+  >,
+  snapshot: SessionSnapshot,
+): z.infer<typeof statusRow> {
+  const base = {
+    sessionId: row.sessionId,
+    title: row.title,
+    lastActivityAt: row.lastActivityAt,
+  };
+  const slot = snapshot.extensions[goalExtensionId];
+  const goal =
+    slot?.status === "running"
+      ? goalSlotValue.safeParse(slot.value).data?.goal
+      : undefined;
+  const person = snapshot.attention.find((item) => item.inbox !== false);
+  const routed = snapshot.attention.find((item) => item.waitingOn);
+  if (person === undefined && routed?.waitingOn !== undefined)
+    return { ...base, state: "waiting", waitingOn: routed.waitingOn.name };
+  if (person !== undefined)
+    return { ...base, state: "waiting", waitingOn: "a person" };
+  if (row.state === "running") return { ...base, state: "working" };
+  if (row.state === "errored") return { ...base, state: "failed" };
+  if (goal === null || goal === undefined)
+    return { ...base, state: "finished" };
+  const assigned = {
+    ...base,
+    state: "stopped_with_work_assigned" as const,
+    objective: goal.objective,
+  };
+  return goal.state === "paused" && goal.pauseCause !== null
+    ? { ...assigned, pausedBy: goal.pauseCause.kind }
+    : assigned;
+}
+
 /** Await one exact durable terminal without opening a transcript observation. */
 export async function waitForAgentSettlement(
   session: ShiitakeSession,
@@ -856,6 +939,52 @@ export function createAgentControlSource(
             );
           },
         });
+      if (session !== undefined)
+        requestOperations.status = Mycelium.operation({
+          replay: "safe",
+          description: `Say what each Session you delegated to one Agent is doing now: working, waiting (with waitingOn naming the Agent or person), stopped_with_work_assigned (it ended its turn while its goal is still open or paused; objective names the work and pausedBy a paused goal's cause), finished or failed. Only Sessions whose first delegator is this Session are listed, among the ${String(statusReadLimit)} most relevant, at most ${String(statusSessionLimit)}; truncated reports more. Follow a stopped Session up with agents.send or agents.goal.`,
+          input: agentInput,
+          output: statusOutput,
+          execute: async ({ agentId }, context) =>
+            statusOutput.parse(
+              await withAgent(
+                directory,
+                "status",
+                agentId,
+                context.signal,
+                async (agent) => {
+                  const rows: z.infer<typeof statusRow>[] = [];
+                  let after: string | undefined;
+                  let truncated = false;
+                  let reads = 0;
+                  do {
+                    const page = await agent.listSessions(after);
+                    for (const row of page.sessions) {
+                      if (row.state === "unavailable") continue;
+                      if (reads === statusReadLimit) {
+                        truncated = true;
+                        break;
+                      }
+                      reads += 1;
+                      const snapshot = await agent
+                        .session(row.sessionId)
+                        .read({ limit: 1 });
+                      if (snapshot.parent?.sessionId !== session.sessionId)
+                        continue;
+                      if (rows.length === statusSessionLimit) {
+                        truncated = true;
+                        break;
+                      }
+                      rows.push(directedStatus(row, snapshot));
+                    }
+                    after = truncated ? undefined : page.next;
+                    context.signal.throwIfAborted();
+                  } while (after !== undefined);
+                  return { sessions: rows, truncated };
+                },
+              ),
+            ),
+        });
       if (goal !== undefined)
         requestOperations.goal = Mycelium.operation({
           replay: "unsafe",
@@ -963,7 +1092,7 @@ export function createAgentControlSource(
         });
       return Promise.resolve({
         snapshot: {
-          version: "shiitake-agent-control-v9",
+          version: "shiitake-agent-control-v10",
           modules: [
             Mycelium.module({
               id: "shiitake-agent-control",

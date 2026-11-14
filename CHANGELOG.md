@@ -1,5 +1,15 @@
 # @fungi.computer/shiitake
 
+## 0.18.0
+
+### Minor Changes
+
+- Changes since 0.17.1:
+
+  - fix(shiitake): document the agents.status schemas
+  - feat(shiitake): agents.status lists which directed Agents stopped with work
+    assigned
+
 ## 0.17.1
 
 ### Patch Changes

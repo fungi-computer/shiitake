@@ -201,6 +201,16 @@ Outcome of authenticated exact-delegator goal control.
 
 ---
 
+### AgentControlStatus
+
+```ts
+type AgentControlStatus = z.infer<typeof statusOutput>;
+```
+
+Bounded, owner-decided state of the Sessions the caller delegated.
+
+---
+
 ### ArchiveRefusalReason
 
 ```ts
@@ -535,6 +545,68 @@ const goalControlOutput: ZodDiscriminatedUnion<
 ```
 
 Wire schema for a delegator's goal-control result or explicit refusal.
+
+---
+
+### statusRow
+
+```ts
+const statusRow: ZodObject<
+  {
+    sessionId: ZodString;
+    title: ZodString;
+    lastActivityAt: ZodNumber;
+    state: ZodEnum<{
+      working: "working";
+      failed: "failed";
+      waiting: "waiting";
+      stopped_with_work_assigned: "stopped_with_work_assigned";
+      finished: "finished";
+    }>;
+    objective: ZodExactOptional<ZodString>;
+    pausedBy: ZodExactOptional<ZodString>;
+    waitingOn: ZodExactOptional<ZodString>;
+  },
+  $strict
+>;
+```
+
+Wire schema for one directed Session's state.
+
+---
+
+### statusOutput
+
+```ts
+const statusOutput: ZodObject<
+  {
+    sessions: ZodArray<
+      ZodObject<
+        {
+          sessionId: ZodString;
+          title: ZodString;
+          lastActivityAt: ZodNumber;
+          state: ZodEnum<{
+            working: "working";
+            failed: "failed";
+            waiting: "waiting";
+            stopped_with_work_assigned: "stopped_with_work_assigned";
+            finished: "finished";
+          }>;
+          objective: ZodExactOptional<ZodString>;
+          pausedBy: ZodExactOptional<ZodString>;
+          waitingOn: ZodExactOptional<ZodString>;
+        },
+        $strict
+      >
+    >;
+    truncated: ZodBoolean;
+  },
+  $strict
+>;
+```
+
+Wire schema for `agents.status`.
 
 ---
 
