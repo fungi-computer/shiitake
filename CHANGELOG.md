@@ -1,5 +1,21 @@
 # @fungi.computer/shiitake
 
+## 0.16.0
+
+### Minor Changes
+
+- Changes since 0.15.0:
+
+  - feat(computer): ten-minute commands and detached processes Agents can read,
+    wait on and stop
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.13.0
+  - @fungi.computer/mycelium@0.3.11
+  - @fungi.computer/knapsack@0.4.12
+
 ## 0.15.0
 
 ### Minor Changes

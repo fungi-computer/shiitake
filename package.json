@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Shiitake by Fungi: open-source AI agents with durable conversations, tools and permissions checked by the system.",
   "type": "module",

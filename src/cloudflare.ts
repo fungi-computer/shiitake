@@ -13,6 +13,7 @@ import type { HostMetaOptions } from "./internal/host-meta.js";
 import { DurableObject } from "cloudflare:workers";
 import type {
   CapabilitySource,
+  ExecutionOptions,
   ModuleRegistration,
   Sandbox,
 } from "@fungi.computer/mycelium";
@@ -120,6 +121,8 @@ export type CloudflareShiitakeTools = Readonly<{
   modules?: readonly ModuleRegistration[];
   sources?: readonly CapabilitySource[];
   sandbox: Sandbox;
+  /** Host-owned limit for one `execute` run, such as its total deadline. */
+  execution?: ExecutionOptions;
   /**
    * The Agent-wide access defaults for every tool of the run, as data. A
    * Session's grants the host delivered with the owner's `grants.deliver` override
@@ -459,12 +462,15 @@ function configuredTools(
   tools: CloudflareShiitakeOptions["tools"],
 ): ToolSourceEffect | undefined {
   if (tools === undefined || !("sandbox" in tools)) return undefined;
-  return {
+  const configured = {
     modules: tools.modules ?? [],
     sources: tools.sources ?? [],
     sandbox: fromTypedSandbox(tools.sandbox),
     access: tools.access ?? {},
   };
+  return tools.execution === undefined
+    ? configured
+    : { ...configured, execution: tools.execution };
 }
 
 function effectOptions(

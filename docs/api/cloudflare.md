@@ -368,6 +368,7 @@ type CloudflareShiitakeTools = Readonly<{
   modules?: readonly ModuleRegistration[];
   sources?: readonly CapabilitySource[];
   sandbox: Sandbox;
+  execution?: ExecutionOptions;
   access?: ToolAccess;
 }>;
 ```
