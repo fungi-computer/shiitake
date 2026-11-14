@@ -42,6 +42,7 @@ import { decodeWoodstockCursor } from "./cursor.js";
 import { openProgress, openToolProgress } from "./progress.js";
 import {
   sameStoredSessionEntry,
+  withoutPartial,
   type LiveRetryEvent,
   type StoredSessionEntry,
 } from "./session-entry.js";
@@ -67,6 +68,7 @@ import {
   type EnqueueAcceptedWork,
   type AppendCompactionInput,
   type PreparedSessionRun,
+  type RecoveredPartial,
   type RunContract,
   type RecordAcceptedCancellation,
   type SessionQueueHead,
@@ -962,7 +964,11 @@ function recordMessageStart(
             throw conflict("Mule message-start identity conflicts");
           return "replay" as const;
         }
-        if (!sameStoredSessionEntry(existing.entry, entry))
+        // A flushed partial is progress on the same message, not a new identity.
+        if (
+          existing.entry.kind !== "message_start" ||
+          !sameStoredSessionEntry(withoutPartial(existing.entry), entry)
+        )
           throw conflict("Mule message-start identity conflicts");
         return "replay" as const;
       }
@@ -1239,10 +1245,14 @@ export function openMuleRecorder(
   accepted: AcceptedCommand,
   contract: RunContract,
   model: Readonly<{ provider: string; id: string }>,
+  recoveredPartial?: RecoveredPartial,
 ): Effect.Effect<MuleRecorder, never, Scope.Scope> {
   return Effect.gen(function* () {
-    const progress = yield* openProgress(owner, accepted, (event) =>
-      recordMessageEnd(owner, accepted, event, model),
+    const progress = yield* openProgress(
+      owner,
+      accepted,
+      (event) => recordMessageEnd(owner, accepted, event, model),
+      recoveredPartial,
     );
     const toolProgress = yield* openToolProgress(owner, accepted);
     const record = (

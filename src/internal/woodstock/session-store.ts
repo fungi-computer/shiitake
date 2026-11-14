@@ -570,6 +570,15 @@ export type PreparedSessionRun = Readonly<{
   entryDelivery: "new" | "replay";
   resume: MuleResume | undefined;
   abnormalTerminal: "failed" | "cancelled" | undefined;
+  /** Reply text a crashed attempt had flushed; shown until the retry streams. */
+  recoveredPartial: RecoveredPartial | undefined;
+}>;
+
+/** The newest unfinished reply a lost reader left on this work. */
+export type RecoveredPartial = Readonly<{
+  messageId: string;
+  text: string;
+  offset: number;
 }>;
 
 export type StoredSessionCommandEntry = Extract<
@@ -3612,10 +3621,10 @@ export function prepareSessionRun(
       throw unavailable(
         "Accepted Session command disagrees with its admission",
       );
-    // The current claim owns the command. Empty placeholders from a lost
-    // reader carry no recoverable text and must not survive as live progress.
-    owner.sql.exec(
-      "DELETE FROM session_entries WHERE session_id = ? AND work_id = ? AND state = 'streaming' AND type = 'message_start'",
+    // The current claim owns the command. Placeholders from a lost reader are
+    // private; keep only the newest one that flushed reply text.
+    const recoveredPartial = claimStreamingPlaceholders(
+      owner,
       input.sessionId,
       command.entry.workId,
     );
@@ -3650,8 +3659,65 @@ export function prepareSessionRun(
       entryDelivery,
       resume: recoverAssistantTurn(work),
       abnormalTerminal: abnormalTerminal(work),
+      recoveredPartial,
     });
   });
+}
+
+/**
+ * Drop every streaming placeholder a lost reader left on one work except the
+ * newest that holds flushed reply text, and return that text. The kept row is
+ * deleted with the rest when the work settles.
+ */
+function claimStreamingPlaceholders(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+): RecoveredPartial | undefined {
+  const placeholders = readSessionEntriesForWork(
+    owner,
+    sessionId,
+    workId,
+  ).filter(({ state }) => state === "streaming");
+  const kept = [...placeholders]
+    .reverse()
+    .find(
+      ({ entry }) =>
+        entry.kind === "message_start" &&
+        entry.role === "assistant" &&
+        (entry.partial?.text.length ?? 0) > 0,
+    );
+  for (const { id } of placeholders)
+    if (id !== kept?.id)
+      owner.sql.exec(
+        "DELETE FROM session_entries WHERE session_id = ? AND id = ?",
+        sessionId,
+        id,
+      );
+  return kept?.entry.kind === "message_start" && kept.entry.partial
+    ? { messageId: kept.id, ...kept.entry.partial }
+    : undefined;
+}
+
+/** Flush the live reply's bounded tail into its private placeholder row. */
+export function recordStreamingPartialOwned(
+  owner: SqliteOwner,
+  input: Readonly<{
+    sessionId: string;
+    entry: Extract<StoredSessionEntry, { kind: "message_start" }>;
+    text: string;
+    offset: number;
+  }>,
+): void {
+  owner.sql.exec(
+    "UPDATE session_entries SET data_json = ? WHERE session_id = ? AND id = ? AND state = 'streaming'",
+    encodeStoredSessionEntry({
+      ...input.entry,
+      partial: { text: input.text, offset: input.offset },
+    }),
+    input.sessionId,
+    input.entry.message.value,
+  );
 }
 
 /**

@@ -299,6 +299,8 @@ const StoredToolResultSchema = Schema.Struct({
   terminate: Schema.optional(Schema.Boolean),
 });
 const common = { workId: boundedId };
+/** Stored partial reply bound: the live tail's 64 KiB plus one chunk of slack. */
+const partialTextBytes = 96 * 1024;
 
 /** What started one compaction: the user, the context threshold, or an overflow. */
 const CompactionTriggerSchema = Schema.Literals([
@@ -419,6 +421,26 @@ const StoredSessionEntrySchema = Schema.Union([
     turn: CausalIdentitySchema,
     message: CausalIdentitySchema,
     role: Schema.Literals(["assistant", "system", "toolResult", "user"]),
+    /**
+     * The newest reply text a live stream had flushed, so a crash keeps it.
+     * Absent on rows written before partial text was stored and until the
+     * first flush. `offset` counts text dropped before the bounded tail.
+     */
+    partial: Schema.optionalKey(
+      Schema.Struct({
+        text: Schema.String.pipe(
+          Schema.check(
+            Schema.makeFilter(
+              (value) => encoder.encode(value).byteLength <= partialTextBytes,
+            ),
+          ),
+        ),
+        offset: Schema.Number.pipe(
+          Schema.check(Schema.isInt()),
+          Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+        ),
+      }),
+    ),
   }),
   Schema.Struct({
     ...common,
@@ -576,6 +598,20 @@ export type StoredSessionEntry = Schema.Schema.Type<
 >;
 
 const equivalentEntry = Schema.toEquivalence(StoredSessionEntrySchema);
+
+/** A placeholder without its flushed text: the message's identity alone. */
+export function withoutPartial(
+  entry: Extract<StoredSessionEntry, { kind: "message_start" }>,
+): StoredSessionEntry {
+  return {
+    kind: entry.kind,
+    workId: entry.workId,
+    run: entry.run,
+    turn: entry.turn,
+    message: entry.message,
+    role: entry.role,
+  };
+}
 
 /** Compare the retained representation, including omission of undefined keys. */
 export function sameStoredSessionEntry(

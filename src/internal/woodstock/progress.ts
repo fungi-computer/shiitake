@@ -12,7 +12,11 @@ import type {
 import { ShiitakeError } from "../../errors.js";
 import type { SqliteOwner } from "../contracts.js";
 import { publishOwnerObservation } from "../observation-kernel.js";
-import type { AcceptedCommand } from "./session-store.js";
+import {
+  recordStreamingPartialOwned,
+  type AcceptedCommand,
+  type RecoveredPartial,
+} from "./session-store.js";
 
 type ProcessProgress = {
   workId: string;
@@ -26,12 +30,16 @@ type Tail = {
   bytes: number;
 };
 type LiveMessage = {
+  /** Text a crashed attempt flushed; the retry's first delta replaces it. */
+  recovered?: true;
   messageId: string;
   revision: number;
   text: Tail;
   thinking: Tail;
 };
 const tailBytes = 65_536;
+/** Reply text reaches SQLite at most this often, once per message update. */
+const partialFlushMs = 250;
 const chunkUnits = 2048;
 const encoder = new TextEncoder();
 const emptyTail = (): Tail => ({ chunks: [], length: 0, bytes: 0 });
@@ -295,19 +303,38 @@ export type ProgressController = Readonly<{
 }>;
 
 /**
- * Keep live model progress in the current process only.
+ * Keep live model progress in the current process, and flush the reply text.
  *
- * Woodstock durably owns one empty assistant placeholder and the exact Pi
- * message at completion. Updates deliberately perform no SQLite writes.
+ * Woodstock durably owns one assistant placeholder and the exact Pi message at
+ * completion. A text update rewrites only that placeholder's bounded tail, at
+ * most once per 250 ms (the cadence the deferred snapshot design accepted), so
+ * a crash keeps all but the last quarter second of the reply. Thinking and
+ * tool tails stay process-local. `recovered` is the text a crashed attempt had
+ * flushed: it is shown as the unfinished reply until the retry streams.
  */
 export function openProgress(
   owner: SqliteOwner,
   accepted: AcceptedCommand,
   complete: (event: ProgressMessageEnd) => Effect.Effect<void, ShiitakeError>,
+  recovered?: RecoveredPartial,
 ): Effect.Effect<ProgressController, never, Scope.Scope> {
   return Effect.gen(function* () {
     const current = yield* openProcessProgress(owner, accepted);
+    if (recovered !== undefined && current.value === null) {
+      const text = emptyTail();
+      text.length = recovered.offset;
+      appendTail(text, recovered.text);
+      current.value = {
+        recovered: true,
+        messageId: recovered.messageId,
+        revision: 1,
+        text,
+        thinking: emptyTail(),
+      };
+      publishOwnerObservation(owner, accepted.sessionId, "progress");
+    }
     let started: ProgressMessageStart | undefined;
+    let flushedAt = 0;
     let publishedLength = 0;
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
     const cancelFlush = () => {
@@ -337,7 +364,8 @@ export function openProgress(
         Effect.sync(() => {
           cancelFlush();
           started = event;
-          current.value = null;
+          flushedAt = 0;
+          if (current.value?.recovered !== true) current.value = null;
           publishedLength = 0;
         }),
       update: (event) =>
@@ -360,8 +388,9 @@ export function openProgress(
             delta.delta.length === 0
           )
             return Effect.void;
-          const first = current.value === null;
-          const value = current.value ?? {
+          const first =
+            current.value === null || current.value.recovered === true;
+          const value = (first ? null : current.value) ?? {
             messageId: event.message.value,
             revision: 0,
             text: emptyTail(),
@@ -375,11 +404,39 @@ export function openProgress(
           current.value = value;
           const length = value.text.length + value.thinking.length;
           // Coalesce tiny tokens, but flush a paused provider within 100 ms.
-          // One scope-owned timer holds no reply text and never writes SQLite.
+          // One scope-owned timer holds no reply text; it only publishes.
           if (first || length - publishedLength >= 4096) {
             publish();
           } else flushTimer ??= setTimeout(publish, 100);
-          return Effect.void;
+          const now = Date.now();
+          if (delta.type !== "text_delta" || now - flushedAt < partialFlushMs)
+            return Effect.void;
+          flushedAt = now;
+          return Effect.try({
+            try: () => {
+              recordStreamingPartialOwned(owner, {
+                sessionId: accepted.sessionId,
+                entry: {
+                  kind: "message_start",
+                  workId: accepted.commandId,
+                  run: messageStart.run,
+                  turn: messageStart.turn,
+                  message: messageStart.message,
+                  role: "assistant",
+                },
+                text: tailAfter(value.text, tailOffset(value.text)),
+                offset: tailOffset(value.text),
+              });
+            },
+            catch: (error) =>
+              new ShiitakeError(
+                "store",
+                "rejected",
+                "Native Session store operation failed",
+                undefined,
+                error,
+              ),
+          });
         }),
       terminal: (event) => clear.pipe(Effect.andThen(complete(event))),
     });

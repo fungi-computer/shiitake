@@ -2,7 +2,12 @@ import type { AssistantMessage, MuleEvent } from "@fungi.computer/mule/effect";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 
-import type { AcceptedCommand } from "../src/internal/woodstock/session-store.js";
+import {
+  appendSessionEntry,
+  prepareSessionStore,
+  readSessionEntriesForWork,
+  type AcceptedCommand,
+} from "../src/internal/woodstock/session-store.js";
 import { openObservationKernel } from "../src/internal/observation-kernel.js";
 import {
   openProgress,
@@ -66,14 +71,38 @@ const updated: Extract<MuleEvent, { type: "message_update" }> = {
   },
 };
 
-it("keeps model progress process-local without per-update SQLite writes", async () => {
+it("flushes reply text to its placeholder at a bounded cadence, nothing per token", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   const kernel = openObservationKernel(fixture.owner);
   const observation = await Effect.runPromise(
     kernel.register(accepted.sessionId),
   );
   try {
+    prepareSessionStore(fixture.owner);
+    appendSessionEntry(fixture.owner, {
+      sessionId: accepted.sessionId,
+      id: message.value,
+      state: "streaming",
+      entry: {
+        kind: "message_start",
+        workId: accepted.commandId,
+        run,
+        turn,
+        message,
+        role: "assistant",
+      },
+    });
     const writesBefore = fixture.ownerWrites();
+    const flushed = () => {
+      const row = readSessionEntriesForWork(
+        fixture.owner,
+        accepted.sessionId,
+        accepted.commandId,
+      ).find(({ state }) => state === "streaming");
+      return row?.entry.kind === "message_start"
+        ? row.entry.partial
+        : undefined;
+    };
     await Effect.runPromise(
       Effect.scoped(
         Effect.gen(function* () {
@@ -92,7 +121,10 @@ it("keeps model progress process-local without per-update SQLite writes", async 
             text: "partial answer",
           });
           expect(yield* observation.pollSignal).toBe("progress");
-          expect(fixture.ownerWrites()).toBe(writesBefore);
+          // The first text reaches the placeholder at once.
+          expect(flushed()).toEqual({ text: "partial answer", offset: 0 });
+          const writesAfterFirst = fixture.ownerWrites();
+          expect(writesAfterFirst).toBeGreaterThan(writesBefore);
           const initial = readProcessProgressDelta(
             fixture.owner,
             accepted.sessionId,
@@ -139,6 +171,9 @@ it("keeps model progress process-local without per-update SQLite writes", async 
             ),
           ).toMatchObject({ text: { offset: 14, append: "!" } });
           expect(yield* observation.pollSignal).toBeUndefined();
+          // Inside the 250 ms window the second token is not written.
+          expect(fixture.ownerWrites()).toBe(writesAfterFirst);
+          expect(flushed()?.text).toBe("partial answer");
           // A provider may pause before filling the next wire chunk. The
           // small append must still become visible without another token.
           yield* Effect.promise(
@@ -169,7 +204,25 @@ it("keeps model progress process-local without per-update SQLite writes", async 
               position,
             ),
           ).toBeUndefined();
-          expect(fixture.ownerWrites()).toBe(writesBefore);
+          // The stored tail keeps the live tail's bound, however large the reply.
+          yield* Effect.promise(
+            () => new Promise<void>((resolve) => setTimeout(resolve, 260)),
+          );
+          yield* progress.update({
+            ...updated,
+            event: {
+              type: "text_delta",
+              contentIndex: 0,
+              delta: "end",
+              partial,
+            },
+          });
+          const stored = flushed();
+          expect(
+            new TextEncoder().encode(stored?.text).byteLength,
+          ).toBeLessThanOrEqual(98_304);
+          expect(stored?.text.endsWith("end")).toBe(true);
+          expect(stored?.offset).toBeGreaterThan(0);
         }),
       ),
     );

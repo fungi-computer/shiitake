@@ -292,6 +292,7 @@ export function runAcceptedCommand(
         accepted,
         executionContract,
         acquired.model,
+        prepared.recoveredPartial,
       );
       const controlMessages = (
         delivery: "steer" | "followUp",

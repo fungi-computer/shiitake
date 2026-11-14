@@ -1,5 +1,14 @@
 # @fungi.computer/shiitake
 
+## 0.17.0
+
+### Minor Changes
+
+- Changes since 0.16.2:
+
+  - fix(shiitake): keep the partial text bound private
+  - feat(shiitake): keep an Agent's partial reply text across a crash
+
 ## 0.16.2
 
 ### Patch Changes
