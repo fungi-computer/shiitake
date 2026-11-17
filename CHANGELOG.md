@@ -1,5 +1,20 @@
 # @fungi.computer/shiitake
 
+## 0.20.0
+
+### Minor Changes
+
+- Changes since 0.19.2:
+
+  - feat(apps): require one host-derived caller scope
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.20.0
+  - @fungi.computer/mycelium@0.4.3
+  - @fungi.computer/knapsack@0.4.16
+
 ## 0.19.2
 
 ### Patch Changes

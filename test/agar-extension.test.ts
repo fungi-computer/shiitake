@@ -15,6 +15,7 @@ import {
 } from "@fungi.computer/agar/backend-definition";
 
 const caller = {
+  scope: { kind: "standalone" as const, tenant: "default" },
   computerId: null,
   actor: { kind: "agent" as const, agentId: "agent_fixture" },
 };
