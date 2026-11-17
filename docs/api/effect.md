@@ -670,6 +670,54 @@ failed.
 `Effect`\< \| \{ `agentId`: `string`; `sessionId`: `string`; `name`: `string`;
 \} \| `null`, [`ShiitakeError`](index.md#shiitakeerror), `never`\>
 
+---
+
+### readWoodstockStoreProtocol()
+
+```ts
+function readWoodstockStoreProtocol(
+  owner,
+): "fresh" | "v0" | "upgradable" | "newer" | "unmarked";
+```
+
+Read only the schema marker: "v0" is the current one, "upgradable" a store this
+build brings to it in place, "newer" a future marker, and "unmarked" anything
+else that already holds Sessions. Refused stores stay untouched.
+
+#### Parameters
+
+| Parameter | Type                                  |
+| --------- | ------------------------------------- |
+| `owner`   | [`SqliteOwner`](index.md#sqliteowner) |
+
+#### Returns
+
+`"fresh"` \| `"v0"` \| `"upgradable"` \| `"newer"` \| `"unmarked"`
+
+---
+
+### upgradeWoodstockStore()
+
+```ts
+function upgradeWoodstockStore(owner): "unchanged" | "upgraded";
+```
+
+Bring an upgradable store to the current marker, keeping all its data. Any other
+store is left as found. It runs in one transaction, so a failure leaves the
+store as it was. The tables, indexes and guards a build of that marker did not
+yet have are then created, as opening it would, so read-only readers find a
+store with the current shape.
+
+#### Parameters
+
+| Parameter | Type                                  |
+| --------- | ------------------------------------- |
+| `owner`   | [`SqliteOwner`](index.md#sqliteowner) |
+
+#### Returns
+
+`"unchanged"` \| `"upgraded"`
+
 ## References
 
 ### AbortCommand

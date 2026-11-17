@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.18.3",
+  "version": "0.19.0",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Shiitake by Fungi: open-source AI agents with durable conversations, tools and permissions checked by the system.",
   "type": "module",
@@ -97,19 +97,19 @@
     "smoke": "node --input-type=module -e \"import('./dist/index.js').then(({Shiitake}) => { if (!Shiitake) process.exit(1); })\""
   },
   "dependencies": {
-    "@fungi.computer/bird-dog": "0.3.6",
+    "@fungi.computer/bird-dog": "0.3.7",
     "@fungi.computer/cairn": "0.1.0",
-    "@fungi.computer/carrier": "0.2.4",
-    "@fungi.computer/knapsack": "0.4.13",
-    "@fungi.computer/mule": "0.2.3",
-    "@fungi.computer/mycelium": "0.4.0",
-    "@fungi.computer/seam": "0.2.5",
-    "@fungi.computer/watchdog": "0.1.3",
+    "@fungi.computer/carrier": "0.2.5",
+    "@fungi.computer/knapsack": "0.4.14",
+    "@fungi.computer/mule": "0.2.4",
+    "@fungi.computer/mycelium": "0.4.1",
+    "@fungi.computer/seam": "0.2.6",
+    "@fungi.computer/watchdog": "0.1.4",
     "effect": "4.0.2",
     "zod": "4.4.3",
-    "@earendil-works/pi-ai": "1.3.0",
+    "@earendil-works/pi-ai": "1.5.2",
     "@fungi.computer/gills": "0.3.0",
-    "@fungi.computer/agar": "0.18.1"
+    "@fungi.computer/agar": "0.18.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260828.1",

@@ -565,27 +565,28 @@ async function startWaits(
       const wait = operations.wait;
       const result = z.object({
         commandId: z.string(),
-        outcome: z.enum(["completed", "cancelled", "failed", "interrupted"]),
+        outcome: z.enum([
+          "completed",
+          "cancelled",
+          "failed",
+          "interrupted",
+          "timed_out",
+        ]),
       });
       const work = commands.map(async ({ index, commandId }) => {
         for (let cycle = 0; cycle < 20; cycle++) {
           cycles += 1;
-          try {
-            const settled = result.parse(
-              await wait({
-                agentId: `a${String(index)}`,
-                sessionId: `s${String(index)}`,
-                commandId,
-                timeoutMs: 15_000,
-              }),
-            );
-            expect(settled).toMatchObject({ commandId, outcome: "completed" });
-            return;
-          } catch (error) {
-            if (error instanceof Error && error.message.includes("timed out"))
-              continue;
-            throw error;
-          }
+          const settled = result.parse(
+            await wait({
+              agentId: `a${String(index)}`,
+              sessionId: `s${String(index)}`,
+              commandId,
+              timeoutMs: 15_000,
+            }),
+          );
+          if (settled.outcome === "timed_out") continue;
+          expect(settled).toMatchObject({ commandId, outcome: "completed" });
+          return;
         }
         throw new Error(
           `agents.wait exhausted 20 cycles for a${String(index)}`,

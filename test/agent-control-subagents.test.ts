@@ -217,7 +217,10 @@ it("describes the wait bound and the working directory", async () => {
   expect(text.wait).toContain("30000");
   expect(text.wait).toMatch(/maximum/u);
   expect(text.create).toContain("workingDirectory");
-  expect(text.create).toMatch(/project directory/u);
+  expect(text.create).toContain("the helper's directory");
+  expect(text.create).toContain(
+    "folder: a project-relative directory for the helper to work in; defaults to yours",
+  );
 });
 
 it("passes the extensions an Agent asks to give a new Agent through to the host", async () => {

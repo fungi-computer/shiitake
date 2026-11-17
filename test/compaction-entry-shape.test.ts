@@ -83,7 +83,7 @@ it("stores compaction model/data/head separately and derives context from model 
   }
 });
 
-it.each([0, 1, 2, 3, 4, 5, 7])(
+it.each([0, 7])(
   "version-refuses obsolete or unknown store %s without rewriting its entries",
   (version) => {
     const fixture = createNativeSqliteOwnerFixture();
@@ -129,7 +129,7 @@ it.each([0, 1, 2, 3, 4, 5, 7])(
   },
 );
 
-it("tells the person how to reset a refused v2 store without migrating it", () => {
+it("refuses an unreadable marker-0 store plainly without suggesting a move", () => {
   const fixture = createNativeSqliteOwnerFixture();
   try {
     fixture.owner.sql.exec(
@@ -137,7 +137,7 @@ it("tells the person how to reset a refused v2 store without migrating it", () =
     );
     fixture.owner.sql.exec(
       "INSERT INTO woodstock_schema (version, protocol) VALUES (?, ?)",
-      2,
+      0,
       "shiitake.extension/v0",
     );
     const writes = fixture.ownerWrites();
@@ -153,30 +153,18 @@ it("tells the person how to reset a refused v2 store without migrating it", () =
       },
     });
     if (result._tag !== "Failure") throw new Error("Expected store refusal");
-    expect(result.failure.message).toContain("To reset, stop the owning host");
-    expect(result.failure.message).toContain(
-      "remove its database file and the file's .owner.sqlite sidecar",
+    expect(result.failure.message).toBe(
+      "Fungi cannot read this Agent store. Its files have not been changed.",
     );
-    expect(result.failure.message).toContain(
-      "a Hub Agent is erased only with its Team",
-    );
-    expect(result.failure.message).toContain(
-      "Team erasure is destructive and separately authorized",
-    );
-    expect(result.failure.message).toContain(
-      "never a routine single-Agent repair",
-    );
+    expect(result.failure.message).not.toMatch(/move|erase|reset/iu);
     expect(result.failure.message).not.toContain("POST /operator/");
     expect(result.failure.message).not.toContain(
       "DurableObjectStorage.deleteAll()",
     );
-    expect(result.failure.message).toContain(
-      "Reset discards that store's data",
-    );
     expect(
       fixture.owner.sql.exec("SELECT version FROM woodstock_schema").one()
         .version,
-    ).toBe(2);
+    ).toBe(0);
     expect(fixture.ownerWrites()).toBe(writes);
   } finally {
     fixture.close();

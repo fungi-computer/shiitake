@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 
 import type { ModelAcquisition, ModelSource } from "./contracts.js";
@@ -9,8 +10,53 @@ import type {
 import { ShiitakeError } from "../errors.js";
 import { reportCatchFailure } from "./failure.js";
 
+// Exception messages, stacks and arbitrary SDK fields may contain credentials.
+// Only known runtime names and system codes are persistable diagnostics.
+const errorNames = Schema.Literals([
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "URIError",
+  "EvalError",
+  "AggregateError",
+  "AbortError",
+  "TimeoutError",
+]);
+const errorCodes = Schema.Literals([
+  "EACCES",
+  "EPERM",
+  "ENOENT",
+  "EISDIR",
+  "ENOTDIR",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ELOOP",
+  "ENOSPC",
+  "EROFS",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+]);
+
 function acquisitionFailure(cause?: unknown): ShiitakeError {
   if (cause instanceof ShiitakeError) return cause;
+  const errorName =
+    cause instanceof Error
+      ? Schema.is(errorNames)(cause.name)
+        ? cause.name
+        : "OtherError"
+      : "NonErrorThrown";
+  const code =
+    cause instanceof Error && "code" in cause ? cause.code : undefined;
+  const metadata = Schema.is(errorCodes)(code)
+    ? { errorName, errorCode: code }
+    : { errorName };
+  reportCatchFailure("model-acquisition", cause, metadata);
   return new ShiitakeError(
     "model",
     "rejected",

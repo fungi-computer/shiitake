@@ -20,6 +20,68 @@ import {
 
 afterEach(() => vi.restoreAllMocks());
 
+it.each(["lease", "message"] as const)(
+  "keeps typed model failure facts from the %s through recording and reopen",
+  async (source) => {
+    const directory = mkdtempSync(join(tmpdir(), "typed-model-failure-"));
+    const databasePath = join(directory, "agent.sqlite");
+    const faux = fauxModel([]);
+    const response = fauxAssistantMessage("", { stopReason: "error" });
+    const cause = { code: "usage-limit-reached", cause: "quota" } as const;
+    const failure = { provider: response.provider, cause };
+    if (source === "message")
+      Object.assign(response, { modelFailure: failure });
+    response.errorMessage = "Synthetic usage limit reached.";
+    faux.setResponses([response]);
+    const open = async () => {
+      const fixture = createNativeSqliteOwnerFixture(databasePath);
+      const runtime = createCompatibilityRuntimeHost();
+      const agent = await Shiitake.make({
+        store: fixture.owner,
+        extensions: noExtensions,
+        runtime: runtime.runtime,
+        instructions: {
+          load: () => Promise.resolve({ revision: "v1", text: "Reply." }),
+        },
+        model: {
+          acquire: () =>
+            Promise.resolve({
+              model: faux.model,
+              retryable: () => false,
+              rejection: () => (source === "lease" ? cause : undefined),
+              failureReason: () => "Synthetic usage limit reached.",
+              stream: faux.stream,
+              release: () => Promise.resolve(),
+            }),
+        },
+      });
+      return { fixture, runtime, agent };
+    };
+    let current = await open();
+    try {
+      const session = current.agent.session("typed-failure");
+      await session.send("fixture", { requestId: "typed-failure" });
+      await current.runtime.runNext();
+      const failed = (await session.read()).messages.find(
+        ({ value }) =>
+          value.role === "assistant" && value.stopReason === "error",
+      );
+      expect(failed?.value).toMatchObject({ modelFailure: failure });
+      await current.agent.close();
+      current.fixture.close();
+      current = await open();
+      const reloaded = await current.agent.session("typed-failure").read();
+      expect(
+        reloaded.messages.find(({ id }) => id === failed?.id)?.value,
+      ).toMatchObject({ modelFailure: failure });
+    } finally {
+      await current.agent.close();
+      current.fixture.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
+
 it.each([
   undefined,
   "synthetic-returned-private-provider-body",

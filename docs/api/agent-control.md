@@ -314,6 +314,7 @@ type AgentControlDirectory = Readonly<{
     signal,
     invocation?,
   ) => Promise<Accepted | Held>;
+  sentSessions?: (sourceSessionId, agentId) => readonly string[];
   recall?: (input, sourceSessionId, signal) => Promise<CancelResult>;
   answer?: (
     input,

@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "@fungi.computer/mule/effect";
 import {
   fauxAssistantMessage,
   fauxToolCall,

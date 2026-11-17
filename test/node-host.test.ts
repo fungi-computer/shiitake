@@ -7,6 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -609,6 +610,44 @@ it("keeps Session passes moving while delivery is held and joins delivery on clo
     expect(failure).not.toHaveBeenCalled();
   } finally {
     releaseDelivery();
+    await host.close();
+  }
+});
+
+it("waits out a short foreign read lock instead of failing the run's write", async () => {
+  const path = storePath();
+  const host = await openNodeShiitake(options(path, "after the lock"));
+  const holder = spawn(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `import { DatabaseSync } from "node:sqlite";
+const db = new DatabaseSync(process.argv[1], { timeout: 0 });
+db.exec("BEGIN");
+db.prepare("SELECT COUNT(*) FROM sqlite_master").all();
+console.log("held");
+setTimeout(() => { db.exec("ROLLBACK"); db.close(); }, 400);`,
+      path,
+    ],
+    { stdio: ["ignore", "pipe", "inherit"] },
+  );
+  try {
+    await new Promise<void>((resolve, reject) => {
+      holder.once("error", reject);
+      holder.stdout.once("data", () => {
+        resolve();
+      });
+    });
+    // The store write below needs the lock the other process holds for 400 ms.
+    // A zero busy timeout fails it at once; the host waits instead.
+    await host.agent.createSession("locked");
+    await host.agent.session("locked").send("go", { requestId: "locked-1" });
+    expect(await settledReply(host, "locked")).toEqual([
+      { type: "text", text: "after the lock" },
+    ]);
+  } finally {
+    holder.kill();
     await host.close();
   }
 });

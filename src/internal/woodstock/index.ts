@@ -88,6 +88,10 @@ import {
 import { readSessionAttention } from "./session-attention.js";
 
 export * from "./extension-store.js";
+export {
+  readWoodstockStoreProtocol,
+  upgradeWoodstockStore,
+} from "./session-store.js";
 export { decodeWoodstockCursor } from "./cursor.js";
 export {
   compactionEntrySequence,

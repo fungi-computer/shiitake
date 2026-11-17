@@ -182,10 +182,20 @@ output counters use the tool event's `result.data`.
 
 `data` is independent of host `meta` even when their keys overlap. It is not
 host attribution and does not inherit the 4096-byte metadata cap. The ordinary
-bounded Session read still accounts for the complete projected payload.
-Woodstock schema 3 refuses older preview stores instead of migrating them on
-open; the host retains custody of incompatible storage. This is a storage
-contract, not permission to reset or migrate any live data.
+bounded Session read still accounts for the complete projected payload. A store
+saved at Woodstock schema marker 1 to 5 is upgraded to the current marker when
+it opens, in one transaction under the store's lease, so a failed upgrade leaves
+it as it was. The upgrade keeps every Agent, Session and fact: it moves
+compactions to `head`, `model` and `data`, moves a tool's `details` to `data`,
+gives a waiting retry its absolute `dueAt`, rebuilds Watchdog's jobs, turns
+extension timers into queued Watchdog jobs, and drops two retired Local tables
+(`private_local_exec_rules` and `local_birddog_outbox`).
+`readWoodstockStoreProtocol` reports such a store as `upgradable`, and
+`upgradeWoodstockStore` upgrades it ahead of opening. A store outside that
+range, or one this build cannot read at all, is refused untouched in place. A
+marker higher than the current one is reported as `newer`, separately from an
+unreadable store: update Fungi to open it. Neither refusal is permission to
+move, archive or reset the store.
 
 A host attaches its own data to a prompt or operator line, such as who sent it
 or which channel it came from, with `agent.withMeta(meta)`. Shiitake checks the

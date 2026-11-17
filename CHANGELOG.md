@@ -1,5 +1,40 @@
 # @fungi.computer/shiitake
 
+## 0.19.0
+
+### Minor Changes
+
+- Changes since 0.18.3:
+
+  - fix(shiitake): preserve typed agent answer failures
+  - fix(local): preserve refused Agent stores in place
+  - fix(spore): preserve upgrade atomicity and old sandbox requirements
+  - feat(spore): drop two retired Local tables when a store is upgraded
+  - feat(spore): upgrade marker 1 and 2 Agent stores in place too
+  - fix(watchdog): roll back a commit SQLite refuses as busy
+  - feat(spore): upgrade older Agent stores in place instead of archiving them
+  - fix: follow Pi 1.5 where it changed
+  - fix(shiitake): show a helper's Session in its creator's agents.status
+  - fix(shiitake): return an explicit agent wait timeout
+  - fix(shiitake): expose store compatibility through Woodstock
+  - feat(shiitake): let agents choose helper folders
+  - fix(truffle): explain model acquisition failures
+  - fix(spore): archive incompatible folder Agent stores
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.18.2
+  - @fungi.computer/mule@0.2.4
+  - @fungi.computer/watchdog@0.1.4
+  - @fungi.computer/knapsack@0.4.14
+  - @fungi.computer/mycelium@0.4.1
+  - @fungi.computer/bird-dog@0.3.7
+  - @fungi.computer/carrier@0.2.5
+  - @fungi.computer/seam@0.2.6
+
 ## 0.18.3
 
 ### Patch Changes

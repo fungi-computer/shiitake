@@ -173,5 +173,9 @@ export function readStoredSessionParent(owner: SqliteOwner, sessionId: string) {
 }
 
 export { sqliteRowSchema } from "./internal/contracts.js";
+export {
+  readWoodstockStoreProtocol,
+  upgradeWoodstockStore,
+} from "./internal/woodstock/index.js";
 
 export type { CommandSettlement } from "./internal/contracts.js";

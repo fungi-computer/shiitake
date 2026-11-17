@@ -3,6 +3,7 @@ import { HostMetaSchema } from "../host-meta.js";
 import type { ModelMessage } from "../../client.js";
 import { userContextMessage, VerifiedAgentReplySchema } from "./agent-reply.js";
 import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
+import { ModelFailureSchema } from "@fungi.computer/mule/effect";
 import type {
   AssistantMessage,
   ImageContent,
@@ -202,6 +203,7 @@ const assistantMessage: Schema.Codec<AssistantMessage> = Schema.Struct({
   ),
   errorMessage: Schema.optionalKey(Schema.String),
   providerError: Schema.optionalKey(Schema.String),
+  modelFailure: Schema.optionalKey(ModelFailureSchema),
   rawStopReason: Schema.optionalKey(Schema.String),
   providerThinkingLevel: Schema.optionalKey(Schema.String),
   endTurn: Schema.optionalKey(Schema.Boolean),

@@ -62,7 +62,13 @@ function decodeRows<A, I>(
 /** Create every extension table. Idempotent `CREATE … IF NOT EXISTS` only. */
 export function prepareExtensionStore(owner: SqliteOwner): void {
   owner.transactionSync(() => {
-    owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_records (
+    prepareExtensionStoreInTransaction(owner);
+  });
+}
+
+/** Create extension tables inside the caller's schema transaction. */
+export function prepareExtensionStoreInTransaction(owner: SqliteOwner): void {
+  owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_records (
       extension_id TEXT NOT NULL,
       collection TEXT NOT NULL,
       key TEXT NOT NULL,
@@ -70,15 +76,15 @@ export function prepareExtensionStore(owner: SqliteOwner): void {
       value_json TEXT NOT NULL,
       PRIMARY KEY (extension_id, collection, key)
     )`);
-    owner.sql
-      .exec(`CREATE INDEX IF NOT EXISTS idx_shiitake_extension_records_index
+  owner.sql
+    .exec(`CREATE INDEX IF NOT EXISTS idx_shiitake_extension_records_index
       ON shiitake_extension_records(extension_id, collection, index_value, key)`);
-    owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_state (
+  owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_state (
       extension_id TEXT PRIMARY KEY,
       state_version INTEGER NOT NULL CHECK (state_version >= 1),
       revision TEXT NOT NULL
     )`);
-    owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_status (
+  owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_status (
       extension_id TEXT PRIMARY KEY,
       status TEXT NOT NULL CHECK (status IN ('running', 'stopped')),
       reason TEXT,
@@ -87,17 +93,16 @@ export function prepareExtensionStore(owner: SqliteOwner): void {
       CHECK ((status = 'running') = (reason IS NULL)),
       CHECK ((reason IS NULL) = (stopped_at IS NULL))
     )`);
-    owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_timers (
+  owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_extension_timers (
       extension_id TEXT NOT NULL,
       key TEXT NOT NULL,
       job_id TEXT NOT NULL,
       PRIMARY KEY (extension_id, key)
     )`);
-    owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_settled_cursors (
+  owner.sql.exec(`CREATE TABLE IF NOT EXISTS shiitake_settled_cursors (
       consumer TEXT PRIMARY KEY,
       sequence INTEGER NOT NULL CHECK (sequence >= 0)
     )`);
-  });
 }
 
 // ---------- records ------------------------------------------------------------

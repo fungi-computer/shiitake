@@ -27,6 +27,13 @@ import type {
 /** A retry hint after a failed or still-pending reconciliation pass. */
 const retryAfterMs = 5_000;
 
+/**
+ * How long a store statement waits for another connection's lock, such as a
+ * reader of the same file. Zero fails every write at once; the lease sidecar
+ * keeps zero on purpose, so a second owner is still refused immediately.
+ */
+const storeBusyTimeoutMs = 2_000;
+
 type BoundRuntime = Awaited<ReturnType<RuntimeHost["bind"]>>;
 
 /** The event-loop runtime host one Node process gives one durable Agent. */
@@ -318,7 +325,7 @@ export async function openNodeShiitake(
     // Checked under the lease: a link made after this is refused by the next
     // opener's own check, before it can open the bytes.
     claimPrivateFile(path);
-    const opened = new DatabaseSync(path, { timeout: 0 });
+    const opened = new DatabaseSync(path, { timeout: storeBusyTimeoutMs });
     database = opened;
     opened.exec("PRAGMA foreign_keys = ON");
     const runtime = nodeRuntimeHost(

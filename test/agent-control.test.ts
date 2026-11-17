@@ -26,7 +26,10 @@ import type {
   ShiitakeAgent,
   ShiitakeSession,
 } from "../src/client.js";
-import { createAgentControlSource } from "../src/agent-control.js";
+import {
+  createAgentControlSource,
+  waitForAgentSettlement,
+} from "../src/agent-control.js";
 import { ShiitakeError } from "../src/errors.js";
 import { decodeClientReadOptions } from "../src/internal/client-boundary.js";
 import { readClientSnapshot } from "../src/internal/woodstock/client-projection.js";
@@ -204,8 +207,13 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
       const listed = await list({});
       const createdAgent = await create({
         requestId: "agent-request",
+        folder: "helpers/review",
         model: "openai/gpt-6-astra",
       });
+      for (const folder of ["", "a".repeat(4097)])
+        await expect(
+          create({ requestId: "invalid-folder", folder }),
+        ).rejects.toThrow();
       if (tools.setModel === undefined)
         throw new Error("Model control missing");
       await tools.setModel({ agentId: "agent-a", model: "openai/gpt-6-sol" });
@@ -300,6 +308,7 @@ it("executes Agent list, read, wait and send through the public Mycelium door", 
     expect(createdAgents).toEqual([
       {
         requestId: "agent-request",
+        folder: "helpers/review",
         model: { providerId: "openai", modelId: "gpt-6-astra" },
       },
     ]);
@@ -711,6 +720,83 @@ async function runAgentCode(
     await runtime.close();
   }
 }
+
+it("refuses agents.answer without invoking Session provenance before calling the host", async () => {
+  const answer = vi.fn(() => Promise.resolve({ status: "not_found" as const }));
+  let result: unknown;
+  const parts = await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      answer,
+      open: () => Promise.reject(new Error("unused")),
+    },
+    async (tools) => {
+      if (tools.answer === undefined)
+        throw new Error("Answer operation missing");
+      result = await tools.answer({
+        agentId: "child",
+        sessionId: "child-session",
+        askId: "ask-1",
+        requestId: "answer-1",
+        answers: { storage: { selected: ["SQLite"] } },
+      });
+      return null;
+    },
+  );
+  expect(parts[0]).toMatchObject({
+    type: "result",
+    result: { isError: false },
+  });
+  expect(result).toEqual({ status: "refused", reason: "no_provenance" });
+  expect(answer).not.toHaveBeenCalled();
+});
+
+it("preserves a sanitized answer conflict as a typed capability failure", async () => {
+  const failures: Rejection[] = [];
+  await runAgentCode(
+    {
+      list: () => Promise.resolve([]),
+      answer: () =>
+        Promise.reject(
+          new ShiitakeError(
+            "store",
+            "conflict",
+            "This request id was used for a different response",
+          ),
+        ),
+      open: () => Promise.reject(new Error("unused")),
+    },
+    async (tools) => {
+      if (tools.answer === undefined)
+        throw new Error("Answer operation missing");
+      failures.push(
+        await captureRejection(
+          tools.answer({
+            agentId: "child",
+            sessionId: "child-session",
+            askId: "ask-1",
+            requestId: "answer-1",
+            answers: { storage: { selected: ["SQLite"] } },
+          }),
+        ),
+      );
+      return null;
+    },
+    "creator-session",
+  );
+  expect(failures).toMatchObject([
+    {
+      _tag: "CapabilityFailed",
+      namespace: "agents",
+      operation: "answer",
+      cause: {
+        kind: "OperationFailed",
+        message:
+          "answer:conflict: This request id was used for a different response",
+      },
+    },
+  ]);
+});
 
 it("routes agents.answer through the invoking Session captured by the host", async () => {
   let result: unknown;
@@ -1351,6 +1437,34 @@ async function waitWithHistory(
   return results[0];
 }
 
+it("the terminal-only wait helper admits an expired budget as a typed capability failure", async () => {
+  const signal = new AbortController().signal;
+  const readSettlement = vi.fn<ShiitakeSession["readSettlement"]>(() =>
+    Promise.resolve(undefined),
+  );
+  await expect(
+    waitForAgentSettlement(
+      testSession(undefined, readSettlement),
+      "target",
+      1000,
+      signal,
+      Date.now() - 2000,
+    ),
+  ).rejects.toMatchObject({
+    _tag: "CapabilityFailed",
+    namespace: "agents",
+    operation: "wait",
+    cause: {
+      kind: "OperationFailed",
+      message: "Agent wait timed out; no terminal observed. Call wait again.",
+    },
+  });
+  expect(readSettlement).toHaveBeenCalledExactlyOnceWith("target", {
+    timeoutMs: 0,
+    signal,
+  });
+});
+
 it("wait returns a completed command's final assistant text", async () => {
   await expect(
     waitWithHistory("completed", [
@@ -1775,4 +1889,85 @@ it("agents.status shows an Agent that ended its turn with work still assigned, a
       },
     ],
   });
+});
+
+it("agents.status lists a Session this Session sent work to even when no first delegator was recorded, and no one else's", async () => {
+  const unparented = new Set(["steered", "unsent"]);
+  const agent: ShiitakeAgent = {
+    createSession: () => Promise.reject(new Error("unused")),
+    deleteSession: () => Promise.reject(new Error("unused")),
+    listSessions: () =>
+      Promise.resolve({
+        sessions: ["steered", "unsent", "delegated"].map((sessionId) => ({
+          sessionId,
+          createdAt: 1,
+          lastActivityAt: 2,
+          settledAt: 2,
+          title: sessionId,
+          state: "running" as const,
+        })),
+        next: undefined,
+      }),
+    extensions: {
+      list: () => Promise.reject(new Error("unused")),
+      resume: () => Promise.reject(new Error("unused")),
+      call: () => Promise.reject(new Error("unused")),
+    },
+    session: (sessionId) => ({
+      ...testSession(),
+      read: () => {
+        const snapshot: SessionSnapshot = { ...baseline, sessionId };
+        return Promise.resolve(
+          unparented.has(sessionId)
+            ? snapshot
+            : {
+                ...snapshot,
+                parent: {
+                  agentId: "director",
+                  sessionId: "director-session",
+                  name: "director",
+                },
+              },
+        );
+      },
+    }),
+    close: () => Promise.resolve(),
+  };
+  const asked: unknown[] = [];
+  const statusFor = async (sessionId: string) => {
+    let status: unknown;
+    await runAgentCode(
+      {
+        list: () => Promise.resolve([]),
+        open: () =>
+          Promise.resolve({ agent, release: () => Promise.resolve() }),
+        sentSessions: (source, agentId) => {
+          asked.push([source, agentId]);
+          return source === "director-session" ? ["steered"] : [];
+        },
+      },
+      async (tools) => {
+        if (tools.status === undefined) throw new Error("status missing");
+        status = await tools.status({ agentId: "worker" });
+        return null;
+      },
+      sessionId,
+    );
+    return status;
+  };
+  expect(await statusFor("director-session")).toMatchObject({
+    truncated: false,
+    sessions: [
+      { sessionId: "steered", state: "working" },
+      { sessionId: "delegated", state: "working" },
+    ],
+  });
+  expect(await statusFor("stranger-session")).toEqual({
+    truncated: false,
+    sessions: [],
+  });
+  expect(asked).toEqual([
+    ["director-session", "worker"],
+    ["stranger-session", "worker"],
+  ]);
 });

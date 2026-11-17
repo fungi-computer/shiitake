@@ -2,7 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -12,6 +12,111 @@ import {
   acquireModelPromise,
   acquireOwnedModel,
 } from "../src/internal/model-acquisition.js";
+import * as failure from "../src/internal/failure.js";
+
+it.each(["sync", "async"] as const)(
+  "logs one safe event for an unexpected %s acquisition error",
+  async (mode) => {
+    const report = vi
+      .spyOn(failure, "reportCatchFailure")
+      .mockImplementation(() => undefined);
+    const cause = Object.assign(new TypeError("private-credential-marker"), {
+      code: "EACCES",
+    });
+    try {
+      const result = await Effect.runPromise(
+        Effect.result(
+          acquireModelPromise(() => {
+            if (mode === "sync") throw cause;
+            return Promise.reject(cause);
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        _tag: "Failure",
+        failure: {
+          message: "Model acquisition failed",
+          underlying: cause,
+        },
+      });
+      expect(report).toHaveBeenCalledExactlyOnceWith(
+        "model-acquisition",
+        cause,
+        { errorName: "TypeError", errorCode: "EACCES" },
+      );
+      expect(JSON.stringify(report.mock.calls[0]?.[2])).not.toContain(
+        "private-credential-marker",
+      );
+    } finally {
+      report.mockRestore();
+    }
+  },
+);
+
+it("preserves a known refusal without logging it as an unexpected failure", async () => {
+  const report = vi
+    .spyOn(failure, "reportCatchFailure")
+    .mockImplementation(() => undefined);
+  const cause = new ShiitakeError("model", "rejected", "Pick another model.");
+  try {
+    expect(
+      await Effect.runPromise(
+        Effect.result(acquireModelPromise(() => Promise.reject(cause))),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: cause });
+    expect(report).not.toHaveBeenCalled();
+  } finally {
+    report.mockRestore();
+  }
+});
+
+it.each([
+  Object.assign(new Error("private-credential-marker"), {
+    name: "private-credential-marker",
+    code: "private-credential-marker",
+  }),
+])("does not copy arbitrary thrown fields into log metadata", async (cause) => {
+  const report = vi
+    .spyOn(failure, "reportCatchFailure")
+    .mockImplementation(() => undefined);
+  try {
+    await Effect.runPromise(
+      Effect.result(acquireModelPromise(() => Promise.reject(cause))),
+    );
+    const metadata = report.mock.calls[0]?.[2];
+    expect(metadata).toEqual({
+      errorName: "OtherError",
+    });
+    expect(JSON.stringify(metadata)).not.toContain("private-credential-marker");
+  } finally {
+    report.mockRestore();
+  }
+});
+
+it("writes error identity but not credential text through the existing logger", async () => {
+  const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  try {
+    failure.reportCatchFailure(
+      "model-acquisition",
+      new TypeError("private-credential-marker"),
+      { errorName: "TypeError", errorCode: "EACCES" },
+    );
+    const events = () =>
+      [...log.mock.calls, ...error.mock.calls]
+        .map((call) => JSON.stringify(call))
+        .filter((call) => call.includes("shiitake_operation_failed"));
+    await vi.waitFor(() => {
+      expect(events()).toHaveLength(1);
+    });
+    expect(events()[0]).toContain("TypeError");
+    expect(events()[0]).toContain("EACCES");
+    expect(events()[0]).not.toContain("private-credential-marker");
+  } finally {
+    log.mockRestore();
+    error.mockRestore();
+  }
+});
 
 function resource(release: () => Promise<void>): ModelAcquisition {
   const faux = fauxModel([]);

@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 import { sessionIds } from "../src/internal/woodstock/identities.js";
 import { prepareWoodstockSchema } from "../src/internal/woodstock/index.js";
+import { readWoodstockStoreProtocol } from "../src/effect.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
 import {
   createNativeSqliteOwnerFixture,
@@ -12,9 +13,33 @@ import {
 
 type Owner = NativeSqliteOwnerFixture["owner"];
 
-// One Agent owner holds both stores. Fungi 0.15.0 resets each obsolete schema
-// by refusing it; neither owner loads, migrates or rewrites the retained rows.
-it("refuses obsolete Woodstock and Watchdog lifecycle schemas on one owner without rewriting either", async () => {
+it("reads the shared compatibility marker without stamping or rewriting stores", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  try {
+    expect(readWoodstockStoreProtocol(fixture.owner)).toBe("fresh");
+    expect(
+      fixture.owner.sql
+        .exec("SELECT name FROM sqlite_master WHERE name = 'woodstock_schema'")
+        .toArray(),
+    ).toEqual([]);
+    Effect.runSync(prepareWoodstockSchema(fixture.owner));
+    expect(readWoodstockStoreProtocol(fixture.owner)).toBe("v0");
+    fixture.owner.sql.exec("UPDATE woodstock_schema SET version = 3");
+    expect(readWoodstockStoreProtocol(fixture.owner)).toBe("upgradable");
+    fixture.owner.sql.exec("UPDATE woodstock_schema SET version = 0");
+    expect(readWoodstockStoreProtocol(fixture.owner)).toBe("unmarked");
+    expect(
+      fixture.owner.sql.exec("SELECT version FROM woodstock_schema").one()
+        .version,
+    ).toBe(0);
+  } finally {
+    fixture.close();
+  }
+});
+
+// One Agent owner holds both stores. A Watchdog table this build cannot read is
+// refused whole: nothing loads and the retained rows are not rewritten.
+it("refuses a Woodstock store whose Watchdog jobs have an unknown shape without rewriting either", async () => {
   const fixture = createNativeSqliteOwnerFixture();
   let executions = 0;
   try {
@@ -117,7 +142,7 @@ const preSchedulerPost = (owner: Owner): void => {
   );
 };
 
-it("refuses obsolete Woodstock v5 timer and pre-scheduler Watchdog/Post stores without loading or rewriting them", async () => {
+it("upgrades Woodstock v5 with pre-scheduler Watchdog jobs in place, and still refuses pre-scheduler Post rows", async () => {
   const agent = createNativeSqliteOwnerFixture();
   const posted = createNativeSqliteOwnerFixture();
   let executions = 0;
@@ -147,22 +172,28 @@ it("refuses obsolete Woodstock v5 timer and pre-scheduler Watchdog/Post stores w
       "INSERT INTO watchdog_jobs (job_id, queue_name, lane, priority, payload_json, state) VALUES ('retained', 'agent', 'post', 0, '{}', 'queued')",
     );
     preSchedulerPost(agent.owner);
-    const agentTables = [
-      "woodstock_schema",
-      "watchdog_jobs",
-      "carrier_post_rows",
-    ];
-    const agentBefore = snapshot(agent.owner, agentTables);
+    const postBeforeUpgrade = snapshot(agent.owner, ["carrier_post_rows"]);
+    // The jobs gain their deadline columns and keep the retained job.
     expect(
-      Effect.runSync(Effect.result(prepareWoodstockSchema(agent.owner))),
-    ).toMatchObject({
-      _tag: "Failure",
-      failure: { boundary: "store", cause: "incompatible" },
-    });
-    await expect(watchdog(agent.owner)).rejects.toMatchObject({
-      cause: "store_invalid",
-    });
-    expect(snapshot(agent.owner, agentTables)).toEqual(agentBefore);
+      Effect.runSync(Effect.result(prepareWoodstockSchema(agent.owner)))._tag,
+    ).toBe("Success");
+    expect(
+      agent.owner.sql.exec("SELECT version FROM woodstock_schema").one()
+        .version,
+    ).toBe(6);
+    expect(
+      agent.owner.sql
+        .exec(
+          "SELECT job_id, state, not_before, attempt_count FROM watchdog_jobs",
+        )
+        .toArray(),
+    ).toEqual([
+      { job_id: "retained", state: "queued", not_before: 0, attempt_count: 0 },
+    ]);
+    // Post's own rows are another owner's: the upgrade leaves them as they were.
+    expect(snapshot(agent.owner, ["carrier_post_rows"])).toEqual(
+      postBeforeUpgrade,
+    );
 
     // Post refuses its own retained rows even beside a current Watchdog.
     preSchedulerPost(posted.owner);

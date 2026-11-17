@@ -1,4 +1,4 @@
-import { prepareExtensionStore } from "./extension-store.js";
+import { prepareExtensionStoreInTransaction } from "./extension-store.js";
 import {
   prepareSessionDocuments,
   forkDocumentEntries,
@@ -39,6 +39,7 @@ import { prepareSessionDelegators } from "./session-delegator.js";
 import { copySessionGrants, prepareSessionGrants } from "./session-grants.js";
 import { prepareSessionInbox, touchSessionInbox } from "./session-inbox.js";
 import { sessionIds } from "./identities.js";
+import { upgradeWoodstockStoreData } from "./store-migration.js";
 import type { VerifiedAgentReply } from "./agent-reply.js";
 
 import {
@@ -89,7 +90,7 @@ const encodeSessionMetadata = Schema.encodeSync(SessionMetadataSchema);
 const SessionIdRowSchema = Schema.Struct({ id: boundedId });
 const WoodstockSchemaVersionRowSchema = Schema.Struct({
   version: Schema.Int,
-  protocol: Schema.Literal("shiitake.extension/v0"),
+  protocol: Schema.String,
 });
 const TableNameRowSchema = Schema.Struct({ name: boundedId });
 const EntryRowSchema = Schema.Struct({
@@ -1517,11 +1518,13 @@ export function deleteStoredSession(
 }
 
 /**
- * Version 3 keeps application tool data outside model messages/results.
- * Older preview stores require explicit host custody; no compatibility reader
- * or automatic rewrite runs when the store opens.
+ * The current marker covers Woodstock's application data and lifecycle tables.
+ * A store marked 1 to 5 is upgraded in place by `store-migration.ts`, in the
+ * transaction that opens it; a store outside that range, or one this build
+ * cannot read at all, needs explicit host custody and is never rewritten.
  */
 const currentWoodstockSchemaVersion = 6;
+const oldestUpgradableWoodstockSchemaVersion = 1;
 const currentWoodstockProtocol = "shiitake.extension/v0";
 
 function tableExists(owner: SqliteOwner, name: string): boolean {
@@ -1539,10 +1542,14 @@ function tableExists(owner: SqliteOwner, name: string): boolean {
   return true;
 }
 
-/** Read only the schema marker. A host that owns a file decides how to preserve it. */
-function readWoodstockStoreProtocol(
+/**
+ * Read only the schema marker: "v0" is the current one, "upgradable" a store
+ * this build brings to it in place, "newer" a future marker, and "unmarked"
+ * anything else that already holds Sessions. Refused stores stay untouched.
+ */
+export function readWoodstockStoreProtocol(
   owner: SqliteOwner,
-): "fresh" | "v0" | "unmarked" {
+): "fresh" | "v0" | "upgradable" | "newer" | "unmarked" {
   if (!tableExists(owner, "woodstock_schema"))
     return tableExists(owner, "sessions") ? "unmarked" : "fresh";
   const columns = owner.sql
@@ -1556,18 +1563,57 @@ function readWoodstockStoreProtocol(
   if (rows.length !== 1) return "unmarked";
   const decoded = decodeWoodstockSchemaVersionRow(rows[0]);
   if (decoded._tag !== "Success") return "unmarked";
-  // The decoder already requires the current protocol literal.
-  if (decoded.success.version === currentWoodstockSchemaVersion) return "v0";
-  return "unmarked";
+  const version = decoded.success.version;
+  if (version > currentWoodstockSchemaVersion) return "newer";
+  if (decoded.success.protocol !== currentWoodstockProtocol) return "unmarked";
+  if (version === currentWoodstockSchemaVersion) return "v0";
+  return version >= oldestUpgradableWoodstockSchemaVersion &&
+    version < currentWoodstockSchemaVersion
+    ? "upgradable"
+    : "unmarked";
 }
 
-/** Stamp fresh Woodstock stores; incompatible files require host-side custody. */
+/** The upgrade itself, for a caller that already holds the store's transaction. */
+function upgradeWoodstockStoreInTransaction(owner: SqliteOwner): void {
+  upgradeWoodstockStoreData(owner);
+  owner.sql.exec(
+    "UPDATE woodstock_schema SET version = ?",
+    currentWoodstockSchemaVersion,
+  );
+}
+
+/**
+ * Bring an upgradable store to the current marker, keeping all its data. Any
+ * other store is left as found. It runs in one transaction, so a failure leaves
+ * the store as it was. The tables, indexes and guards a build of that marker did
+ * not yet have are then created, as opening it would, so read-only readers find
+ * a store with the current shape.
+ */
+export function upgradeWoodstockStore(
+  owner: SqliteOwner,
+): "upgraded" | "unchanged" {
+  return owner.transactionSync(() => {
+    if (readWoodstockStoreProtocol(owner) !== "upgradable") return "unchanged";
+    prepareSessionStoreInTransaction(owner);
+    return "upgraded";
+  });
+}
+
+/** Stamp fresh Woodstock stores and upgrade older ones; refuse what cannot be read. */
 function ensureWoodstockSchemaVersion(owner: SqliteOwner): void {
   const protocol = readWoodstockStoreProtocol(owner);
   if (protocol === "v0") return;
+  if (protocol === "upgradable") {
+    upgradeWoodstockStoreInTransaction(owner);
+    return;
+  }
+  if (protocol === "newer")
+    throw incompatible(
+      "This Agent was saved by a newer Fungi. Update Fungi to open it. Its files have not been changed.",
+    );
   if (protocol === "unmarked")
     throw incompatible(
-      "Woodstock store has no current v0 schema marker; incompatible storage requires explicit host custody. To reset, stop the owning host before resetting a local store, then remove its database file and the file's .owner.sqlite sidecar. Reset discards that store's data. For the Hub, a Hub Agent is erased only with its Team; Team erasure is destructive and separately authorized, never a routine single-Agent repair. No migration runs.",
+      "Fungi cannot read this Agent store. Its files have not been changed.",
     );
   owner.sql.exec(
     "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
@@ -1848,8 +1894,14 @@ function guardSessionLineage(owner: SqliteOwner): void {
 /** Create the retained Session schema and private creation/admission receipts. */
 export function prepareSessionStore(owner: SqliteOwner): void {
   owner.transactionSync(() => {
-    ensureWoodstockSchemaVersion(owner);
-    owner.sql.exec(`
+    prepareSessionStoreInTransaction(owner);
+  });
+}
+
+/** Schema preparation and old-data rewrites share the caller's transaction. */
+function prepareSessionStoreInTransaction(owner: SqliteOwner): void {
+  ensureWoodstockSchemaVersion(owner);
+  owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       cwd TEXT NOT NULL,
@@ -1860,80 +1912,79 @@ export function prepareSessionStore(owner: SqliteOwner): void {
       metadata_json TEXT
     )
   `);
-    createSessionEntryTable(owner);
-    prepareSessionDocuments(owner);
-    prepareSessionAttention(owner);
-    prepareWorkSenders(owner);
-    prepareSessionDelegators(owner);
-    prepareSessionGrants(owner);
-    prepareSessionInbox(owner);
-    owner.sql.exec(`
+  createSessionEntryTable(owner);
+  prepareSessionDocuments(owner);
+  prepareSessionAttention(owner);
+  prepareWorkSenders(owner);
+  prepareSessionDelegators(owner);
+  prepareSessionGrants(owner);
+  prepareSessionInbox(owner);
+  owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS session_creation_receipts (
       request_id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id)
     )
   `);
-    // Preview admissions could have mistaken a later worker for the creator.
-    owner.sql.exec(`DELETE FROM session_delegators
+  // Preview admissions could have mistaken a later worker for the creator.
+  owner.sql.exec(`DELETE FROM session_delegators
       WHERE NOT EXISTS (
         SELECT 1 FROM session_creation_receipts AS creation
         WHERE creation.session_id = session_delegators.session_id
           AND creation.request_id = session_delegators.mail_key
       )`);
-    owner.sql.exec(
-      "CREATE INDEX IF NOT EXISTS idx_session_entries_parent ON session_entries(parent_id)",
-    );
-    // Replace the preview index, not its payload-length expression: preparing
-    // identity lookup must never read every stored message's payload.
-    owner.sql.exec("DROP INDEX IF EXISTS idx_session_entries_lineage");
-    owner.sql.exec(
-      `CREATE INDEX IF NOT EXISTS idx_session_entries_ancestry
+  owner.sql.exec(
+    "CREATE INDEX IF NOT EXISTS idx_session_entries_parent ON session_entries(parent_id)",
+  );
+  // Replace the preview index, not its payload-length expression: preparing
+  // identity lookup must never read every stored message's payload.
+  owner.sql.exec("DROP INDEX IF EXISTS idx_session_entries_lineage");
+  owner.sql.exec(
+    `CREATE INDEX IF NOT EXISTS idx_session_entries_ancestry
        ON session_entries(id, session_id, parent_id, sequence, state, type)`,
-    );
-    owner.sql.exec(
-      "CREATE INDEX IF NOT EXISTS idx_session_entries_session ON session_entries(session_id, sequence)",
-    );
-    owner.sql.exec(
-      "CREATE INDEX IF NOT EXISTS idx_session_entries_streaming ON session_entries(session_id, state)",
-    );
-    owner.sql.exec(
-      `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_request
+  );
+  owner.sql.exec(
+    "CREATE INDEX IF NOT EXISTS idx_session_entries_session ON session_entries(session_id, sequence)",
+  );
+  owner.sql.exec(
+    "CREATE INDEX IF NOT EXISTS idx_session_entries_streaming ON session_entries(session_id, state)",
+  );
+  owner.sql.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_session_entries_request
        ON session_entries(session_id, request_id)
        WHERE request_id IS NOT NULL`,
-    );
-    owner.sql.exec(
-      "CREATE INDEX IF NOT EXISTS idx_session_entries_work ON session_entries(work_id, sequence)",
-    );
-    owner.sql.exec(
-      `CREATE INDEX IF NOT EXISTS idx_session_entries_work_terminal
+  );
+  owner.sql.exec(
+    "CREATE INDEX IF NOT EXISTS idx_session_entries_work ON session_entries(work_id, sequence)",
+  );
+  owner.sql.exec(
+    `CREATE INDEX IF NOT EXISTS idx_session_entries_work_terminal
        ON session_entries(session_id, work_id)
        WHERE type IN ('run_terminal', 'work_terminal')`,
-    );
-    // Context and preference reads look up these rare older facts directly
-    // rather than walking the history behind them.
-    owner.sql.exec(
-      `CREATE INDEX IF NOT EXISTS idx_session_entries_model_preference
+  );
+  // Context and preference reads look up these rare older facts directly
+  // rather than walking the history behind them.
+  owner.sql.exec(
+    `CREATE INDEX IF NOT EXISTS idx_session_entries_model_preference
        ON session_entries(session_id, sequence)
        WHERE type = 'model_preference'`,
-    );
-    owner.sql.exec(
-      `CREATE INDEX IF NOT EXISTS idx_session_entries_cancellation_target
+  );
+  owner.sql.exec(
+    `CREATE INDEX IF NOT EXISTS idx_session_entries_cancellation_target
        ON session_entries(session_id, json_extract(data_json, '$.targetWorkId'))
        WHERE type = 'cancellation'`,
-    );
-    owner.sql
-      .exec(`CREATE INDEX IF NOT EXISTS idx_session_entries_successful_tool
+  );
+  owner.sql.exec(`CREATE INDEX IF NOT EXISTS idx_session_entries_successful_tool
       ON session_entries(session_id, work_id, json_extract(data_json, '$.call.id'))
       WHERE type = 'tool_outcome' AND json_extract(data_json, '$.result.isError') = 0`);
-    guardSessionLineage(owner);
-    owner.sql.exec(`
+  guardSessionLineage(owner);
+  owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS session_request_withdrawals (
       session_id TEXT NOT NULL,
       request_id TEXT NOT NULL,
       PRIMARY KEY (session_id, request_id)
     )
   `);
-    owner.sql.exec(`
+  owner.sql.exec(`
     CREATE TABLE IF NOT EXISTS session_command_admissions (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -1953,8 +2004,7 @@ export function prepareSessionStore(owner: SqliteOwner): void {
       UNIQUE (session_id, work_id)
     )
   `);
-  });
-  prepareExtensionStore(owner);
+  prepareExtensionStoreInTransaction(owner);
 }
 
 /** Read the nullable preference at exactly this selected lineage. */

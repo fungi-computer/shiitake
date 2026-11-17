@@ -48,6 +48,7 @@ const createInput = z
   .strictObject({
     requestId,
     name: agentName.optional(),
+    folder: z.string().min(1).max(4096).optional(),
     model: modelAddress.optional(),
     reasoning: reasoningLevel.optional(),
     extensions: z.array(id).max(16).optional(),
@@ -341,6 +342,10 @@ const terminalOutput = z.union([
     ...waitingOnYouField,
   }),
 ]);
+const waitOutput = z.union([
+  terminalOutput,
+  z.strictObject({ commandId: id, outcome: z.literal("timed_out") }),
+]);
 const acceptedOutput = z.strictObject({
   status: z.literal("accepted"),
   commandId: id,
@@ -402,6 +407,21 @@ function admitArchiveRefusal(operation: string, cause: unknown): never {
       rawCause: cause,
     });
   throw cause;
+}
+
+/** Preserve the question owner's sanitized failure at the model-tool boundary. */
+function admitAnswerFailure(cause: unknown): never {
+  if (cause instanceof ShiitakeError)
+    throw new CapabilityFailed({
+      namespace: "agents",
+      operation: "answer",
+      cause: {
+        kind: "OperationFailed",
+        message: `answer:${cause.cause}: ${cause.message}`,
+      },
+      rawCause: cause,
+    });
+  return admitArchiveRefusal("answer", cause);
 }
 
 /** The address and thinking level a caller reads back for a model choice. */
@@ -528,6 +548,15 @@ export type AgentControlDirectory = Readonly<{
     signal: AbortSignal,
     invocation?: AgentDelegationInvocation,
   ) => Promise<Accepted | Held>;
+  /**
+   * Sessions of one Agent that the host recorded as accepting work from this
+   * Session. A Session an Agent created and then steered has no first
+   * delegator, so `status` also lists these.
+   */
+  sentSessions?: (
+    sourceSessionId: string,
+    agentId: string,
+  ) => readonly string[];
   /** Recall under the same host-owned request identity as send. Never abort active work. */
   recall?: (
     input: AgentRecallInput,
@@ -557,6 +586,8 @@ export type AgentControlDirectory = Readonly<{
     input: Readonly<{
       requestId: string;
       name?: string;
+      /** Project-relative directory for the helper; omitted to inherit its creator's. */
+      folder?: string;
       model?: ModelPreference;
       /**
        * Installed extensions to enable on the new Agent. The host refuses any
@@ -663,6 +694,20 @@ function directedStatus(
     : assigned;
 }
 
+/** Read within the original wait budget, including time spent opening the Agent. */
+function readAgentSettlement(
+  session: ShiitakeSession,
+  commandId: string,
+  timeoutMs: number,
+  signal: AbortSignal,
+  startedAt: number,
+) {
+  return session.readSettlement(commandId, {
+    timeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+    signal,
+  });
+}
+
 /** Await one exact durable terminal without opening a transcript observation. */
 export async function waitForAgentSettlement(
   session: ShiitakeSession,
@@ -671,11 +716,22 @@ export async function waitForAgentSettlement(
   signal: AbortSignal,
   startedAt = Date.now(),
 ) {
-  const settled = await session.readSettlement(commandId, {
-    timeoutMs: Math.max(0, timeoutMs - (Date.now() - startedAt)),
+  const settled = await readAgentSettlement(
+    session,
+    commandId,
+    timeoutMs,
     signal,
-  });
-  if (settled === undefined) throw new Error("Agent wait timed out");
+    startedAt,
+  );
+  if (settled === undefined)
+    throw new CapabilityFailed({
+      namespace: "agents",
+      operation: "wait",
+      cause: {
+        kind: "OperationFailed",
+        message: "Agent wait timed out; no terminal observed. Call wait again.",
+      },
+    });
   return settled;
 }
 
@@ -770,15 +826,16 @@ export function createAgentControlSource(
       : Mycelium.operation({
           replay: "unsafe",
           description:
-            "Create one ordinary Agent (a subagent to spawn work on) and its first Session in the current authorized scope. Returns agentId and a usable sessionId: immediately agents.send with delivery: steer, then collect the reply with agents.wait; no separate createSession is needed. Reuse requestId when retrying the same creation and first Session. Optional name labels the Agent; model is a host-offered provider/model from agents.models; reasoning (minimal, low, medium, high, xhigh or max) needs model. The result also returns name, workingDirectory (the host's project directory), and the requested model/reasoning default, absent when inherited. An unoffered model fails with model:rejected and up to ten offered addresses. A new Agent starts with the base roster; extensions may enable only extension ids the creating Agent holds. An unheld extension fails with create:exceeds_creator and creates nothing.",
+            "Create one ordinary Agent (a subagent to spawn work on) and its first Session in the current authorized scope. Returns agentId and a usable sessionId: immediately agents.send with delivery: steer, then collect the reply with agents.wait; no separate createSession is needed. Reuse requestId when retrying the same creation and first Session. Optional name labels the Agent; model is a host-offered provider/model from agents.models; reasoning (minimal, low, medium, high, xhigh or max) needs model. folder: a project-relative directory for the helper to work in; defaults to yours. The result also returns name, workingDirectory (the helper's directory), and the requested model/reasoning default, absent when inherited. An unoffered model fails with model:rejected and up to ten offered addresses. A new Agent starts with the base roster; extensions may enable only extension ids the creating Agent holds. An unheld extension fails with create:exceeds_creator and creates nothing.",
           input: createInput,
           output: createdAgentOutput,
           execute: async (
-            { requestId, name, model, reasoning, extensions },
+            { requestId, name, folder, model, reasoning, extensions },
             context,
           ) => {
             let request: Parameters<typeof create>[0] = { requestId };
             if (name !== undefined) request = { ...request, name };
+            if (folder !== undefined) request = { ...request, folder };
             if (extensions !== undefined) request = { ...request, extensions };
             if (model !== undefined) {
               const address = parseModelAddress(model);
@@ -909,15 +966,15 @@ export function createAgentControlSource(
         requestOperations.answer = Mycelium.operation({
           replay: "unsafe",
           description:
-            "Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Only the exact Session the item waits on can answer; others are refused (not_sender). The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If it needs more than you can decide, agents.escalate bubbles it to your parent first. An item you leave keeps waiting on you; you are reminded at most twice. A person sees it only after escalation past every Agent or when its waiting Agent is gone.",
+            'Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Supply answers keyed by question id, for example {branch:{selected:["main"]}} or {branch:{selected:[],text:"Use the release branch"}}; answer every question using its offered labels or nonempty text. Only the exact Session the item waits on can answer; others are refused (not_sender), including a new Session on the same Agent. The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If it needs more than you can decide, agents.escalate bubbles it to your parent first. An item you leave keeps waiting on you; you are reminded at most twice. A person sees it only after escalation past every Agent or when its waiting Agent is gone.',
           input: answerInput,
           output: answerOutput,
           execute: async (input, context) => {
             if (session === undefined)
-              throw new Error("Answering requires an invoking Session");
+              return { status: "refused", reason: "no_provenance" };
             return answerOutput.parse(
               await answer(input, session.sessionId, context.signal).catch(
-                (cause: unknown) => admitArchiveRefusal("answer", cause),
+                admitAnswerFailure,
               ),
             );
           },
@@ -942,7 +999,7 @@ export function createAgentControlSource(
       if (session !== undefined)
         requestOperations.status = Mycelium.operation({
           replay: "safe",
-          description: `Say what each Session you delegated to one Agent is doing now: working, waiting (with waitingOn naming the Agent or person), stopped_with_work_assigned (it ended its turn while its goal is still open or paused; objective names the work and pausedBy a paused goal's cause), finished or failed. Only Sessions whose first delegator is this Session are listed, among the ${String(statusReadLimit)} most relevant, at most ${String(statusSessionLimit)}; truncated reports more. Follow a stopped Session up with agents.send or agents.goal.`,
+          description: `Say what each Session you delegated to one Agent is doing now: working, waiting (with waitingOn naming the Agent or person), stopped_with_work_assigned (it ended its turn while its goal is still open or paused; objective names the work and pausedBy a paused goal's cause), finished or failed. Only Sessions whose first delegator is this Session, or that this Session sent work to, are listed, among the ${String(statusReadLimit)} most relevant, at most ${String(statusSessionLimit)}; truncated reports more. Follow a stopped Session up with agents.send or agents.goal.`,
           input: agentInput,
           output: statusOutput,
           execute: async ({ agentId }, context) =>
@@ -954,6 +1011,9 @@ export function createAgentControlSource(
                 context.signal,
                 async (agent) => {
                   const rows: z.infer<typeof statusRow>[] = [];
+                  const sent = new Set(
+                    directory.sentSessions?.(session.sessionId, agentId),
+                  );
                   let after: string | undefined;
                   let truncated = false;
                   let reads = 0;
@@ -969,7 +1029,10 @@ export function createAgentControlSource(
                       const snapshot = await agent
                         .session(row.sessionId)
                         .read({ limit: 1 });
-                      if (snapshot.parent?.sessionId !== session.sessionId)
+                      if (
+                        snapshot.parent?.sessionId !== session.sessionId &&
+                        !sent.has(row.sessionId)
+                      )
                         continue;
                       if (rows.length === statusSessionLimit) {
                         truncated = true;
@@ -1206,9 +1269,9 @@ export function createAgentControlSource(
                 }),
                 wait: Mycelium.operation({
                   replay: "safe",
-                  description: `Wait up to timeoutMs (1 to ${String(maxWaitMs)}, default 15000) for one exact command terminal on an authorized Session, such as a subagent's task; call again to keep waiting. A completed command also returns its final assistant text, at most ${String(finalTextLimit)} characters with truncated set when cut; other outcomes return no text.`,
+                  description: `Wait up to timeoutMs (1 to ${String(maxWaitMs)}, default 15000) for one exact command terminal on an authorized Session, such as a subagent's task. Returns outcome: timed_out when no terminal was observed within that time; this does not cancel the command or mean it failed. Call again with the same commandId to keep waiting. A completed command also returns its final assistant text, at most ${String(finalTextLimit)} characters with truncated set when cut; other outcomes return no text.`,
                   input: waitInput,
-                  output: terminalOutput,
+                  output: waitOutput,
                   execute: async (
                     { agentId, sessionId, commandId, timeoutMs },
                     context,
@@ -1220,7 +1283,7 @@ export function createAgentControlSource(
                       agentId,
                       context.signal,
                       (agent) =>
-                        waitForAgentSettlement(
+                        readAgentSettlement(
                           agent.session(sessionId),
                           commandId,
                           timeoutMs,
@@ -1228,6 +1291,8 @@ export function createAgentControlSource(
                           startedAt,
                         ),
                     );
+                    if (settlement === undefined)
+                      return { commandId, outcome: "timed_out" as const };
                     const { terminal: settled, content: text } = settlement;
                     const result: WaitResult = {
                       commandId: settled.commandId,

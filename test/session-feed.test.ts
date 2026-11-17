@@ -8,6 +8,7 @@ import {
 import {
   encodeSessionFrame,
   openSessionFrameFeed,
+  publishOwnerObservation,
 } from "../src/internal/observation-kernel.js";
 import { runningActivity } from "./fixtures/client.fixture.js";
 import { Shiitake } from "../src/index.js";
@@ -174,10 +175,26 @@ it("keeps a quiet Session's queued commit during sibling churn and replays stric
     });
     if (first.cursor === null) throw new Error("Missing committed cursor");
     expect(first.cursor).toBe((await quiet.read()).cursor);
+    const siblingCommit = nextUpdate(siblingChanges);
+    const siblingRow = notice("busy-sibling", "committed");
+    expect(await siblingCommit).toMatchObject({
+      kind: "update",
+      compactionNotices: [{ sequence: siblingRow.sequence }],
+    });
+    // Cross the 256-frame bound with actual sibling deliveries, not 260
+    // ever-growing histories and context projections. Activity uses the same
+    // producer/fan-out but cannot replace the quiet Session's durable commit.
     for (let index = 0; index < 260; index += 1) {
-      const next = nextUpdate(siblingChanges);
-      notice("busy-sibling", `sibling-${String(index)}`);
-      expect(await next).toMatchObject({ kind: "update" });
+      const next = (async () => {
+        for (;;) {
+          const frame = await siblingChanges.next();
+          if (frame.done) throw new Error("Sibling feed ended during churn");
+          if (frame.value.kind === "activity") return frame.value;
+          expect(["tool_output", "heartbeat"]).toContain(frame.value.kind);
+        }
+      })();
+      publishOwnerObservation(fixture.owner, "busy-sibling", "activity");
+      expect(await next).toMatchObject({ kind: "activity" });
     }
     expect((await slowChanges.next()).value).toBe(first);
 

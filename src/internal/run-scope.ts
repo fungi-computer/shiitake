@@ -369,11 +369,20 @@ export function runAcceptedCommand(
               event.value.stopReason === "error"
             ) {
               const providerError = acquired.providerError?.(event.value);
-              if (providerError !== undefined)
-                return recorder({
-                  ...event,
-                  value: { ...event.value, providerError },
-                });
+              const rejection = acquired.rejection?.(event.value);
+              return recorder({
+                ...event,
+                value: {
+                  ...event.value,
+                  ...(providerError !== undefined && { providerError }),
+                  ...(rejection !== undefined && {
+                    modelFailure: {
+                      provider: event.value.provider,
+                      cause: rejection,
+                    },
+                  }),
+                },
+              });
             }
             return recorder(event);
           };

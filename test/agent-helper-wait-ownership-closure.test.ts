@@ -233,3 +233,94 @@ it("aborts only the public wait observation and cancels only the explicitly addr
     }
   }
 });
+
+it("returns a timed-out observation while the helper runs, then its real result on the next wait", async () => {
+  const modelStarted = await Effect.runPromise(Deferred.make<undefined>());
+  const finishModel = await Effect.runPromise(Deferred.make<undefined>());
+  const fixture = createNativeSqliteOwnerFixture();
+  const runtime = createCompatibilityRuntimeHost();
+  const faux = fauxModel([]);
+  let modelSignal: AbortSignal | undefined;
+  faux.setResponses([
+    async (_context, options) => {
+      modelSignal = options?.signal;
+      await Effect.runPromise(Deferred.succeed(modelStarted, undefined));
+      await Effect.runPromise(Deferred.await(finishModel));
+      return fauxAssistantMessage("Helper finished");
+    },
+  ]);
+  const agent = await Shiitake.make({
+    ...compatibilityRunDependencies(),
+    store: fixture.owner,
+    runtime: runtime.runtime,
+    model: {
+      acquire: () =>
+        Promise.resolve({
+          model: faux.model,
+          retryable: () => false,
+          stream: faux.stream,
+          release: () => Promise.resolve(),
+        }),
+    },
+  });
+  let running: Promise<void> | undefined;
+  let releases = 0;
+  const results: unknown[] = [];
+  const directory: AgentControlDirectory = {
+    list: () => Promise.resolve([]),
+    open: () =>
+      Promise.resolve({
+        agent,
+        release: () => {
+          releases += 1;
+          return Promise.resolve();
+        },
+      }),
+  };
+  try {
+    const session = agent.session("helper");
+    const { commandId } = await session.send("Do the work", {
+      requestId: "work",
+      delivery: "steer",
+    });
+    running = runtime.runNext();
+    await Effect.runPromise(Deferred.await(modelStarted));
+    const target = { agentId: "helper", sessionId: "helper", commandId };
+    const first = await runControl(directory, async ({ wait }) => {
+      if (wait === undefined) throw new Error("Wait missing");
+      results.push(await wait({ ...target, timeoutMs: 1 }));
+      return null;
+    });
+    expect(Exit.isSuccess(first)).toBe(true);
+    if (Exit.isSuccess(first))
+      expect(first.value[0]).toMatchObject({ result: { isError: false } });
+    expect(results).toEqual([{ commandId, outcome: "timed_out" }]);
+    expect(releases).toBe(1);
+    expect((await session.read()).activity.queue.state).toBe("running");
+    expect(modelSignal?.aborted).toBe(false);
+
+    await Effect.runPromise(Deferred.succeed(finishModel, undefined));
+    await running;
+    const second = await runControl(directory, async ({ wait }) => {
+      if (wait === undefined) throw new Error("Wait missing");
+      results.push(await wait({ ...target, timeoutMs: 1000 }));
+      return null;
+    });
+    expect(Exit.isSuccess(second)).toBe(true);
+    if (Exit.isSuccess(second))
+      expect(second.value[0]).toMatchObject({ result: { isError: false } });
+    expect(results[1]).toEqual({
+      commandId,
+      outcome: "completed",
+      text: "Helper finished",
+      truncated: false,
+    });
+    expect(releases).toBe(2);
+    expect(faux.state.callCount).toBe(1);
+  } finally {
+    await Effect.runPromise(Deferred.succeed(finishModel, undefined));
+    await running;
+    await agent.close();
+    fixture.close();
+  }
+});
