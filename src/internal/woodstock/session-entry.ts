@@ -92,6 +92,7 @@ export const usage: Schema.Codec<Usage> = Schema.Struct({
     cacheRead: Schema.Number,
     cacheWrite: Schema.Number,
     total: Schema.Number,
+    totalFromProvider: Schema.optionalKey(Schema.Boolean),
   }),
 });
 const userMessage: Schema.Codec<UserMessage> = Schema.Struct({

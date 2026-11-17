@@ -104,6 +104,8 @@ function assistant(text: string, stopReason: "pending" | "stop") {
         cacheRead: 0.001,
         cacheWrite: 0,
         total: 0.031,
+        // Pi 1.5.2 calculateCost stamps this on every response.
+        totalFromProvider: false,
       },
     },
     stopReason,

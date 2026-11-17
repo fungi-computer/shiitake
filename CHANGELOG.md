@@ -1,5 +1,18 @@
 # @fungi.computer/shiitake
 
+## 0.19.2
+
+### Patch Changes
+
+- Changes since 0.19.1:
+
+  - fix(shiitake): store Pi 1.5.2 replies that mark estimated cost
+
+- Updated dependencies
+  - @fungi.computer/mule@0.2.5
+  - @fungi.computer/knapsack@0.4.15
+  - @fungi.computer/mycelium@0.4.2
+
 ## 0.19.1
 
 ### Patch Changes
