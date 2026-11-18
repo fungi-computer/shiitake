@@ -6,6 +6,12 @@ export {
 import type { CommandSettlement } from "./internal/contracts.js";
 export type { CommandSettlement } from "./internal/contracts.js";
 export { type SessionAttention } from "./session-attention.js";
+/** The typed failure every door throws, importable without the owner runtime. */
+export {
+  ShiitakeError,
+  type ShiitakeErrorBoundary,
+  type ShiitakeErrorCause,
+} from "./errors.js";
 import type { SandboxFailureEvent } from "@fungi.computer/mycelium";
 import type { ModelPreference } from "./internal/model-preference.js";
 import type { Message } from "@fungi.computer/mule/effect";

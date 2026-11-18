@@ -1,5 +1,30 @@
 # @fungi.computer/shiitake
 
+## 0.21.0
+
+### Minor Changes
+
+- Changes since 0.20.4:
+
+  - fix(shiitake): refuse a recognisable key before asking the Vault port
+  - fix(shiitake): refuse secrets in operator lines and compaction focus
+  - fix(shiitake): brand interrupted tool results as retained output
+  - fix(shiitake): brand redacted output at runtime and decode it by its own
+    grammar
+  - feat(oyster): scrub stored credentials from Agent Sessions by fingerprint
+  - feat(shiitake): refuse a prompt that holds a secret before admission
+  - feat(shiitake): let intake ask the Vault matcher whether text holds a value
+  - feat(shiitake): scrub Vault values at every Session choke point
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/mule@0.3.0
+  - @fungi.computer/veil@0.8.1
+  - @fungi.computer/knapsack@0.4.20
+  - @fungi.computer/mycelium@0.4.7
+
 ## 0.20.4
 
 ### Patch Changes

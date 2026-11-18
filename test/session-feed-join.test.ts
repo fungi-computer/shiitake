@@ -14,6 +14,7 @@ import {
   createNativeSqliteOwnerFixture,
   noExtensions,
 } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 async function observerFixture() {
   const fixture = createNativeSqliteOwnerFixture();
@@ -104,7 +105,7 @@ it.each(["watch", "subscribe"] as const)(
           workId,
           expectedLeafId,
           head: head.id,
-          summary: workId,
+          summary: retainedOutput({ text: workId }),
           trigger: "manual",
           tokensBefore: 100,
           tokensAfter: 40,

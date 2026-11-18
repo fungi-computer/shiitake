@@ -140,6 +140,9 @@ type ShiitakeEffectOptions = Readonly<{
   createdBy?: string;
   retry?: RetryPolicy;
   modelStreamIdleTimeoutMs?: number;
+  redaction?: Readonly<{
+    load: Effect.Effect<SessionRedactor, ShiitakeError>;
+  }>;
 }>;
 ```
 

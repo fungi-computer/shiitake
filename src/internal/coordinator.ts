@@ -31,6 +31,7 @@ import {
   decodeClientSessionCommand,
   decodeClientSessionId,
 } from "./client-boundary.js";
+import { refuseSecretInPrompt } from "./secret-intake.js";
 import type {
   ShiitakeEffectAgent,
   ShiitakeEffectOwner,
@@ -43,6 +44,7 @@ import {
   publishOwnerObservation,
 } from "./observation-kernel.js";
 import { openSessionObservation } from "./session-observation.js";
+import { loadSessionRedaction } from "./redaction.js";
 import type { RuntimeCoordinator } from "./runtime-coordinator.js";
 import type { AdmitRequest } from "./admission-door.js";
 import { checkHostMeta } from "./host-meta.js";
@@ -353,6 +355,11 @@ function executeSessionCommand(
   Accepted | CancelResult | ForkedSession | undefined,
   ShiitakeError
 > {
+  // Text a person typed: a prompt, an operator or party line, compaction focus.
+  const refuseSecret = (text: string | undefined) =>
+    text === undefined || text.length === 0
+      ? Effect.void
+      : refuseSecretInPrompt(text, loadSessionRedaction(options.store));
   return runtime.assertOpen.pipe(
     Effect.andThen(decodeSessionCommand(sessionId, input)),
     // The one path every command's host metadata takes: checked once against
@@ -373,8 +380,19 @@ function executeSessionCommand(
       > => {
         switch (command.type) {
           case "prompt":
+            // A person's text is checked for secrets before the door: a
+            // refusal admits and stores nothing.
+            return refuseSecret(command.text).pipe(
+              Effect.andThen(
+                admitUserWork(runtime, decodedSessionId, command, checked),
+              ),
+            );
           case "compact":
-            return admitUserWork(runtime, decodedSessionId, command, checked);
+            return refuseSecret(command.instructions).pipe(
+              Effect.andThen(
+                admitUserWork(runtime, decodedSessionId, command, checked),
+              ),
+            );
           case "abort":
             return abortCurrentSession(
               options,
@@ -395,7 +413,10 @@ function executeSessionCommand(
           case "fork":
             return forkBranch(options, runtime, decodedSessionId, command);
           case "operator":
-            return runtime.assertOpen.pipe(
+            // An operator's reply or a visitor's line during a takeover is
+            // stored as written and enters the next run's context.
+            return refuseSecret(command.text).pipe(
+              Effect.andThen(runtime.assertOpen),
               Effect.andThen(
                 recordOperatorLine(options.store, {
                   sessionId: decodedSessionId,

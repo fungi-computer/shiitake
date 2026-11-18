@@ -5,6 +5,7 @@ import { sessionIds } from "../src/internal/woodstock/identities.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
 import { countMaterializedBytes } from "./fixtures/large-session.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 it("does not reread a live command's body before its terminal fact exists", async () => {
   const fixture = createNativeSqliteOwnerFixture();
@@ -40,7 +41,7 @@ it("does not reread a live command's body before its terminal fact exists", asyn
     woodstock.appendSessionEntry(fixture.owner, {
       sessionId: "child-session",
       id,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: admission.entry.workId,
         run,
@@ -56,7 +57,7 @@ it("does not reread a live command's body before its terminal fact exists", asyn
           stopReason: "stop",
           timestamp: 1,
         },
-      },
+      }),
     });
     for (let tick = 0; tick < 3; tick += 1) {
       measured.take();

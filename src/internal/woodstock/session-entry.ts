@@ -22,6 +22,7 @@ import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
 
 import { ModelPreferenceSchema } from "../model-preference.js";
+import type { RedactedOutput, RedactionCodec } from "../redaction.js";
 
 const closed = { onExcessProperty: "error" } as const;
 const encoder = new TextEncoder();
@@ -750,8 +751,66 @@ export function decodeStoredSessionEntry(value: string) {
   );
 }
 
+/**
+ * Kinds that carry model, tool or extension output. Commands and operator
+ * lines get no write redaction: intake refuses a secret in a person's prompt,
+ * operator or party line and compaction focus before admission, while Agent
+ * mail and extension prompts are stored as sent. Lifecycle kinds carry only
+ * closed identities and diagnostics.
+ */
+export type OutputKind =
+  | "message"
+  | "message_start"
+  | "model_prompt"
+  | "tool_intent"
+  | "tool_outcome"
+  | "compaction"
+  | "compaction_checkpoint"
+  | "sandbox_failure";
+
+/**
+ * What a store write accepts: an output entry only after the host's Vault
+ * matcher redacted it (or it is bytes already retained), never fresh output.
+ */
+export type PersistableSessionEntry =
+  | Exclude<StoredSessionEntry, { kind: OutputKind }>
+  | RedactedOutput<Extract<StoredSessionEntry, { kind: OutputKind }>>;
+
+function isEntryKind<K extends StoredSessionEntry["kind"]>(
+  entry: StoredSessionEntry,
+  kind: K,
+): entry is Extract<StoredSessionEntry, { kind: K }> {
+  return entry.kind === kind;
+}
+
+/**
+ * One entry kind's JSON codec, so redaction runs through the retained
+ * grammar and returns the same kind; anything else refuses.
+ */
+export function entryCodec<K extends StoredSessionEntry["kind"]>(
+  kind: K,
+): RedactionCodec<Extract<StoredSessionEntry, { kind: K }>> {
+  return {
+    encode: (entry) => encodeJson(entry),
+    decode: (text) => {
+      const entry = validateEntryJson(text);
+      if (isEntryKind(entry, kind)) return entry;
+      throw new TypeError("A redacted Session entry changed its kind");
+    },
+  };
+}
+
+const JsonValueTextSchema = Schema.fromJsonString(jsonValue);
+/** Tool and message application data, through its own JSON grammar. */
+export const jsonValueCodec: RedactionCodec<JsonValue> = {
+  encode: Schema.encodeSync(JsonValueTextSchema),
+  decode: Schema.decodeUnknownSync(JsonValueTextSchema),
+};
+
 /** Serialize Pi's JSON representation, then validate the retained entry. */
-export function encodeStoredSessionEntry(entry: StoredSessionEntry): string {
+export function encodeStoredSessionEntry(
+  entry: PersistableSessionEntry,
+): string {
   const encoded = encodeJson(entry);
   validateEntryJson(encoded);
   return encoded;

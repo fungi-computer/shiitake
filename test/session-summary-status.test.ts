@@ -11,6 +11,7 @@ import {
   createNativeSqliteOwnerFixture,
   type NativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -129,14 +130,14 @@ it("does not report an orphaned streaming entry as in-play work", async () => {
       sessionId,
       id: message.value,
       state: "streaming",
-      entry: {
+      entry: retainedOutput({
         kind: "message_start",
         workId: sessionIds.work.generate(),
         run,
         turn,
         message,
         role: "assistant",
-      },
+      }),
     });
 
     expect((await host.agent.listSessions()).sessions).toEqual([

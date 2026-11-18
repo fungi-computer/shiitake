@@ -36,13 +36,13 @@ Construct a sanitized boundary failure.
 
 ###### Parameters
 
-| Parameter    | Type                                                                                                                                                                    | Description                                                                                                                        |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | Boundary that rejected the operation.                                                                                              |
-| `category`   | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | Safe category describing why it was rejected.                                                                                      |
-| `message`    | `string`                                                                                                                                                                | Human-readable message safe for callers to display.                                                                                |
-| `requestId?` | `string`                                                                                                                                                                | Request identity recoverable when a send may have reached the owner.                                                               |
-| `cause?`     | `unknown`                                                                                                                                                               | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
+| Parameter    | Type                                                                                                                                                                                            | Description                                                                                                                        |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                                                     | Boundary that rejected the operation.                                                                                              |
+| `category`   | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"secret_in_prompt"` | Safe category describing why it was rejected.                                                                                      |
+| `message`    | `string`                                                                                                                                                                                        | Human-readable message safe for callers to display.                                                                                |
+| `requestId?` | `string`                                                                                                                                                                                        | Request identity recoverable when a send may have reached the owner.                                                               |
+| `cause?`     | `unknown`                                                                                                                                                                                       | The original thrown value, kept for server-side diagnosis only. It is never serialized: the wire encoder copies named fields only. |
 
 ###### Returns
 
@@ -76,7 +76,8 @@ readonly cause:
   | "rejected"
   | "unavailable"
   | "state_reset_required"
-  | "storage_pressure";
+  | "storage_pressure"
+  | "secret_in_prompt";
 ```
 
 Safe category describing why it was rejected.
@@ -607,10 +608,44 @@ type ShiitakeOptions = Readonly<{
   recipientStatus?: (recipient) => Promise<RecipientStatus>;
   recipientParent?: (recipient) => Promise<AttentionRecipient | null>;
   createdBy?: string;
+  redaction?: Readonly<{
+    load: () => Promise<SessionRedactor>;
+  }>;
 }>;
 ```
 
 Validated immutable construction bag for the durable harness.
+
+---
+
+### SessionRedactionResult
+
+```ts
+type SessionRedactionResult = Readonly<{
+  text: string;
+  status: "clean" | "redacted" | "unavailable";
+}>;
+```
+
+One redaction outcome; `unavailable` text is the withheld notice.
+
+---
+
+### SessionRedactor
+
+```ts
+type SessionRedactor = Readonly<{
+  contains: (text) => Promise<boolean>;
+  redact: (text) => Promise<SessionRedactionResult>;
+  stream: () => Readonly<{
+    write: (chunk) => Promise<SessionRedactionResult>;
+    finish: () => Promise<SessionRedactionResult>;
+  }>;
+}>;
+```
+
+A known-value matcher the host builds from fingerprints of its stored values
+(Veil's `@fungi.computer/veil/redaction`). It never exposes a value.
 
 ---
 

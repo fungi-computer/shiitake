@@ -38,6 +38,7 @@ import {
   type ExtensionRuntime,
 } from "./extension-runtime.js";
 import { reconcileRuntime } from "./runtime-reconciliation.js";
+import { bindSessionRedaction } from "./redaction.js";
 import {
   advanceCursor,
   createSessionWithinTransaction,
@@ -151,6 +152,9 @@ export function openRuntimeCoordinator(
       return yield* Effect.fail(
         runtimeFailure("Host lane conflicts with Agent work"),
       );
+    // Bound before recovery, so no recovered write can skip the host's Vault.
+    if (options.redaction !== undefined)
+      bindSessionRedaction(options.store, options.redaction.load);
     let lifecycleState: CoordinatorLifecycleState = "open";
     let retainedFailure: ShiitakeError | undefined;
     let retainedBeforeClose: ShiitakeError | undefined;

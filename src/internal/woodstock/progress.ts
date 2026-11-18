@@ -13,6 +13,12 @@ import { ShiitakeError } from "../../errors.js";
 import type { SqliteOwner } from "../contracts.js";
 import { publishOwnerObservation } from "../observation-kernel.js";
 import {
+  liveTextRedaction,
+  redactOwned,
+  type LiveTextRedaction,
+} from "../redaction.js";
+import { entryCodec } from "./session-entry.js";
+import {
   recordStreamingPartialOwned,
   type AcceptedCommand,
   type RecoveredPartial,
@@ -334,6 +340,10 @@ export function openProgress(
       publishOwnerObservation(owner, accepted.sessionId, "progress");
     }
     let started: ProgressMessageStart | undefined;
+    // Live text holds back what could begin a stored value; a reply's whole
+    // text is redacted again when its message is recorded.
+    let liveText: LiveTextRedaction = () => Effect.succeed("");
+    let liveThinking: LiveTextRedaction = () => Effect.succeed("");
     let flushedAt = 0;
     let publishedLength = 0;
     let flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -364,6 +374,8 @@ export function openProgress(
         Effect.sync(() => {
           cancelFlush();
           started = event;
+          liveText = liveTextRedaction(owner);
+          liveThinking = liveTextRedaction(owner);
           flushedAt = 0;
           if (current.value?.recovered !== true) current.value = null;
           publishedLength = 0;
@@ -388,55 +400,74 @@ export function openProgress(
             delta.delta.length === 0
           )
             return Effect.void;
-          const first =
-            current.value === null || current.value.recovered === true;
-          const value = (first ? null : current.value) ?? {
-            messageId: event.message.value,
-            revision: 0,
-            text: emptyTail(),
-            thinking: emptyTail(),
-          };
-          appendTail(
-            delta.type === "text_delta" ? value.text : value.thinking,
-            delta.delta,
-          );
-          value.revision++;
-          current.value = value;
-          const length = value.text.length + value.thinking.length;
-          // Coalesce tiny tokens, but flush a paused provider within 100 ms.
-          // One scope-owned timer holds no reply text; it only publishes.
-          if (first || length - publishedLength >= 4096) {
-            publish();
-          } else flushTimer ??= setTimeout(publish, 100);
-          const now = Date.now();
-          if (delta.type !== "text_delta" || now - flushedAt < partialFlushMs)
-            return Effect.void;
-          flushedAt = now;
-          return Effect.try({
-            try: () => {
-              recordStreamingPartialOwned(owner, {
-                sessionId: accepted.sessionId,
-                entry: {
+          const live = delta.type === "text_delta" ? liveText : liveThinking;
+          return live(delta.delta).pipe(
+            Effect.flatMap((settled) => {
+              if (settled.length === 0) return Effect.void;
+              const first =
+                current.value === null || current.value.recovered === true;
+              const value = (first ? null : current.value) ?? {
+                messageId: event.message.value,
+                revision: 0,
+                text: emptyTail(),
+                thinking: emptyTail(),
+              };
+              appendTail(
+                delta.type === "text_delta" ? value.text : value.thinking,
+                settled,
+              );
+              value.revision++;
+              current.value = value;
+              const length = value.text.length + value.thinking.length;
+              // Coalesce tiny tokens, but flush a paused provider within 100 ms.
+              // One scope-owned timer holds no reply text; it only publishes.
+              if (first || length - publishedLength >= 4096) {
+                publish();
+              } else flushTimer ??= setTimeout(publish, 100);
+              const now = Date.now();
+              if (
+                delta.type !== "text_delta" ||
+                now - flushedAt < partialFlushMs
+              )
+                return Effect.void;
+              flushedAt = now;
+              return redactOwned(
+                owner,
+                {
                   kind: "message_start",
                   workId: accepted.commandId,
                   run: messageStart.run,
                   turn: messageStart.turn,
                   message: messageStart.message,
                   role: "assistant",
+                  partial: {
+                    text: tailAfter(value.text, tailOffset(value.text)),
+                    offset: tailOffset(value.text),
+                  },
                 },
-                text: tailAfter(value.text, tailOffset(value.text)),
-                offset: tailOffset(value.text),
-              });
-            },
-            catch: (error) =>
-              new ShiitakeError(
-                "store",
-                "rejected",
-                "Native Session store operation failed",
-                undefined,
-                error,
-              ),
-          });
+                entryCodec("message_start"),
+              ).pipe(
+                Effect.flatMap((entry) =>
+                  Effect.try({
+                    try: () => {
+                      recordStreamingPartialOwned(owner, {
+                        sessionId: accepted.sessionId,
+                        entry,
+                      });
+                    },
+                    catch: (error) =>
+                      new ShiitakeError(
+                        "store",
+                        "rejected",
+                        "Native Session store operation failed",
+                        undefined,
+                        error,
+                      ),
+                  }),
+                ),
+              );
+            }),
+          );
         }),
       terminal: (event) => clear.pipe(Effect.andThen(complete(event))),
     });

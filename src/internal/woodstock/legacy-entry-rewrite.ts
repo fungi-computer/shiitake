@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 
 import { compactionSummaryMessage } from "../compaction/utils.js";
 import type { SqliteOwner } from "../contracts.js";
+import { retainedOutput } from "../redaction.js";
 import { ShiitakeError } from "../../errors.js";
 import {
   decodeStoredSessionEntry,
@@ -106,13 +107,18 @@ export function rewriteOldCompactionRows(owner: SqliteOwner): void {
     if (value.details !== undefined) data.details = value.details;
     owner.sql.exec(
       "UPDATE session_entries SET data_json = ? WHERE id = ?",
-      encodeStoredSessionEntry({
-        kind: "compaction",
-        workId: value.workId,
-        head: value.firstKeptEntryId,
-        model: [compactionSummaryMessage(value.summary, row.success.timestamp)],
-        data,
-      }),
+      // Re-keys a retained row's own summary; it writes no fresh output.
+      encodeStoredSessionEntry(
+        retainedOutput({
+          kind: "compaction",
+          workId: value.workId,
+          head: value.firstKeptEntryId,
+          model: [
+            compactionSummaryMessage(value.summary, row.success.timestamp),
+          ],
+          data,
+        }),
+      ),
       row.success.id,
     );
   }

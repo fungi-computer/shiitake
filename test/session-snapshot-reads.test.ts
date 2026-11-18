@@ -17,6 +17,7 @@ import {
   createNativeSqliteOwnerFixture,
   type NativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const activity = {
   facts: idleActivity,
@@ -51,7 +52,7 @@ function append(owner: SqliteOwner, sessionId: string, content: string) {
   return woodstock.appendSessionEntry(owner, {
     sessionId,
     id: sessionIds.fact.generate(),
-    entry: command(sessionIds.work.generate(), content),
+    entry: retainedOutput(command(sessionIds.work.generate(), content)),
   });
 }
 

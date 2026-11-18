@@ -9,6 +9,7 @@ import {
 } from "../src/internal/woodstock/index.js";
 import { admitStoredCommand } from "./fixtures/admission-door.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const run = { kind: "run", value: "partial-run" } as const;
 const turn = { kind: "turn", value: "partial-turn", parent: run } as const;
@@ -43,7 +44,7 @@ function openedWork() {
     appendSessionEntry(fixture.owner, {
       sessionId: "partial-session",
       id: value,
-      entry,
+      entry: retainedOutput(entry),
       state: "streaming",
     });
     return entry;
@@ -86,16 +87,18 @@ it("keeps only the newest placeholder that holds flushed text and hands it to th
     placeholder("empty-newest");
     recordStreamingPartialOwned(fixture.owner, {
       sessionId: "partial-session",
-      entry: older,
-      text: "half an answ",
-      offset: 0,
+      entry: retainedOutput({
+        ...older,
+        partial: { text: "half an answ", offset: 0 },
+      }),
     });
     const newer = placeholder("newer-shape");
     recordStreamingPartialOwned(fixture.owner, {
       sessionId: "partial-session",
-      entry: newer,
-      text: "half an answer so far",
-      offset: 7,
+      entry: retainedOutput({
+        ...newer,
+        partial: { text: "half an answer so far", offset: 7 },
+      }),
     });
     placeholder("empty-last");
     expect(claim().recoveredPartial).toEqual({

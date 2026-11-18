@@ -21,6 +21,7 @@ import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
 
 import { ShiitakeError } from "../errors.js";
+import { loadSessionRedaction, toolResultRedaction } from "./redaction.js";
 import type { InstructionSnapshot } from "./contracts.js";
 import type { ShiitakeEffectOptions } from "./effect-contracts.js";
 import type {
@@ -42,6 +43,7 @@ import {
 } from "./run-failure-reason.js";
 import {
   isCompactCommand,
+  jsonValueCodec,
   openMuleRecorder,
   readSessionGrants,
   recordLiveRetryEvent,
@@ -139,6 +141,7 @@ const runRejectedDiagnostics = {
   tool: "tool-failed",
   control: "control-failed",
   listener: "listener-failed",
+  redaction: "redaction-unavailable",
 } as const;
 
 /** A run Mule ended with a non-model error; it names a closed reason. */
@@ -270,6 +273,9 @@ export function runAcceptedCommand(
             custody,
           ),
         );
+      // The host's Vault matcher loads before anything can be recorded; a
+      // port that is down fails the run with a typed, persistable reason.
+      yield* loadSessionRedaction(options.store);
       // Preparatory ports have returned and instruction release is owned.
       const acquired = yield* acquireRunModel(options, prepared, custody);
       const tools = yield* acquiredTools(
@@ -426,6 +432,10 @@ export function runAcceptedCommand(
             messages: workingMessages,
             resume: continuation,
             tools,
+            redactToolResult: toolResultRedaction(
+              options.store,
+              jsonValueCodec,
+            ),
             getSteeringMessages: () => controlMessages("steer"),
             getFollowUpMessages: replyOwed,
             prepareNextTurn: (turn) =>
@@ -523,6 +533,7 @@ export function runAcceptedCompaction(
 ): Effect.Effect<ManualCompactionOutcome, ShiitakeError> {
   return Effect.scoped(
     Effect.gen(function* () {
+      yield* loadSessionRedaction(options.store);
       const acquired = yield* acquireRunModel(options, prepared, custody);
       const entry = prepared.command.entry;
       return yield* compactSession({

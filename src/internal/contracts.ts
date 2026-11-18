@@ -297,6 +297,45 @@ export type ShiitakeOptions = Readonly<{
    * a person made.
    */
   createdBy?: string;
+  /**
+   * The host's Vault redaction. Absent means this host stores no values.
+   * Shiitake loads the matcher before a run, each tool result, a compaction
+   * and a read; a rejected load withholds output and fails closed.
+   */
+  redaction?: Readonly<{
+    /** The current matcher; a rejection fails the run or read closed. */
+    load: () => Promise<SessionRedactor>;
+  }>;
+}>;
+
+/** One redaction outcome; `unavailable` text is the withheld notice. */
+export type SessionRedactionResult = Readonly<{
+  text: string;
+  status: "clean" | "redacted" | "unavailable";
+}>;
+
+/**
+ * A known-value matcher the host builds from fingerprints of its stored
+ * values (Veil's `@fungi.computer/veil/redaction`). It never exposes a value.
+ */
+export type SessionRedactor = Readonly<{
+  /**
+   * Whether whole text holds a stored value, for intake refusal before
+   * admission. True also when the matcher is unavailable (fail closed).
+   */
+  contains: (text: string) => Promise<boolean>;
+  /** Whole text with every stored value replaced by the mask. */
+  redact: (text: string) => Promise<SessionRedactionResult>;
+  /**
+   * A fresh stream that holds back any text that could begin a match. Await
+   * each write before the next.
+   */
+  stream: () => Readonly<{
+    /** The settled prefix of everything written so far; the tail is held. */
+    write: (chunk: string) => Promise<SessionRedactionResult>;
+    /** The held tail, redacted, once the text ends. */
+    finish: () => Promise<SessionRedactionResult>;
+  }>;
 }>;
 
 /**

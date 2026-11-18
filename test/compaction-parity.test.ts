@@ -30,6 +30,9 @@ import {
   createNativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
 
+/** A host with no Vault: prompts pass unchanged. */
+const unredacted = (prompt: string) => Promise.resolve(prompt);
+
 const sessionId = "compaction-parity";
 
 /** The text of one request's first user line, as the provider saw it. */
@@ -433,8 +436,11 @@ describe("split-turn summaries (Node, faux)", () => {
     const answer: AssistantMessage = fauxAssistantMessage("prefix checkpoint");
     faux.setResponses([{ ...answer, usage }]);
     const result = await Effect.runPromise(
-      compact(preparation("earlier summary"), faux.model, (m, c, o) =>
-        faux.stream(m, c, o),
+      compact(
+        preparation("earlier summary"),
+        faux.model,
+        unredacted,
+        (m, c, o) => faux.stream(m, c, o),
       ),
     );
     expect(result.summary).toMatch(/^earlier summary\n\n---\n\n/u);
@@ -450,7 +456,7 @@ describe("split-turn summaries (Node, faux)", () => {
     ]);
     await expect(
       Effect.runPromise(
-        compact(preparation(undefined), faux.model, (m, c, o) =>
+        compact(preparation(undefined), faux.model, unredacted, (m, c, o) =>
           faux.stream(m, c, o),
         ),
       ),

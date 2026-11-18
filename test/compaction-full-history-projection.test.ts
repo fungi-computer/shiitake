@@ -21,6 +21,7 @@ import type { ClientReadOptions } from "../src/internal/client-boundary.js";
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { writeLargeSession } from "./fixtures/large-session.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const digest = "a".repeat(64);
 const contract = { core: digest, extensions: [] } as const;
@@ -83,13 +84,15 @@ function appendCompaction(
   return woodstock.appendSessionEntry(owner, {
     sessionId,
     id: sessionIds.fact.generate(),
-    entry: compactionEntryFixture({
-      workId: sessionIds.work.generate(),
-      head: firstKeptEntryId,
-      summary,
-      usage,
-      contextRevision: expectedLeafId,
-    }),
+    entry: retainedOutput(
+      compactionEntryFixture({
+        workId: sessionIds.work.generate(),
+        head: firstKeptEntryId,
+        summary,
+        usage,
+        contextRevision: expectedLeafId,
+      }),
+    ),
   });
 }
 

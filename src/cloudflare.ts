@@ -1,5 +1,8 @@
 import { liftHostJobs } from "./internal/promise-facade.js";
-import type { ShiitakeHostJobs } from "./internal/contracts.js";
+import type {
+  ShiitakeHostJobs,
+  ShiitakeOptions,
+} from "./internal/contracts.js";
 import type { CommandSettlement } from "./internal/contracts.js";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { VerifiedAgentReply } from "./internal/woodstock/index.js";
@@ -51,6 +54,7 @@ import type {
 } from "./internal/effect-contracts.js";
 import { acquireInstructionPromise } from "./internal/instruction-acquisition.js";
 import { adaptModelSource } from "./internal/model-acquisition.js";
+import { liftRedaction } from "./internal/redaction.js";
 import { decodeClientSessionId } from "./internal/client-boundary.js";
 import {
   deliverSessionGrants,
@@ -180,6 +184,8 @@ export type CloudflareShiitakeOptions = Readonly<{
   }>;
   /** Compaction budgets; absent uses Pi's defaults for every model. */
   compaction?: CompactionOptions;
+  /** The host's Vault redaction; absent means this host stores no values. */
+  redaction?: ShiitakeOptions["redaction"];
   /** The host's explicit extension roster and grants; there is no default. */
   extensions: ExtensionRosterV0;
   /**
@@ -508,6 +514,8 @@ function effectOptions(
     Object.assign(base, { admission: options.admission });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
+  if (options.redaction !== undefined)
+    Object.assign(base, { redaction: liftRedaction(options.redaction) });
   return tools === undefined ? base : { ...base, tools };
 }
 

@@ -23,6 +23,7 @@ import {
 } from "./fixtures/large-session.fixture.js";
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const activity = { facts: idleFacts, toolOutput: [], readProgress: () => null };
 const contract = { core: "a".repeat(64), extensions: [] } as const;
@@ -53,7 +54,7 @@ function append(
   return woodstock.appendSessionEntry(owner, {
     sessionId,
     id: sessionIds.fact.generate(),
-    entry,
+    entry: retainedOutput(entry),
   });
 }
 

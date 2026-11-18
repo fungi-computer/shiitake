@@ -30,6 +30,11 @@ const ShiitakeErrorCauseSchema = Schema.Literals([
   "storage_pressure",
   /** This Agent is archived; new Sessions and prompts require restoration. */
   "archived",
+  /**
+   * The prompt holds a provider-shaped key or a value the owner's Vault
+   * stores. It was refused before admission; nothing was stored.
+   */
+  "secret_in_prompt",
 ]);
 const requestIdSchema = Schema.String.pipe(
   Schema.check(Schema.isMinLength(1)),

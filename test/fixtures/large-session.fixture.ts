@@ -10,6 +10,7 @@ import {
   type StoredSessionEntry,
 } from "../../src/internal/woodstock/session-entry.js";
 import { appendSessionEntry } from "../../src/internal/woodstock/session-store.js";
+import { retainedOutput } from "../../src/internal/redaction.js";
 
 const contract = { core: "a".repeat(64), extensions: [] } as const;
 const usage = {
@@ -107,7 +108,11 @@ function appendWriter(owner: SqliteOwner, sessionId: string) {
       id: string = sessionIds.fact.generate(),
     ): string {
       if (position === undefined) {
-        const row = appendSessionEntry(owner, { sessionId, id, entry });
+        const row = appendSessionEntry(owner, {
+          sessionId,
+          id,
+          entry: retainedOutput(entry),
+        });
         position = { leaf_id: row.id, sequence: row.sequence };
         return row.id;
       }
@@ -126,7 +131,7 @@ function appendWriter(owner: SqliteOwner, sessionId: string) {
         role,
         requestId,
         entry.workId,
-        encodeStoredSessionEntry(entry),
+        encodeStoredSessionEntry(retainedOutput(entry)),
       );
       position = { leaf_id: id, sequence };
       return id;

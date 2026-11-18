@@ -36,6 +36,7 @@ import { requireAcceptedWorkId } from "./fixtures/accepted-work.fixture.js";
 import { readSelectedPath } from "../src/internal/woodstock/session-store.js";
 import { sessionIds } from "../src/internal/woodstock/identities.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const firstPrompt = "remember the fern";
 const secondPrompt = "what should you remember?";
@@ -1525,14 +1526,14 @@ it("rejects missing and incomplete branch or fork targets publicly", async () =>
       sessionId: "invalid-branch-fork-target",
       id: message.value,
       state: "streaming",
-      entry: {
+      entry: retainedOutput({
         kind: "message_start",
         workId: root.entry.workId,
         run,
         turn,
         message,
         role: "assistant",
-      },
+      }),
     });
     expect(incomplete.state).toBe("streaming");
 

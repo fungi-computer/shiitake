@@ -330,20 +330,26 @@ it("excludes stale usage through the persisted Session caller", async () => {
       const crossesBeforeRun =
         contextBefore.lastUsageIndex !== null &&
         contextBefore.tokens + Math.ceil(prompt.length / 4) > threshold - 1_000;
+      // Each reply is stamped when the provider answers, as a real one is. A
+      // reply built here would predate the prompt whenever intake crosses a
+      // millisecond, and Pi then treats its usage as stale.
       scenario.faux.setResponses(
         crossesBeforeRun
           ? [
-              fauxAssistantMessage(`pre-run summary ${String(index)}`),
-              fauxAssistantMessage("e".repeat(100_000), {
-                stopReason: "error",
-                errorMessage: "provider failed after pre-run compaction",
-              }),
-              fauxAssistantMessage(`stale second summary ${String(index)}`),
-              fauxAssistantMessage(
-                `stale second turn summary ${String(index)}`,
-              ),
+              () => fauxAssistantMessage(`pre-run summary ${String(index)}`),
+              () =>
+                fauxAssistantMessage("e".repeat(100_000), {
+                  stopReason: "error",
+                  errorMessage: "provider failed after pre-run compaction",
+                }),
+              () =>
+                fauxAssistantMessage(`stale second summary ${String(index)}`),
+              () =>
+                fauxAssistantMessage(
+                  `stale second turn summary ${String(index)}`,
+                ),
             ]
-          : [fauxAssistantMessage(`small answer ${String(index)}`)],
+          : [() => fauxAssistantMessage(`small answer ${String(index)}`)],
       );
       await session.command({
         requestId: `real-compaction-growth-${String(index)}`,

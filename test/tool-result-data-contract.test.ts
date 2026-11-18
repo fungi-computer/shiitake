@@ -9,6 +9,7 @@ import { parseSessionFrame, parseSessionSnapshot } from "../src/client-wire.js";
 import { checkHostMeta } from "../src/internal/host-meta.js";
 import { sessionSnapshot } from "./fixtures/client.fixture.js";
 import * as Schema from "effect/Schema";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 // These are JSON payloads produced by Mule's completion and message events,
 // not executable objects. The display payload is the typed tool failure.
@@ -170,8 +171,8 @@ it.each([
       throw new Error(
         "The current entry codec refused the tool-result data contract",
       );
-    expect(JSON.parse(encodeStoredSessionEntry(decoded.success))).toEqual(
-      entry,
-    );
+    expect(
+      JSON.parse(encodeStoredSessionEntry(retainedOutput(decoded.success))),
+    ).toEqual(entry);
   },
 );

@@ -16,6 +16,7 @@ import {
   progressPosition,
 } from "../src/internal/woodstock/progress.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const accepted: AcceptedCommand = {
   sessionId: "retained-progress-session",
@@ -83,14 +84,14 @@ it("flushes reply text to its placeholder at a bounded cadence, nothing per toke
       sessionId: accepted.sessionId,
       id: message.value,
       state: "streaming",
-      entry: {
+      entry: retainedOutput({
         kind: "message_start",
         workId: accepted.commandId,
         run,
         turn,
         message,
         role: "assistant",
-      },
+      }),
     });
     const writesBefore = fixture.ownerWrites();
     const flushed = () => {

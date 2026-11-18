@@ -407,19 +407,23 @@ function prefixPrompt(preparation: CompactionPreparation): string {
   return `# Conversation\n${serializeConversation(preparation.turnPrefixMessages)}\n\n# Instructions\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 }
 
+/** The host's Vault redaction of one summary prompt, before any model sees it. */
+export type RedactPrompt = (prompt: string) => Promise<string>;
+
 async function summarize(
   model: Model<Api>,
   maxTokens: number,
   signal: AbortSignal | undefined,
   prompt: string,
   label: string,
+  redact: RedactPrompt,
   streamFn?: MuleStreamFunction,
 ): Promise<AssistantMessage> {
   const options: SimpleStreamOptions =
     signal === undefined ? { maxTokens } : { maxTokens, signal };
   const response = await completeSummarization(
     model,
-    buildContext(prompt),
+    buildContext(await redact(prompt)),
     options,
     streamFn,
   );
@@ -434,6 +438,7 @@ function historySummary(
   maxTokens: number,
   signal: AbortSignal | undefined,
   instructions: string | undefined,
+  redact: RedactPrompt,
   streamFn?: MuleStreamFunction,
 ): Promise<AssistantMessage | undefined> {
   if (preparation.messagesToSummarize.length === 0)
@@ -447,6 +452,7 @@ function historySummary(
     signal,
     historyPrompt(preparation, hasPreviousSummary, instructions),
     "Summarization",
+    redact,
     streamFn,
   );
 }
@@ -455,6 +461,7 @@ function prefixSummary(
   preparation: CompactionPreparation,
   model: Model<Api>,
   signal: AbortSignal | undefined,
+  redact: RedactPrompt,
   streamFn?: MuleStreamFunction,
 ): Promise<AssistantMessage | undefined> {
   if (!preparation.isSplitTurn || preparation.turnPrefixMessages.length === 0)
@@ -468,6 +475,7 @@ function prefixSummary(
     signal,
     prefixPrompt(preparation),
     "Turn prefix summarization",
+    redact,
     streamFn,
   );
 }
@@ -514,6 +522,7 @@ async function compactPromise(
   model: Model<Api>,
   signal: AbortSignal | undefined,
   instructions: string | undefined,
+  redact: RedactPrompt,
   streamFn?: MuleStreamFunction,
 ): Promise<CompactionResult> {
   const maxTokens = Math.min(
@@ -528,11 +537,12 @@ async function compactPromise(
     maxTokens,
     signal,
     instructions,
+    redact,
     streamFn,
   );
   const turnPrefixResult =
     preparation.isSplitTurn && preparation.turnPrefixMessages.length > 0
-      ? await prefixSummary(preparation, model, signal, streamFn)
+      ? await prefixSummary(preparation, model, signal, redact, streamFn)
       : undefined;
   return composeCompactionResult(preparation, historyResult, turnPrefixResult);
 }
@@ -547,6 +557,7 @@ export type CompactionCleanup = Readonly<{
 export function compact(
   preparation: CompactionPreparation,
   model: Model<Api>,
+  redact: RedactPrompt,
   streamFn?: MuleStreamFunction,
   /** A manual compaction's focus, appended to the history summary prompt. */
   instructions?: string,
@@ -561,6 +572,7 @@ export function compact(
           model,
           effectSignal,
           instructions,
+          redact,
           streamFn,
         );
         pending = result;

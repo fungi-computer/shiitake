@@ -90,6 +90,8 @@ export type {
   GrantsDelivery,
   GrantsDeliveryResult,
   ShiitakeHostJobs,
+  SessionRedactionResult,
+  SessionRedactor,
   ShiitakeOptions,
   ShiitakeOwnerAgent,
   ToolAccess,

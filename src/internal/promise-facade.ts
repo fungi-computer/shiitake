@@ -30,6 +30,7 @@ import type {
 } from "./effect-contracts.js";
 import { acquireInstructionPromise } from "./instruction-acquisition.js";
 import { adaptModelSource } from "./model-acquisition.js";
+import { liftRedaction } from "./redaction.js";
 
 function boundary(
   boundaryName: ConstructorParameters<typeof ShiitakeError>[0],
@@ -292,6 +293,8 @@ function liftOptions(
   };
   const recipientStatus = options.recipientStatus;
   const recipientParent = options.recipientParent;
+  if (options.redaction !== undefined)
+    Object.assign(base, { redaction: liftRedaction(options.redaction) });
   if (recipientParent !== undefined)
     Object.assign(base, {
       recipientParent: (

@@ -224,6 +224,16 @@ export type ShiitakeEffectOptions = Readonly<{
    * Omitted uses Mule's model stream limits.
    */
   modelStreamIdleTimeoutMs?: number;
+  /**
+   * The host's Vault redaction. Absent means this host stores no values; a
+   * failed load withholds output and fails closed.
+   */
+  redaction?: Readonly<{
+    load: Effect.Effect<
+      import("./contracts.js").SessionRedactor,
+      ShiitakeError
+    >;
+  }>;
 }>;
 
 /** Effect-native race-safe watch result. */

@@ -23,6 +23,7 @@ import {
   type RunCustody,
 } from "./run-scope.js";
 import { CompactionCommitError } from "./compaction/session-compaction.js";
+import { RedactionUnavailableError } from "./redaction.js";
 import type { ExtensionRuntime } from "./extension-runtime.js";
 import {
   BrokenSessionError,
@@ -54,7 +55,8 @@ function failedDecision(error: ShiitakeError): WatchdogExecutionDecision {
     error instanceof ToolSetupError ||
     error instanceof RunRejectedError ||
     error instanceof CompactionCommitError ||
-    error instanceof BrokenSessionError
+    error instanceof BrokenSessionError ||
+    error instanceof RedactionUnavailableError
       ? error.diagnostic
       : error.boundary === "model"
         ? error.message

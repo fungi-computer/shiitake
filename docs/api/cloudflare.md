@@ -429,6 +429,7 @@ type CloudflareShiitakeOptions = Readonly<{
     assertOpen: () => void;
   }>;
   compaction?: CompactionOptions;
+  redaction?: ShiitakeOptions["redaction"];
   extensions: ExtensionRosterV0;
   initialize?: (agent) => Promise<void>;
   hostWork?: readonly CloudflareHostWork[];

@@ -1442,6 +1442,24 @@ Re-exports [CommandSettlement](index.md#commandsettlement)
 
 ---
 
+### ShiitakeError
+
+Re-exports [ShiitakeError](index.md#shiitakeerror)
+
+---
+
+### ShiitakeErrorBoundary
+
+Re-exports [ShiitakeErrorBoundary](index.md#shiitakeerrorboundary)
+
+---
+
+### ShiitakeErrorCause
+
+Re-exports [ShiitakeErrorCause](index.md#shiitakeerrorcause)
+
+---
+
 ### parseForkedSession
 
 Re-exports [parseForkedSession](index.md#parseforkedsession)

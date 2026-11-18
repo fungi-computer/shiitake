@@ -31,6 +31,7 @@ import { admitStoredCommand } from "./fixtures/admission-door.fixture.js";
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const digest = "a".repeat(64);
 const contract = {
@@ -273,14 +274,14 @@ it("replaces one streaming placeholder with the exact completed Pi message", () 
       sessionId,
       id: message.value,
       state: "streaming",
-      entry: {
+      entry: retainedOutput({
         kind: "message_start",
         workId: commandEntryValue.workId,
         run,
         turn,
         message,
         role: "assistant",
-      },
+      }),
     });
 
     expect(woodstock.readSelectedPath(fixture.owner, { sessionId })).toEqual([
@@ -296,14 +297,14 @@ it("replaces one streaming placeholder with the exact completed Pi message", () 
     const completed = woodstock.completeSessionLeaf(fixture.owner, {
       sessionId,
       id: message.value,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: commandEntryValue.workId,
         run,
         turn,
         message,
         value: completedMessage,
-      },
+      }),
     });
 
     expect(completed).toMatchObject({
@@ -352,14 +353,14 @@ it("stores pi-ai 1.x response timings and malformed tool arguments exactly", () 
     woodstock.appendSessionEntry(fixture.owner, {
       sessionId,
       id: message.value,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: commandEntryValue.workId,
         run,
         turn,
         message,
         value: timed,
-      },
+      }),
     });
 
     expect(
@@ -385,14 +386,14 @@ it("projects the selected lineage with the exact completed Pi message", () => {
     const completed = woodstock.completeSessionLeaf(fixture.owner, {
       sessionId,
       id: message.value,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: commandEntryValue.workId,
         run,
         turn,
         message,
         value: completedMessage,
-      },
+      }),
     });
 
     const snapshot = readClientSnapshot(
@@ -561,7 +562,7 @@ it("projects work terminals after intermediate tool messages without settling la
         sessionId,
         id: sessionIds.fact.generate(),
         state: "complete",
-        entry: {
+        entry: retainedOutput({
           kind: "message",
           workId,
           run,
@@ -572,7 +573,7 @@ it("projects work terminals after intermediate tool messages without settling la
             parent: firstTurn,
           },
           value,
-        },
+        }),
       });
     appendMessage(
       firstCommand.workId,
@@ -686,14 +687,16 @@ it("reconstructs only the selected lineage and forks it with fresh row identitie
     const compaction = woodstock.appendSessionEntry(fixture.owner, {
       sessionId,
       id: sessionIds.fact.generate(),
-      entry: compactionEntryFixture({
-        workId: selectedPrompt.workId,
-        head: selected.id,
-        summary: "retained summary",
-        tokensBefore: 42,
-        usage: assistant("usage").usage,
-        contextRevision: selected.id,
-      }),
+      entry: retainedOutput(
+        compactionEntryFixture({
+          workId: selectedPrompt.workId,
+          head: selected.id,
+          summary: "retained summary",
+          tokensBefore: 42,
+          usage: assistant("usage").usage,
+          contextRevision: selected.id,
+        }),
+      ),
     });
 
     expect(
@@ -875,14 +878,14 @@ it("prepares a cold run from the exact accepted command lineage", () => {
     woodstock.completeSessionLeaf(fixture.owner, {
       sessionId,
       id: message.value,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: firstEntry.workId,
         run,
         turn,
         message,
         value: firstAnswer,
-      },
+      }),
     });
     woodstock.appendSessionEntry(fixture.owner, {
       sessionId,
@@ -1177,14 +1180,14 @@ it("keeps a preference changed during streaming on the completed message lineage
       sessionId,
       id: message.value,
       state: "streaming",
-      entry: {
+      entry: retainedOutput({
         kind: "message_start",
         workId: entry.workId,
         run,
         turn,
         message,
         role: "assistant",
-      },
+      }),
     });
     const preference = { providerId: "faux", modelId: "next-model" };
     const selected = woodstock.setSessionModelPreference(
@@ -1206,14 +1209,14 @@ it("keeps a preference changed during streaming on the completed message lineage
     const completed = woodstock.completeSessionLeaf(fixture.owner, {
       sessionId,
       id: placeholder.id,
-      entry: {
+      entry: retainedOutput({
         kind: "message",
         workId: entry.workId,
         run,
         turn,
         message,
         value,
-      },
+      }),
     });
     const replay = readClientReplayPage(
       fixture.owner,

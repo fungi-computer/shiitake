@@ -51,7 +51,7 @@ export function forkDocumentEntries(
   owner: SqliteOwner,
   /** Latest value on the source's current lineage, not a global last write. */
   currentValue: (extensionId: string, name: string) => string | undefined,
-): readonly StoredSessionEntry[] {
+): readonly Extract<StoredSessionEntry, { kind: "document" }>[] {
   const specs = owner.sql
     .exec(
       "SELECT extension_id, name, initial_json, fork, max_bytes FROM session_document_specs ORDER BY extension_id, name",

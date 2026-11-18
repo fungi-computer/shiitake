@@ -21,6 +21,7 @@ import * as Schema from "effect/Schema";
 import type { SqliteOwner } from "../contracts.js";
 import { openAdmissionDoor, type AdmitRequest } from "../admission-door.js";
 import { sessionIds } from "./identities.js";
+import { retainedOutput } from "../redaction.js";
 import {
   appendCompactionNotice,
   branchSession,
@@ -151,7 +152,8 @@ function compact(owner: SqliteOwner, sessionId: string, head: string) {
     trigger: "threshold",
     tokensAfter: 10,
     head,
-    summary: "summary",
+    // Conformance rows are synthetic retained bytes, not Session output.
+    summary: retainedOutput({ text: "summary" }),
     tokensBefore: 100,
     usage,
     contextRevision: leaf.id,
@@ -439,14 +441,14 @@ export function createWoodstockStorageConformance(
           sessionId,
           id: message.value,
           state: "streaming",
-          entry: {
+          entry: retainedOutput({
             kind: "message_start",
             workId: command.workId,
             run,
             turn,
             message,
             role: "assistant",
-          },
+          } as const),
         });
         const value = {
           role: "assistant" as const,
@@ -474,14 +476,14 @@ export function createWoodstockStorageConformance(
         const completed = completeSessionLeaf(owner, {
           sessionId,
           id: message.value,
-          entry: {
+          entry: retainedOutput({
             kind: "message",
             workId: command.workId,
             run,
             turn,
             message,
             value,
-          },
+          } as const),
         });
         assert.deepStrictEqual(
           [completed.id, completed.parentId, completed.sequence],

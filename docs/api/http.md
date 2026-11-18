@@ -82,13 +82,13 @@ Sanitize one caught host failure for Shiitake's public wire.
 
 `object`
 
-| Name         | Type                                                                                                                                                                    | Default value                 |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `_tag`       | `"ShiitakeError"`                                                                                                                                                       | -                             |
-| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                             | `ShiitakeErrorBoundarySchema` |
-| `cause`      | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` | `ShiitakeErrorCauseSchema`    |
-| `message`    | `string`                                                                                                                                                                | `Schema.String`               |
-| `requestId?` | `string`                                                                                                                                                                | -                             |
+| Name         | Type                                                                                                                                                                                            | Default value                 |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `_tag`       | `"ShiitakeError"`                                                                                                                                                                               | -                             |
+| `boundary`   | \| `"contract"` \| `"extensions"` \| `"instructions"` \| `"model"` \| `"runtime"` \| `"store"` \| `"tools"`                                                                                     | `ShiitakeErrorBoundarySchema` |
+| `cause`      | \| `"archived"` \| `"closed"` \| `"conflict"` \| `"incompatible"` \| `"invalid"` \| `"rejected"` \| `"unavailable"` \| `"state_reset_required"` \| `"storage_pressure"` \| `"secret_in_prompt"` | `ShiitakeErrorCauseSchema`    |
+| `message`    | `string`                                                                                                                                                                                        | `Schema.String`               |
+| `requestId?` | `string`                                                                                                                                                                                        | -                             |
 
 ---
 

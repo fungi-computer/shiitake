@@ -11,6 +11,7 @@ import { decodeStoredSessionEntry } from "../src/internal/woodstock/session-entr
 import * as woodstock from "../src/internal/woodstock/session-store.js";
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const usage = {
   input: 1,
@@ -46,7 +47,7 @@ it("stores compaction model/data/head separately and derives context from model 
       resumesRun: true,
       tokensAfter: 40,
       head: kept.id,
-      summary: "the summary",
+      summary: retainedOutput({ text: "the summary" }),
       tokensBefore: 100,
       usage,
       contextRevision: kept.id,

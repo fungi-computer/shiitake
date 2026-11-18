@@ -13,6 +13,7 @@ import {
 } from "../src/internal/woodstock/index.js";
 import { admitStoredCommand } from "./fixtures/admission-door.fixture.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 function prompt(
   requestId: string,
@@ -194,14 +195,14 @@ it.each(["interrupted", "failed", "cancelled"] as const)(
         sessionId,
         id: message.value,
         state: "streaming",
-        entry: {
+        entry: retainedOutput({
           kind: "message_start",
           workId: parent.accepted.commandId,
           run,
           turn,
           message,
           role: "assistant",
-        },
+        }),
       });
       Effect.runSync(
         recordWorkSettlement(fixture.owner, {

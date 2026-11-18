@@ -21,6 +21,7 @@ import {
   type CompactionCleanup,
   type CompactionPreparation,
   type CompactionResult,
+  type RedactPrompt,
   type CompactionSourceEntry,
 } from "./compaction.js";
 import {
@@ -63,6 +64,11 @@ import {
   type StoredSessionRow,
 } from "../woodstock/index.js";
 import type { SqliteOwner } from "../contracts.js";
+import {
+  redactOwnedText,
+  retainedOutput,
+  type RedactedText,
+} from "../redaction.js";
 
 function runtimeFailure(message: string): ShiitakeError {
   return new ShiitakeError("runtime", "rejected", message);
@@ -243,7 +249,7 @@ type CompactionCheckpoint = NonNullable<
  */
 function pinSummary(
   input: CommitInput,
-  result: CompactionResult,
+  result: SummarizedResult,
   request: CommitRequest,
   contextRevision: string,
 ): Effect.Effect<StoredSessionRow, ShiitakeError> {
@@ -279,8 +285,9 @@ function recoverCheckpoint(
   checkpoint: CompactionCheckpoint,
   request: CommitRequest,
 ): Effect.Effect<CompactionContext | undefined, ShiitakeError> {
-  const result: CompactionResult = {
-    summary: checkpoint.summary,
+  const result: SummarizedResult = {
+    // The pinned summary was redacted before it was stored.
+    summary: retainedOutput({ text: checkpoint.summary }),
     firstKeptEntryId: checkpoint.head,
     tokensBefore: checkpoint.tokensBefore,
     usage: checkpoint.usage,
@@ -328,6 +335,34 @@ function commitCompaction(
   });
 }
 
+/** A summary the host's Vault matcher has redacted: the only kind stored. */
+type SummarizedResult = Omit<CompactionResult, "summary"> &
+  Readonly<{ summary: RedactedText }>;
+
+/**
+ * The summarizer's prompts pass the host's Vault matcher before any model
+ * sees them, and its summary passes it again before it can be pinned or
+ * placed. A matcher that cannot run fails the compaction.
+ */
+function redactedSummary(
+  store: SqliteOwner,
+  summarize: (
+    redact: RedactPrompt,
+  ) => Effect.Effect<CompactionResult, ShiitakeError>,
+): Effect.Effect<SummarizedResult, ShiitakeError> {
+  const redact: RedactPrompt = (prompt) =>
+    Effect.runPromise(
+      redactOwnedText(store, prompt).pipe(Effect.map(({ text }) => text)),
+    );
+  return summarize(redact).pipe(
+    Effect.flatMap((result) =>
+      redactOwnedText(store, result.summary).pipe(
+        Effect.map((summary) => ({ ...result, summary })),
+      ),
+    ),
+  );
+}
+
 /** The commit itself; `commitCompaction` wraps it with the live activity fact. */
 function commitCompactionEffect(
   input: CommitInput,
@@ -342,12 +377,15 @@ function commitCompactionEffect(
     if (preparation === undefined) return undefined;
     const expected = path.at(-1);
     if (expected === undefined) return undefined;
-    const result = yield* compact(
-      preparation,
-      input.model,
-      input.stream,
-      request.instructions,
-      input.cleanup,
+    const result = yield* redactedSummary(input.store, (redact) =>
+      compact(
+        preparation,
+        input.model,
+        redact,
+        input.stream,
+        request.instructions,
+        input.cleanup,
+      ),
     );
     const pinned = yield* pinSummary(input, result, request, expected.id);
     const receipt = yield* handOff(input, preparation, result, expected.id);
@@ -384,13 +422,18 @@ const decodeHandoffResult = Schema.decodeUnknownResult(HandoffResultSchema);
 function handOff(
   input: CommitInput,
   preparation: CompactionPreparation,
-  result: CompactionResult,
+  result: SummarizedResult,
   contextRevision: string,
 ): Effect.Effect<string | undefined, ShiitakeError> {
   if (input.handoff === undefined) return Effect.succeed(undefined);
   return input.handoff
     .consume(
-      borrowedView(preparation, result, input.sessionId, contextRevision),
+      borrowedView(
+        preparation,
+        { ...result, summary: result.summary.text },
+        input.sessionId,
+        contextRevision,
+      ),
     )
     .pipe(
       // Extensions have no producer-drain contract; an interrupted handoff
@@ -420,7 +463,7 @@ function handOff(
 function compactionRow(
   input: CommitInput,
   path: readonly StoredSessionRow[],
-  result: CompactionResult,
+  result: SummarizedResult,
   request: CommitRequest,
   contextRevision: string,
   receipt: string | undefined,
@@ -434,7 +477,7 @@ function compactionRow(
       kind: "compaction",
       workId: input.workId,
       head: result.firstKeptEntryId,
-      model: [compactionSummaryMessage(result.summary, Date.now())],
+      model: [compactionSummaryMessage(result.summary.text, Date.now())],
       data: {
         reason: request.trigger,
         resumesRun: request.resumesRun,
@@ -482,7 +525,7 @@ function rebuilt(
 function appendSummary(
   input: CommitInput,
   path: readonly StoredSessionRow[],
-  result: CompactionResult,
+  result: SummarizedResult,
   request: CommitRequest,
   contextRevision: string,
   receipt: string | undefined,
@@ -576,14 +619,14 @@ function autoCompaction(
 /** What a background compaction hands back to its run; it writes nothing. */
 type BackgroundSummary = Readonly<{
   preparation: CompactionPreparation;
-  result: CompactionResult;
+  result: SummarizedResult;
   /** The last row the summary saw: the placed entry's `contextRevision`. */
   selectionTail: string;
 }>;
 
 /** What placement still needs once the fork-time arrays are released. */
 type HandedOff = Readonly<{
-  result: CompactionResult;
+  result: SummarizedResult;
   selectionTail: string;
   /** The archive receipt; stored only if placement commits. */
   receipt: string | undefined;
@@ -677,12 +720,15 @@ function summarize(
 ): Effect.Effect<void, ShiitakeError> {
   return Effect.suspend(() => {
     beginCompactionActivity(input.store, input.sessionId, "threshold");
-    return compact(
-      preparation,
-      input.model,
-      input.stream,
-      undefined,
-      input.cleanup,
+    return redactedSummary(input.store, (redact) =>
+      compact(
+        preparation,
+        input.model,
+        redact,
+        input.stream,
+        undefined,
+        input.cleanup,
+      ),
     ).pipe(
       Effect.map((result) => {
         handBack({ preparation, result, selectionTail });
@@ -777,7 +823,7 @@ function settleBackground(
  */
 function recordDropped(
   input: CommitInput,
-  result: CompactionResult,
+  result: SummarizedResult,
   reason: "stale" | "insufficient",
 ): Effect.Effect<undefined, ShiitakeError> {
   return writeNotice(input, {
@@ -824,7 +870,7 @@ function handOffSummary(
 function handOffPinned(
   input: CommitInput,
   preparation: CompactionPreparation,
-  result: CompactionResult,
+  result: SummarizedResult,
   selectionTail: string,
 ): Effect.Effect<HandedOff | undefined, ShiitakeError> {
   return Effect.try({

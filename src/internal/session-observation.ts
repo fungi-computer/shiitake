@@ -39,6 +39,8 @@ import {
   type ObservedActivity,
 } from "./session-status.js";
 import { prepareSessionContext } from "./session-context.js";
+import { loadSessionRedaction, redactOwned } from "./redaction.js";
+import { parseSessionFrame, parseSessionSnapshot } from "../client-wire.js";
 import {
   compactionEntrySequence,
   decodeWoodstockCursor,
@@ -869,6 +871,23 @@ function watchSession(
   );
 }
 
+/**
+ * Every snapshot, replay page and live frame leaves through the host's Vault
+ * matcher, which also covers rows retained before redaction existed. The
+ * matcher loads when a read or watch opens; a port that is down refuses it.
+ */
+function redactedOutput<A extends object>(
+  store: ShiitakeEffectOptions["store"],
+  value: A,
+  decode: (text: string) => A,
+): Effect.Effect<A, ShiitakeError> {
+  // The wire's own grammar: frames reach clients as this JSON text.
+  return redactOwned(store, value, {
+    encode: (output) => JSON.stringify(output),
+    decode,
+  });
+}
+
 /** Shared live observation; Woodstock remains the bounded baseline and replay owner. */
 export function openSessionObservation(
   options: ShiitakeEffectOptions,
@@ -882,13 +901,50 @@ export function openSessionObservation(
     observation,
     ownerContext,
   );
+  const store = options.store;
+  const loaded = loadSessionRedaction(store);
   return Object.freeze({
     read: (sessionId: string, input: Parameters<typeof readSession>[3]) =>
-      readSessionWithContext(options, runtime, sessionId, input),
+      loaded.pipe(
+        Effect.andThen(
+          readSessionWithContext(options, runtime, sessionId, input),
+        ),
+        Effect.flatMap((snapshot) =>
+          redactedOutput(store, snapshot, parseSessionSnapshot),
+        ),
+      ),
     subscribe: (sessionId: string, input: SubscribeOptions) =>
-      subscribeSession(options, runtime, feeds, sessionId, input),
+      Stream.unwrap(
+        loaded.pipe(
+          Effect.as(
+            subscribeSession(options, runtime, feeds, sessionId, input).pipe(
+              Stream.mapEffect((frame) =>
+                redactedOutput(store, frame, parseSessionFrame),
+              ),
+            ),
+          ),
+        ),
+      ),
     watch: (sessionId: string, input: WatchOptions | undefined) =>
-      watchSession(options, runtime, feeds, sessionId, input),
+      loaded.pipe(
+        Effect.andThen(watchSession(options, runtime, feeds, sessionId, input)),
+        Effect.flatMap((watch) =>
+          redactedOutput(store, watch.snapshot, parseSessionSnapshot).pipe(
+            Effect.map((snapshot): ShiitakeEffectWatch =>
+              Object.freeze({
+                ...watch,
+                snapshot,
+                changes: watch.changes.pipe(
+                  Stream.mapEffect((frame) =>
+                    redactedOutput(store, frame, parseSessionFrame),
+                  ),
+                ),
+              }),
+            ),
+            Effect.onError(() => watch.close.pipe(Effect.ignore)),
+          ),
+        ),
+      ),
     close: feeds.close,
   });
 }

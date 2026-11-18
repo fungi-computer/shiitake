@@ -20,6 +20,9 @@ import {
   DEFAULT_COMPACTION_SETTINGS,
 } from "../src/internal/compaction/utils.js";
 
+/** A host with no Vault: prompts pass unchanged. */
+const unredacted = (prompt: string) => Promise.resolve(prompt);
+
 const user = (id: string, text: string): CompactionSourceEntry => ({
   id,
   kind: "message",
@@ -130,7 +133,7 @@ it("keeps split-turn prefix and suffix as separate preparation arrays", async ()
     return resultStream;
   };
   const result = await Effect.runPromise(
-    compact(preparation, faux.model, stream),
+    compact(preparation, faux.model, unredacted, stream),
   );
   expect(started).toEqual(["history", "prefix"]);
   expect(events).toEqual([
@@ -189,7 +192,7 @@ it("uses the prefix summary when a split turn has no older history", async () =>
   const faux = fauxModel([]);
   faux.setResponses([fauxAssistantMessage("prefix summary")]);
   const result = await Effect.runPromise(
-    compact(preparation, faux.model, faux.stream),
+    compact(preparation, faux.model, unredacted, faux.stream),
   );
   expect(result.summary).toContain("No prior history.");
   expect(result.summary).toContain("prefix summary");
@@ -243,7 +246,12 @@ it("uses the initial prompt for an empty previous summary", async () => {
     },
   ]);
   const result = await Effect.runPromise(
-    compact({ ...preparation, previousSummary: "" }, faux.model, faux.stream),
+    compact(
+      { ...preparation, previousSummary: "" },
+      faux.model,
+      unredacted,
+      faux.stream,
+    ),
   );
 
   expect(result.summary).toContain("summary");

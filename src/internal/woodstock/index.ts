@@ -44,8 +44,12 @@ import {
   sameStoredSessionEntry,
   withoutPartial,
   type LiveRetryEvent,
+  entryCodec,
+  type OutputKind,
+  type PersistableSessionEntry,
   type StoredSessionEntry,
 } from "./session-entry.js";
+import { redactOwned, type RedactedOutput } from "../redaction.js";
 import {
   appendSessionEntry,
   appendCompactionTransitionOwned,
@@ -691,7 +695,7 @@ function sameContract(left: RunContract, right: RunContract): boolean {
 function appendRecordedEntryOwned(
   owner: SqliteOwner,
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
-  entry: StoredSessionEntry,
+  entry: PersistableSessionEntry,
   findExisting: (row: StoredSessionRow) => boolean,
   beforeAppend?: () => void,
 ): "new" | "replay" {
@@ -732,7 +736,7 @@ function appendRecordedEntryOwned(
 function appendRecordedEntry(
   owner: SqliteOwner,
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
-  entry: StoredSessionEntry,
+  entry: PersistableSessionEntry,
   findExisting: (row: StoredSessionRow) => boolean,
   /** Returns true when it appended durable history of its own. */
   beforeAppend?: () => boolean,
@@ -755,21 +759,43 @@ function appendRecordedEntry(
   else if (appended) publishOwnerObservation(owner, accepted.sessionId);
 }
 
+/**
+ * The recorder's one door for output: the host's Vault matcher redacts the
+ * entry before the synchronous store write, which takes only redacted output.
+ */
+function recordRedacted<K extends OutputKind>(
+  owner: SqliteOwner,
+  entry: Extract<StoredSessionEntry, { kind: K }>,
+  kind: K,
+  write: (
+    redacted: RedactedOutput<Extract<StoredSessionEntry, { kind: K }>>,
+  ) => void,
+): Effect.Effect<void, ShiitakeError> {
+  return redactOwned(owner, entry, entryCodec(kind)).pipe(
+    Effect.flatMap((redacted) =>
+      storeEffect(() => {
+        write(redacted);
+      }),
+    ),
+  );
+}
+
 /** Persist an operator-only sandbox diagnostic beside its accepted Session work. */
 export function recordSandboxFailure(
   owner: SqliteOwner,
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
   event: SandboxFailureEvent,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
+  const failure: Extract<StoredSessionEntry, { kind: "sandbox_failure" }> = {
+    kind: "sandbox_failure",
+    workId: accepted.commandId,
+    event,
+  };
+  return recordRedacted(owner, failure, "sandbox_failure", (redacted) => {
     appendRecordedEntry(
       owner,
       accepted,
-      {
-        kind: "sandbox_failure",
-        workId: accepted.commandId,
-        event,
-      },
+      redacted,
       ({ entry }) =>
         entry.kind === "sandbox_failure" && entry.event.ref === event.ref,
     );
@@ -965,15 +991,15 @@ function recordMessageStart(
   accepted: AcceptedCommand,
   event: Extract<MuleEvent, { type: "message_start" }>,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
-    const entry: Extract<StoredSessionEntry, { kind: "message_start" }> = {
-      kind: "message_start",
-      workId: accepted.commandId,
-      run: event.run,
-      turn: event.turn,
-      message: event.message,
-      role: event.value.role,
-    };
+  const start: Extract<StoredSessionEntry, { kind: "message_start" }> = {
+    kind: "message_start",
+    workId: accepted.commandId,
+    run: event.run,
+    turn: event.turn,
+    message: event.message,
+    role: event.value.role,
+  };
+  return recordRedacted(owner, start, "message_start", (entry) => {
     const delivery = owner.transactionSync(() => {
       const existing = readSessionEntriesForWork(
         owner,
@@ -1022,16 +1048,16 @@ function recordModelPrompt(
   contract: RunContract,
   event: Extract<MuleEvent, { type: "model_prompt" }>,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
-    const entry: Extract<StoredSessionEntry, { kind: "model_prompt" }> = {
-      kind: "model_prompt",
-      workId: accepted.commandId,
-      run: event.run,
-      turn: event.turn,
-      attempt: event.attempt,
-      contract,
-      systemPrompt: event.systemPrompt,
-    };
+  const prompt: Extract<StoredSessionEntry, { kind: "model_prompt" }> = {
+    kind: "model_prompt",
+    workId: accepted.commandId,
+    run: event.run,
+    turn: event.turn,
+    attempt: event.attempt,
+    contract,
+    systemPrompt: event.systemPrompt,
+  };
+  return recordRedacted(owner, prompt, "model_prompt", (entry) => {
     appendRecordedEntry(
       owner,
       accepted,
@@ -1051,52 +1077,56 @@ function recordMessageEnd(
   event: Extract<MuleEvent, { type: "message_end" }>,
   model: Readonly<{ provider: string; id: string }>,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
-    const entry: Extract<StoredSessionEntry, { kind: "message" }> = {
-      kind: "message",
-      workId: accepted.commandId,
-      run: event.run,
-      turn: event.turn,
-      message: event.message,
-      value: event.value,
-    };
-    const completed =
-      event.data === undefined ? entry : { ...entry, data: event.data };
-    const delivery = owner.transactionSync(() => {
-      const existing = readSessionEntriesForWork(
-        owner,
-        accepted.sessionId,
-        accepted.commandId,
-      ).find(
-        ({ entry: current }) =>
-          (current.kind === "message_start" || current.kind === "message") &&
-          sameIdentity(current.message, event.message),
-      );
-      if (existing?.entry.kind === "message") {
-        if (!sameStoredSessionEntry(existing.entry, completed))
-          throw conflict("Mule completed-message identity conflicts");
-      } else {
-        completeSessionLeaf(owner, {
-          sessionId: accepted.sessionId,
-          id: event.message.value,
-          entry: completed,
-        });
-      }
-      const retryDelivery =
-        event.retry === undefined || event.value.role !== "assistant"
-          ? "replay"
-          : recordLiveRetryEventOwned(
-              owner,
-              accepted,
-              toLiveRetryEvent(event.retry, model),
-              event.turn,
-            );
-      return existing?.entry.kind === "message" && retryDelivery === "replay"
-        ? ("replay" as const)
-        : ("new" as const);
-    });
-    if (delivery === "new") publishOwnerObservation(owner, accepted.sessionId);
-  });
+  const message: Extract<StoredSessionEntry, { kind: "message" }> = {
+    kind: "message",
+    workId: accepted.commandId,
+    run: event.run,
+    turn: event.turn,
+    message: event.message,
+    value: event.value,
+  };
+  return recordRedacted(
+    owner,
+    event.data === undefined ? message : { ...message, data: event.data },
+    "message",
+    (completed) => {
+      const delivery = owner.transactionSync(() => {
+        const existing = readSessionEntriesForWork(
+          owner,
+          accepted.sessionId,
+          accepted.commandId,
+        ).find(
+          ({ entry: current }) =>
+            (current.kind === "message_start" || current.kind === "message") &&
+            sameIdentity(current.message, event.message),
+        );
+        if (existing?.entry.kind === "message") {
+          if (!sameStoredSessionEntry(existing.entry, completed))
+            throw conflict("Mule completed-message identity conflicts");
+        } else {
+          completeSessionLeaf(owner, {
+            sessionId: accepted.sessionId,
+            id: event.message.value,
+            entry: completed,
+          });
+        }
+        const retryDelivery =
+          event.retry === undefined || event.value.role !== "assistant"
+            ? "replay"
+            : recordLiveRetryEventOwned(
+                owner,
+                accepted,
+                toLiveRetryEvent(event.retry, model),
+                event.turn,
+              );
+        return existing?.entry.kind === "message" && retryDelivery === "replay"
+          ? ("replay" as const)
+          : ("new" as const);
+      });
+      if (delivery === "new")
+        publishOwnerObservation(owner, accepted.sessionId);
+    },
+  );
 }
 
 function recordToolIntent(
@@ -1105,17 +1135,17 @@ function recordToolIntent(
   contract: RunContract,
   event: Extract<MuleEvent, { type: "tool_execution_start" }>,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
-    const entry: Extract<StoredSessionEntry, { kind: "tool_intent" }> = {
-      kind: "tool_intent",
-      replay: event.replay,
-      contract,
-      workId: accepted.commandId,
-      run: event.run,
-      turn: event.turn,
-      toolCall: event.toolCall,
-      call: event.call,
-    };
+  const intent: Extract<StoredSessionEntry, { kind: "tool_intent" }> = {
+    kind: "tool_intent",
+    replay: event.replay,
+    contract,
+    workId: accepted.commandId,
+    run: event.run,
+    turn: event.turn,
+    toolCall: event.toolCall,
+    call: event.call,
+  };
+  return recordRedacted(owner, intent, "tool_intent", (entry) => {
     appendRecordedEntry(
       owner,
       accepted,
@@ -1133,26 +1163,31 @@ function recordToolOutcome(
   accepted: AcceptedCommand,
   event: Extract<MuleEvent, { type: "tool_execution_end" }>,
 ): Effect.Effect<void, ShiitakeError> {
-  return storeEffect(() => {
-    const { data, ...result } = event.result;
-    const entry: Extract<StoredSessionEntry, { kind: "tool_outcome" }> = {
-      kind: "tool_outcome",
-      workId: accepted.commandId,
-      run: event.run,
-      turn: event.turn,
-      toolCall: event.toolCall,
-      call: event.call,
-      result,
-    };
-    appendRecordedEntry(
-      owner,
-      accepted,
-      data === undefined ? entry : { ...entry, data },
-      ({ entry: current }) =>
-        current.kind === "tool_outcome" &&
-        sameIdentity(current.toolCall, event.toolCall),
-    );
-  });
+  const { data, ...result } = event.result;
+  const outcome: Extract<StoredSessionEntry, { kind: "tool_outcome" }> = {
+    kind: "tool_outcome",
+    workId: accepted.commandId,
+    run: event.run,
+    turn: event.turn,
+    toolCall: event.toolCall,
+    call: event.call,
+    result,
+  };
+  return recordRedacted(
+    owner,
+    data === undefined ? outcome : { ...outcome, data },
+    "tool_outcome",
+    (entry) => {
+      appendRecordedEntry(
+        owner,
+        accepted,
+        entry,
+        ({ entry: current }) =>
+          current.kind === "tool_outcome" &&
+          sameIdentity(current.toolCall, event.toolCall),
+      );
+    },
+  );
 }
 
 /**

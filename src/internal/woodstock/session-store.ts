@@ -1,5 +1,10 @@
 import { prepareExtensionStoreInTransaction } from "./extension-store.js";
 import {
+  retainedOutput,
+  type RedactedOutput,
+  type RedactedText,
+} from "../redaction.js";
+import {
   prepareSessionDocuments,
   forkDocumentEntries,
 } from "./session-documents.js";
@@ -31,6 +36,7 @@ import {
   promptCommand,
   type CompactionTrigger,
   type OperatorSessionEntry,
+  type PersistableSessionEntry,
   type StoredSessionEntry,
 } from "./session-entry.js";
 import { prepareSessionAttention } from "./session-attention.js";
@@ -528,14 +534,15 @@ function inboxTitle(owner: SqliteOwner, sessionId: string): string | null {
 export type AppendSessionEntryInput = Readonly<{
   sessionId: string;
   id: string;
-  entry: StoredSessionEntry;
+  /** Output only after the host's Vault matcher redacted it. */
+  entry: PersistableSessionEntry;
   state?: "complete" | "streaming";
 }>;
 
 export type CompleteSessionLeafInput = Readonly<{
   sessionId: string;
   id: string;
-  entry: Extract<StoredSessionEntry, { kind: "message" }>;
+  entry: RedactedOutput<Extract<StoredSessionEntry, { kind: "message" }>>;
 }>;
 
 export type ReadSelectedPathInput = Readonly<{
@@ -610,7 +617,7 @@ export type AppendCompactionInput = Readonly<{
   expectedLeafId: string;
   workId: string;
   head: string;
-  summary: string;
+  summary: RedactedText;
   tokensBefore: number;
   usage: Usage;
   contextRevision: string;
@@ -3836,7 +3843,8 @@ export function repairDanglingToolCalls(
     appendSessionEntry(owner, {
       sessionId,
       id,
-      entry: {
+      // Fixed text around the stored (already redacted) call's name and id.
+      entry: retainedOutput({
         kind: "message",
         workId,
         run: assistant.run,
@@ -3850,7 +3858,7 @@ export function repairDanglingToolCalls(
           isError: true,
           timestamp: Date.now(),
         },
-      },
+      }),
     });
   }
   return dangling.length;
@@ -3861,17 +3869,15 @@ export function recordStreamingPartialOwned(
   owner: SqliteOwner,
   input: Readonly<{
     sessionId: string;
-    entry: Extract<StoredSessionEntry, { kind: "message_start" }>;
-    text: string;
-    offset: number;
+    /** The placeholder with its redacted partial text. */
+    entry: RedactedOutput<
+      Extract<StoredSessionEntry, { kind: "message_start" }>
+    >;
   }>,
 ): void {
   owner.sql.exec(
     "UPDATE session_entries SET data_json = ? WHERE session_id = ? AND id = ? AND state = 'streaming'",
-    encodeStoredSessionEntry({
-      ...input.entry,
-      partial: { text: input.text, offset: input.offset },
-    }),
+    encodeStoredSessionEntry(input.entry),
     input.sessionId,
     input.entry.message.value,
   );
@@ -4056,7 +4062,7 @@ export type CompactionCheckpointInput = Readonly<{
   resumesRun: boolean;
   head: string;
   contextRevision: string;
-  summary: string;
+  summary: RedactedText;
   tokensBefore: number;
   usage: Usage;
   details: Readonly<{
@@ -4074,18 +4080,19 @@ export function appendCompactionCheckpointOwned(
     appendSessionEntry(owner, {
       sessionId: input.sessionId,
       id: sessionIds.fact.generate(),
-      entry: {
+      // Its only output is the summary, which the matcher redacted.
+      entry: retainedOutput({
         kind: "compaction_checkpoint",
         workId: input.workId,
         trigger: input.trigger,
         resumesRun: input.resumesRun,
         head: input.head,
         contextRevision: input.contextRevision,
-        summary: input.summary,
+        summary: input.summary.text,
         tokensBefore: input.tokensBefore,
         usage: input.usage,
         details: input.details,
-      },
+      }),
     }),
   );
 }
@@ -4154,7 +4161,7 @@ function appendCompactionRow(
     kind: "compaction",
     workId: input.workId,
     head: input.head,
-    model: [compactionSummaryMessage(input.summary, Date.now())],
+    model: [compactionSummaryMessage(input.summary.text, Date.now())],
     data: {
       reason: input.trigger,
       resumesRun: input.resumesRun ?? false,
@@ -4171,13 +4178,15 @@ function appendCompactionRow(
   return appendSessionEntry(owner, {
     sessionId: input.sessionId,
     id: sessionIds.fact.generate(),
-    entry:
+    // Its only output is the summary text, which the matcher redacted.
+    entry: retainedOutput(
       input.details === undefined
         ? withReceipt
         : {
             ...withReceipt,
             data: { ...withReceipt.data, details: input.details },
           },
+    ),
   });
 }
 
@@ -4929,7 +4938,8 @@ export function forkSessionAt(
           row.state,
           requestIdFor(entry),
           entry.workId,
-          encodeStoredSessionEntry(entry),
+          // A copy of this store's own rows, not fresh output.
+          encodeStoredSessionEntry(retainedOutput(entry)),
           row.timestamp,
           row.completedAt,
         );

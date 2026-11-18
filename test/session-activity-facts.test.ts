@@ -6,6 +6,7 @@ import { sessionIds } from "../src/internal/woodstock/identities.js";
 import { prepareWoodstockSchema } from "../src/internal/woodstock/index.js";
 import * as woodstock from "../src/internal/woodstock/session-store.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const run = { kind: "run", value: "run-1" } as const;
 const turn = { kind: "turn", value: "turn-1", parent: run } as const;
@@ -88,16 +89,18 @@ it("publishes raw activity facts and decides no readout", () => {
       name: "lookup",
       arguments: {},
     } as const;
-    append({
-      kind: "tool_intent",
-      replay: "unsafe",
-      contract: { core: "0".repeat(64), extensions: [] },
-      workId,
-      run,
-      turn,
-      toolCall,
-      call,
-    });
+    append(
+      retainedOutput({
+        kind: "tool_intent",
+        replay: "unsafe",
+        contract: { core: "0".repeat(64), extensions: [] },
+        workId,
+        run,
+        turn,
+        toolCall,
+        call,
+      }),
+    );
     expect(
       readSessionActivity(fixture.owner, sessionId, running, null).facts
         .activeTool,

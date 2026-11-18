@@ -14,6 +14,7 @@ import {
   createNativeSqliteOwnerFixture,
   type NativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const contract = { core: "a".repeat(64), extensions: [] } as const;
 const usage = {
@@ -44,7 +45,7 @@ function append(
   return woodstock.appendSessionEntry(owner, {
     sessionId,
     id: sessionIds.fact.generate(),
-    entry,
+    entry: retainedOutput(entry),
   });
 }
 
@@ -433,14 +434,14 @@ describe("the settled context and footer read the kept window, not history (Node
         sessionId,
         id: message.value,
         state: "streaming",
-        entry: {
+        entry: retainedOutput({
           kind: "message_start",
           workId: "work-kept",
           run,
           turn,
           message,
           role: "assistant",
-        },
+        }),
       });
       const full = woodstock.readSelectedPath(owner, { sessionId });
 

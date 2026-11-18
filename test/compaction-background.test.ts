@@ -49,6 +49,7 @@ import {
   createCompatibilityRuntimeHost,
   createNativeSqliteOwnerFixture,
 } from "./fixtures/native-sqlite-owner.fixture.js";
+import { retainedOutput } from "../src/internal/redaction.js";
 
 const sessionId = "background-compaction";
 
@@ -476,7 +477,7 @@ function commitLaterCompaction(run: Run): void {
     workId: requireAcceptedWorkId(run.owner, sessionId, "go"),
     expectedLeafId: leaf.id,
     head: later.id,
-    summary: "external summary",
+    summary: retainedOutput({ text: "external summary" }),
     trigger: "threshold",
     resumesRun: false,
     tokensBefore: 1,
