@@ -166,6 +166,9 @@ export function openRuntimeCoordinator(
       return closing.open;
     }).pipe(Effect.uninterruptible);
     const boundRuntime: BoundRuntimeSelfReference = {};
+    // An extension may begin a transaction while it starts, before the host
+    // binds; that transaction waits for the binding instead of failing.
+    const hostBound = Latch.makeUnsafe(false);
     const extensionsRef: ExtensionRuntimeCell = { current: undefined };
     let turnOptions = options;
     let pendingConfiguration:
@@ -395,6 +398,7 @@ export function openRuntimeCoordinator(
     };
     const door = openAdmissionDoor({
       owner: options.store,
+      createdBy: options.createdBy,
       admitNew,
       hostMeta: options.meta,
       contract,
@@ -409,10 +413,14 @@ export function openRuntimeCoordinator(
       },
       readQueueHead: (queue) => watchdog.transactional.readQueueHead(queue),
       commit: (mutation) =>
-        Effect.suspend(() =>
-          boundRuntime.commit === undefined
-            ? Effect.fail(runtimeFailure("Runtime host is unavailable"))
-            : boundRuntime.commit(mutation),
+        hostBound.await.pipe(
+          Effect.andThen(
+            Effect.suspend(() =>
+              boundRuntime.commit === undefined
+                ? Effect.fail(runtimeFailure("Runtime host is unavailable"))
+                : boundRuntime.commit(mutation),
+            ),
+          ),
         ),
       requestWake: requestBoundWake,
     });
@@ -451,11 +459,13 @@ export function openRuntimeCoordinator(
       requestWake: requestBoundWake,
       recipientStatus: options.recipientStatus,
       recipientParent: options.recipientParent,
+      createdBy: options.createdBy,
     });
     extensionsRef.current = extensions;
     const reconcile = reconcileRuntime({
       watchdog,
       store: options.store,
+      createdBy: options.createdBy,
       extensions,
       requestWake: requestBoundWake,
       mailRoom,
@@ -501,6 +511,7 @@ export function openRuntimeCoordinator(
     );
     boundRuntime.requestWake = requestWake;
     boundRuntime.commit = bound.commit;
+    yield* hostBound.open;
     // Every host must get one post-bind tick to recover durable work after a cold reopen.
     yield* bound.requestWake.pipe(
       Effect.onError(() =>

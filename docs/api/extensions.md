@@ -1315,6 +1315,13 @@ type ExtensionContextV0<S, Config, D> = Readonly<{
     ExtensionStateError,
     ExtensionRead
   >;
+  sessionMaker: (
+    sessionId,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
   recipientStatus: (
     recipient,
   ) => Effect.Effect<RecipientStatus, ExtensionStateError, ExtensionRead>;

@@ -543,6 +543,8 @@ export function readClientSnapshot(
   options: ClientReadOptions,
   activity: ObservedActivity,
   projectExtensions: () => SessionExtensionSlots = () => ({}),
+  /** The `createdBy` on this Agent's own record: its maker is a parent too. */
+  createdBy?: string,
 ): SessionSnapshot {
   return withSessionReadTransaction(owner, sessionId, () => {
     const pending = readPendingPrompts(owner, sessionId);
@@ -612,7 +614,7 @@ export function readClientSnapshot(
       extensions: projectExtensions(),
       attention: readSessionAttention(owner, sessionId),
     };
-    const parent = readSessionParent(owner, sessionId);
+    const parent = readSessionParent(owner, sessionId, createdBy);
     if (parent !== undefined) Object.assign(snapshot, { parent });
     return Object.freeze(
       options.includeSandboxFailures === true

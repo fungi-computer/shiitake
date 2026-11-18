@@ -1840,6 +1840,7 @@ it("agents.status shows an Agent that ended its turn with work still assigned, a
   let status: unknown;
   await runAgentCode(
     {
+      callerAgentId: () => "director",
       list: () => Promise.resolve([]),
       open: () => Promise.resolve({ agent, release: () => Promise.resolve() }),
     },
@@ -1891,8 +1892,8 @@ it("agents.status shows an Agent that ended its turn with work still assigned, a
   });
 });
 
-it("agents.status lists a Session this Session sent work to even when no first delegator was recorded, and no one else's", async () => {
-  const unparented = new Set(["steered", "unsent"]);
+it("agents.status lists every Session of an Agent the caller's Agent created, mail-delegated ones from any of its Sessions, and no one else's", async () => {
+  const delegated = new Set(["delegated"]);
   const agent: ShiitakeAgent = {
     createSession: () => Promise.reject(new Error("unused")),
     deleteSession: () => Promise.reject(new Error("unused")),
@@ -1918,56 +1919,53 @@ it("agents.status lists a Session this Session sent work to even when no first d
       read: () => {
         const snapshot: SessionSnapshot = { ...baseline, sessionId };
         return Promise.resolve(
-          unparented.has(sessionId)
-            ? snapshot
-            : {
+          delegated.has(sessionId)
+            ? {
                 ...snapshot,
                 parent: {
                   agentId: "director",
                   sessionId: "director-session",
                   name: "director",
                 },
-              },
+              }
+            : snapshot,
         );
       },
     }),
     close: () => Promise.resolve(),
   };
-  const asked: unknown[] = [];
-  const statusFor = async (sessionId: string) => {
+  const statusFor = async (callerAgentId: string, createdBy: string | null) => {
     let status: unknown;
     await runAgentCode(
       {
-        list: () => Promise.resolve([]),
+        callerAgentId: () => callerAgentId,
+        list: () =>
+          Promise.resolve([{ agentId: "worker", name: "Worker", createdBy }]),
         open: () =>
           Promise.resolve({ agent, release: () => Promise.resolve() }),
-        sentSessions: (source, agentId) => {
-          asked.push([source, agentId]);
-          return source === "director-session" ? ["steered"] : [];
-        },
       },
       async (tools) => {
         if (tools.status === undefined) throw new Error("status missing");
         status = await tools.status({ agentId: "worker" });
         return null;
       },
-      sessionId,
+      // A new Session of the parent Agent, not the one that sent the work.
+      "new-director-session",
     );
     return status;
   };
-  expect(await statusFor("director-session")).toMatchObject({
-    truncated: false,
-    sessions: [
-      { sessionId: "steered", state: "working" },
-      { sessionId: "delegated", state: "working" },
-    ],
-  });
-  expect(await statusFor("stranger-session")).toEqual({
-    truncated: false,
-    sessions: [],
-  });
-  expect(asked).toEqual([
-    ["director-session", "worker"],
-    ["stranger-session", "worker"],
+  const sessionIds = (status: unknown) =>
+    z
+      .object({ sessions: z.array(z.object({ sessionId: z.string() })) })
+      .parse(status)
+      .sessions.map(({ sessionId }) => sessionId);
+  // The caller's Agent made the worker: every one of its Sessions is listed.
+  expect(sessionIds(await statusFor("director", "director"))).toEqual([
+    "steered",
+    "unsent",
+    "delegated",
   ]);
+  // A peer it delegated to by mail: only the Session that mail opened.
+  expect(sessionIds(await statusFor("director", null))).toEqual(["delegated"]);
+  expect(sessionIds(await statusFor("stranger", "director"))).toEqual([]);
 });

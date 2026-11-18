@@ -27,6 +27,7 @@ import {
   hasRecordedRunTerminal,
   readWorkSender,
   readSessionParent,
+  readSessionMaker,
   recordWorkSender,
   type AdmissionOrigin,
   type EnqueueAcceptedWork,
@@ -172,11 +173,14 @@ function decodeReply(request: AdmitRequest): VerifiedAgentReply | undefined {
  * The Agent Session whose work this admission is: the sender of delegated
  * mail that expects a reply, or the sender of the earlier work this one
  * continues. Extension-admitted work otherwise belongs to the Session's first
- * delegator. A person's own message still has no sender.
+ * delegator. In an Agent another Agent made, any other work belongs to its
+ * maker, so its questions and reports reach that Agent, not a person. A
+ * person's message to any other Agent still has no sender.
  */
 function workSender(
   owner: SqliteOwner,
   request: DecodedRequest,
+  createdBy: string | undefined,
 ): AttentionRecipient | undefined {
   const mail = request.mail;
   if (mail?.from.kind === "agent" && mail.replyTo.length > 0)
@@ -186,17 +190,22 @@ function workSender(
       // The host-authenticated author names the sender; mail.meta is the sender's own claim.
       name: messageAuthor(request.meta)?.name ?? mail.from.agentId,
     };
-  return request.continuesWorkId === undefined
-    ? request.origin.kind !== "extension"
+  const continued =
+    request.continuesWorkId === undefined
       ? undefined
-      : readSessionParent(owner, request.sessionId)
-    : readWorkSender(owner, request.sessionId, request.continuesWorkId);
+      : readWorkSender(owner, request.sessionId, request.continuesWorkId);
+  if (continued !== undefined) return continued;
+  return request.origin.kind === "extension"
+    ? readSessionParent(owner, request.sessionId, createdBy)
+    : readSessionMaker(owner, request.sessionId, createdBy);
 }
 
 /** Bind the door to one owner, run contract, Watchdog queue and host wake. */
 export function openAdmissionDoor(
   input: Readonly<{
     owner: SqliteOwner;
+    /** The `createdBy` on this Agent's own record, when another Agent made it. */
+    createdBy?: string | undefined;
     /** The host's metadata schema, checked before any write. */
     hostMeta?: HostMetaOptions | undefined;
     /** Refuses a new prompt under storage pressure; replays skip it. */
@@ -306,7 +315,7 @@ export function openAdmissionDoor(
       request.reply,
     );
     if (accepted.delivery === "new" && targetWorkId === undefined) {
-      const sender = workSender(input.owner, request);
+      const sender = workSender(input.owner, request, input.createdBy);
       if (sender !== undefined)
         recordWorkSender(
           input.owner,

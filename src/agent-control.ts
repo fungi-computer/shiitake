@@ -534,6 +534,12 @@ export type AgentDelegationInvocation = Readonly<{
 /** Host-owned discovery and per-operation access to ordinary Agents. */
 export type AgentControlDirectory = Readonly<{
   /**
+   * The Agent whose Sessions call these tools. An Agent whose own record
+   * names it as `createdBy` is its child: `status` lists all of that child's
+   * Sessions, whichever of the caller's Sessions asks. Read when used.
+   */
+  callerAgentId?: () => string;
+  /**
    * Return Agents authorized by the host's current project or Team scope.
    * Archived Agents are left out unless `archived` asks for only those.
    */
@@ -548,22 +554,13 @@ export type AgentControlDirectory = Readonly<{
     signal: AbortSignal,
     invocation?: AgentDelegationInvocation,
   ) => Promise<Accepted | Held>;
-  /**
-   * Sessions of one Agent that the host recorded as accepting work from this
-   * Session. A Session an Agent created and then steered has no first
-   * delegator, so `status` also lists these.
-   */
-  sentSessions?: (
-    sourceSessionId: string,
-    agentId: string,
-  ) => readonly string[];
   /** Recall under the same host-owned request identity as send. Never abort active work. */
   recall?: (
     input: AgentRecallInput,
     sourceSessionId: string,
     signal: AbortSignal,
   ) => Promise<CancelResult>;
-  /** Answer a child Session's Ask as the exact Session that sent it the work. */
+  /** Answer a child Session's Ask as the Agent it waits on, from the calling Session. */
   answer?: (
     input: AgentControlAnswerInput,
     senderSessionId: string,
@@ -575,7 +572,7 @@ export type AgentControlDirectory = Readonly<{
     senderSessionId: string,
     signal: AbortSignal,
   ) => Promise<AgentControlEscalateOutput>;
-  /** Exact delegator's controls; absent on hosts that do not offer this door. */
+  /** The delegating or making Agent's goal controls; absent on hosts without this door. */
   goal?: (
     input: AgentControlGoalInput,
     senderSessionId: string,
@@ -966,7 +963,7 @@ export function createAgentControlSource(
         requestOperations.answer = Mycelium.operation({
           replay: "unsafe",
           description:
-            'Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Supply answers keyed by question id, for example {branch:{selected:["main"]}} or {branch:{selected:[],text:"Use the release branch"}}; answer every question using its offered labels or nonempty text. Only the exact Session the item waits on can answer; others are refused (not_sender), including a new Session on the same Agent. The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If it needs more than you can decide, agents.escalate bubbles it to your parent first. An item you leave keeps waiting on you; you are reminded at most twice. A person sees it only after escalation past every Agent or when its waiting Agent is gone.',
+            'Answer a question a sub-agent left waiting on you. A waiting_on_you item in an agent reply names its askId. Supply answers keyed by question id, for example {branch:{selected:["main"]}} or {branch:{selected:[],text:"Use the release branch"}}; answer every question using its offered labels or nonempty text. Any Session of the Agent the item waits on can answer, including from a new Session on the same Agent; other Agents, siblings included, are refused (not_sender). The answer reaches the sub-agent as one follow-up command, returned as commandId: agents.wait on it to collect the continued work. Reuse requestId when retrying the same answer. If it needs more than you can decide, agents.escalate bubbles it to your parent first. An item you leave keeps waiting on you; you are reminded at most twice. A person sees it only after escalation past every Agent or when its waiting Agent is gone.',
           input: answerInput,
           output: answerOutput,
           execute: async (input, context) => {
@@ -983,7 +980,7 @@ export function createAgentControlSource(
         requestOperations.escalate = Mycelium.operation({
           replay: "unsafe",
           description:
-            "Pass a sub-agent's waiting item to your own parent when it needs more than you can decide; only at the root or with a gone parent does it reach a person. Use the itemId from a waiting_on_you entry. Only the exact Session it waits on may escalate; others are refused (not_sender). An item you leave keeps waiting on you; you are reminded at most twice. A person is asked only when you escalate past every Agent or the waiting Agent is gone.",
+            "Pass a sub-agent's waiting item to your own parent when it needs more than you can decide; only at the root or with a gone parent does it reach a person. Use the itemId from a waiting_on_you entry. Any Session of the Agent it waits on may escalate; other Agents are refused (not_sender). An item you leave keeps waiting on you; you are reminded at most twice. A person is asked only when you escalate past every Agent or the waiting Agent is gone.",
           input: escalateInput,
           output: escalateOutput,
           execute: async (input, context) => {
@@ -999,7 +996,7 @@ export function createAgentControlSource(
       if (session !== undefined)
         requestOperations.status = Mycelium.operation({
           replay: "safe",
-          description: `Say what each Session you delegated to one Agent is doing now: working, waiting (with waitingOn naming the Agent or person), stopped_with_work_assigned (it ended its turn while its goal is still open or paused; objective names the work and pausedBy a paused goal's cause), finished or failed. Only Sessions whose first delegator is this Session, or that this Session sent work to, are listed, among the ${String(statusReadLimit)} most relevant, at most ${String(statusSessionLimit)}; truncated reports more. Follow a stopped Session up with agents.send or agents.goal.`,
+          description: `Say what each Session of one Agent you are responsible for is doing now: working, waiting (with waitingOn naming the Agent or person), stopped_with_work_assigned (it ended its turn while its goal is still open or paused; objective names the work and pausedBy a paused goal's cause), finished or failed. Every Session of an Agent you created is listed, from any of your Sessions; of any other Agent, only Sessions your Agent first delegated to by mail. At most ${String(statusSessionLimit)} among the ${String(statusReadLimit)} most relevant; truncated reports more. Follow a stopped Session up with agents.send or agents.goal.`,
           input: agentInput,
           output: statusOutput,
           execute: async ({ agentId }, context) =>
@@ -1011,9 +1008,15 @@ export function createAgentControlSource(
                 context.signal,
                 async (agent) => {
                   const rows: z.infer<typeof statusRow>[] = [];
-                  const sent = new Set(
-                    directory.sentSessions?.(session.sessionId, agentId),
-                  );
+                  const caller = directory.callerAgentId?.();
+                  // createdBy on the child's own record is the parent edge.
+                  const created =
+                    caller !== undefined &&
+                    (await directory.list(context.signal)).some(
+                      (listed) =>
+                        listed.agentId === agentId &&
+                        listed.createdBy === caller,
+                    );
                   let after: string | undefined;
                   let truncated = false;
                   let reads = 0;
@@ -1030,8 +1033,9 @@ export function createAgentControlSource(
                         .session(row.sessionId)
                         .read({ limit: 1 });
                       if (
-                        snapshot.parent?.sessionId !== session.sessionId &&
-                        !sent.has(row.sessionId)
+                        !created &&
+                        (caller === undefined ||
+                          snapshot.parent?.agentId !== caller)
                       )
                         continue;
                       if (rows.length === statusSessionLimit) {
@@ -1052,7 +1056,7 @@ export function createAgentControlSource(
         requestOperations.goal = Mycelium.operation({
           replay: "unsafe",
           description:
-            "Pause or clear the goal of a Session you delegated, or resume a goal you paused. Only the exact Session recorded as that child's first delegator may; siblings and other Sessions are refused (not_delegator). This does not cancel a running turn. An item you leave unanswered keeps waiting on you, with at most two reminders.",
+            "Pause or clear the goal of a Session your Agent delegated by mail or of an Agent your Agent created, or resume a goal your Agent paused. Any Session of that Agent may, including a new Session; siblings and other Agents are refused (not_delegator). This does not cancel a running turn. An item you leave unanswered keeps waiting on you, with at most two reminders.",
           input: goalControlInput,
           output: goalControlOutput,
           execute: async (input, context) => {

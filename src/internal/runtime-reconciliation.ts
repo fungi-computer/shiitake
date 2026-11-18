@@ -3,7 +3,10 @@ import {
   decodeAgentJob,
   type BirdDogEffect,
 } from "@fungi.computer/bird-dog/effect";
-import type { BirdDogSettlement } from "@fungi.computer/bird-dog";
+import type {
+  BirdDogDelegator,
+  BirdDogSettlement,
+} from "@fungi.computer/bird-dog";
 import type { WatchdogSettledJob } from "@fungi.computer/watchdog";
 import type {
   WatchdogRuntimeEffect,
@@ -36,6 +39,7 @@ import {
   readSettlementMeta,
   readWaitingOn,
   readWaitingOnSender,
+  readWorksSentBy,
   type WaitingOnYou,
   recordWorkSettlement,
   sessionLineageRefused,
@@ -75,7 +79,7 @@ function settlementFacts(
   });
 }
 
-function decodeJob(job: WatchdogSettledJob) {
+function decodeJob(job: Parameters<typeof decodeAgentJob>[0]) {
   return Effect.try({
     try: () => decodeAgentJob(job),
     catch: () => runtimeFailure("Agent work payload is invalid"),
@@ -124,13 +128,16 @@ function replyToMail(
  * record. It runs after the extensions have seen the settlement, so a goal
  * or loop that admitted the next turn keeps the Session busy and the stretch
  * of turns reports once, when the Session finally rests. Another Agent's
- * original mail is that Agent's correspondence and never reported here.
+ * original mail is that Agent's correspondence and never reported here. A
+ * Session no mail delegated reports to the Agent that made this one, as a
+ * report on that Agent's latest mail to this Session.
  */
 function reportToDelegator(
   store: SqliteOwner,
   watchdog: WatchdogRuntimeEffect,
   mailRoom: BirdDogEffect | undefined,
   job: WatchdogSettledJob,
+  createdBy: string | undefined,
 ): Effect.Effect<void, ShiitakeError> {
   if (mailRoom === undefined) return Effect.void;
   return Effect.gen(function* () {
@@ -145,10 +152,18 @@ function reportToDelegator(
         ),
       );
     if (head.state !== "idle") return;
-    const delegator = yield* Effect.try({
+    const recorded = yield* Effect.try({
       try: () => readSessionDelegator(store, payload.work.sessionId),
       catch: () => runtimeFailure("Session delegator is unavailable"),
     });
+    const delegator =
+      recorded ??
+      (yield* makerDelegator(
+        store,
+        watchdog,
+        payload.work.sessionId,
+        createdBy,
+      ));
     if (delegator === undefined) return;
     const from = mail?.reply === undefined ? mail?.from : undefined;
     const anotherAgentsMail =
@@ -173,6 +188,50 @@ function reportToDelegator(
   });
 }
 
+/** How many of the maker's latest works a report looks through for its mail. */
+const makerMailSearch = 16;
+
+/**
+ * The maker's latest mail into this Session, as a delegator: the report then
+ * answers mail the maker itself sent, which its host can authenticate. Work
+ * its own Session continued carries no mail and is skipped.
+ */
+function makerDelegator(
+  store: SqliteOwner,
+  watchdog: WatchdogRuntimeEffect,
+  sessionId: string,
+  createdBy: string | undefined,
+): Effect.Effect<BirdDogDelegator | undefined, ShiitakeError> {
+  if (createdBy === undefined) return Effect.succeed(undefined);
+  return Effect.gen(function* () {
+    const works = yield* Effect.try({
+      try: () => readWorksSentBy(store, sessionId, createdBy, makerMailSearch),
+      catch: () => runtimeFailure("Session senders are unavailable"),
+    });
+    for (const workId of works) {
+      const read = yield* watchdog
+        .read(workId)
+        .pipe(
+          Effect.mapError(() => runtimeFailure("Agent work is unavailable")),
+        );
+      if (read.status !== "found") continue;
+      const mail = (yield* decodeJob(read.job)).mail;
+      if (
+        mail?.from.kind === "agent" &&
+        mail.from.agentId === createdBy &&
+        mail.reply === undefined &&
+        mail.replyTo.length > 0
+      )
+        return {
+          key: mail.key,
+          agentId: mail.to.agentId,
+          replyTo: mail.replyTo,
+        };
+    }
+    return undefined;
+  });
+}
+
 /**
  * The `core-report` settled consumer: after the extensions' turn, report each
  * Session's last settled job in the page, one record at a time.
@@ -182,6 +241,7 @@ function reportSettled(
   watchdog: WatchdogRuntimeEffect,
   mailRoom: BirdDogEffect | undefined,
   records: readonly WatchdogSettledRecord[],
+  createdBy: string | undefined,
 ): Effect.Effect<void, ShiitakeError> {
   return Effect.forEach(
     records,
@@ -191,7 +251,13 @@ function reportSettled(
           .slice(index + 1)
           .some(({ job }) => job.queue === record.job.queue);
         if (!later && !(yield* settledInRefusedSession(store, record.job)))
-          yield* reportToDelegator(store, watchdog, mailRoom, record.job);
+          yield* reportToDelegator(
+            store,
+            watchdog,
+            mailRoom,
+            record.job,
+            createdBy,
+          );
         yield* Effect.try({
           try: () => {
             advanceCursor(store, reportConsumer, record.sequence);
@@ -379,6 +445,8 @@ export function reconcileRuntime(
   input: Readonly<{
     watchdog: WatchdogRuntimeEffect;
     store: SqliteOwner;
+    /** The `createdBy` on this Agent's own record, when another Agent made it. */
+    createdBy?: string | undefined;
     mailRoom: BirdDogEffect | undefined;
     extensions: ExtensionRuntime;
     requestWake: Effect.Effect<void, ShiitakeError>;
@@ -434,6 +502,7 @@ export function reconcileRuntime(
         page.filter(
           ({ sequence }) => sequence > reportCursor && sequence <= processed,
         ),
+        input.createdBy,
       ),
     );
     if (page.length === pageSize) yield* input.requestWake;

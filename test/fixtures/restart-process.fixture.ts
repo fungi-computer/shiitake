@@ -197,6 +197,10 @@ const faux = fauxModel(
 );
 let markStarted: () => void = () => undefined;
 let releaseFirst: () => void = () => undefined;
+let markToolStarted: () => void = () => undefined;
+const toolStarted = new Promise<void>((resolve) => {
+  markToolStarted = resolve;
+});
 const started = new Promise<void>((resolve) => {
   markStarted = resolve;
 });
@@ -204,8 +208,25 @@ const held = new Promise<void>((resolve) => {
   releaseFirst = resolve;
 });
 let requests = 0;
+/** A valid request answers the call exactly once, right after its turn. */
+const answeredOnce: Parameters<typeof faux.setResponses>[0][number] = (
+  context,
+) => {
+  const messages = requestMessages(context);
+  const call = messages.findIndex(
+    (m) =>
+      m.role === "assistant" &&
+      m.content.some((c) => c.type === "toolCall" && c.id === "send-call"),
+  );
+  const results = messages.filter(
+    (m) => m.role === "toolResult" && m.toolCallId === "send-call",
+  );
+  if (call < 0 || results.length !== 1 || messages[call + 1] !== results[0])
+    throw new Error("The call was not answered once, right after its turn");
+  return fauxAssistantMessage("verified recovered context");
+};
 faux.setResponses(
-  mode === "crash-tool"
+  mode === "crash-tool" || mode === "cancel-mid-tool"
     ? [
         fauxAssistantMessage(
           fauxToolCall(
@@ -215,8 +236,11 @@ faux.setResponses(
           ),
           { stopReason: "toolUse" },
         ),
+        answeredOnce,
       ]
-    : [fauxAssistantMessage("complete")],
+    : mode === "finish-answered"
+      ? [answeredOnce]
+      : [fauxAssistantMessage("complete")],
 );
 if (
   mode === "crash-retry" ||
@@ -359,7 +383,8 @@ const agent = await makeAgent({
     ...dependencies.tools,
     sandbox: {
       execute: () => {
-        process.send?.("tool-started");
+        if (mode !== "cancel-mid-tool") process.send?.("tool-started");
+        markToolStarted();
         return new Promise<never>(() => undefined);
       },
     },
@@ -453,14 +478,14 @@ if (mode === "crash-completion")
   fixture.owner.sql.exec(
     "CREATE TRIGGER refuse_completion BEFORE UPDATE OF state ON watchdog_jobs WHEN NEW.state = 'settled' BEGIN SELECT RAISE(ABORT, 'projection unavailable'); END",
   );
-if (mode?.startsWith("crash-"))
+if (mode?.startsWith("crash-") || mode === "cancel-mid-tool")
   await agent.session("restart").command({
     type: "prompt",
     delivery: "followUp",
     requestId: "restart-command",
     text: "Finish after restart",
   });
-if (mode === "finish-history")
+if (mode === "finish-history" || mode === "finish-answered")
   await agent.session("restart").command({
     type: "prompt",
     delivery: "followUp",
@@ -476,6 +501,19 @@ if (mode === "cancel") {
 }
 interceptRetryCommit = mode === "crash-retry-decision" || stopAtExhaustion;
 const running = runtime.runNext();
+// Cancel while the tool is still executing, then ask for the next turn.
+if (mode === "cancel-mid-tool") {
+  await toolStarted;
+  await agent.session("restart").abort();
+  await running;
+  await agent.session("restart").command({
+    type: "prompt",
+    delivery: "followUp",
+    requestId: "next-command",
+    text: "Continue with the failed history",
+  });
+  await runtime.runNext();
+}
 if (mode === "crash-backoff") {
   for (;;) {
     const retry = [...readSelectedPath(fixture.owner, { sessionId: "restart" })]

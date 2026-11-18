@@ -1,5 +1,28 @@
 # @fungi.computer/shiitake
 
+## 0.20.3
+
+### Patch Changes
+
+- Changes since 0.20.2:
+
+  - fix(subagents): keep the Agents a conversation sent work to in the footer
+  - fix(agents): own the Agent name shape in Agar, where Oyster core can reach
+    it
+  - fix(agents): one safe Agent name shape for people and the Agent itself
+  - fix(subagents): read the host Agent's id when the roster is used
+  - fix(shiitake): persist interrupted results for dangling tool calls
+  - fix(subagents): let a starting extension reconcile once its Agent binds
+  - fix(subagents): route a made-by Agent's attention and reports to its maker
+  - fix(subagents): derive the parent edge from createdBy, drop the roster
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.22.0
+  - @fungi.computer/mule@0.2.7
+  - @fungi.computer/knapsack@0.4.19
+  - @fungi.computer/mycelium@0.4.6
+
 ## 0.20.2
 
 ### Patch Changes

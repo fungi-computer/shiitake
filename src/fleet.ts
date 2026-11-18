@@ -25,6 +25,7 @@ import { defineIdFamily, type CairnId } from "@fungi.computer/cairn/id";
 import { deterministicReplayKey } from "@fungi.computer/cairn";
 import { z } from "zod";
 import {
+  agentNameSchema,
   authorMeta,
   type AuthorMeta,
   FungiMessageMetaSchema,
@@ -173,7 +174,7 @@ const receiptRowSchema = z.lazy(() =>
 /** Stable replay input; configuration is an opaque host creation choice. */
 export const agentCreationSchema = z.lazy(() =>
   z.strictObject({
-    name: z.string().min(1).max(256),
+    name: agentNameSchema,
     requestId: z.string().min(1).max(256),
     configuration: z.string().min(1).max(4096),
     createdBy: z.string().min(1).max(256).nullable().optional(),
@@ -185,7 +186,7 @@ export type AgentCreation = z.infer<typeof agentCreationSchema>;
 /** Owner-only rename input: an Agent's new display name. */
 export const agentRenameSchema = z.lazy(() =>
   z.strictObject({
-    name: z.string().min(1).max(256),
+    name: agentNameSchema,
   }),
 );
 /** Input to {@link createAgentDirectory}'s `rename`. */
@@ -777,8 +778,9 @@ export function createFleetCorrespondence(
   }
   /**
    * Authenticate one arriving reply against the frozen mail this owner sent.
-   * It must be BirdDog's single reply key for that mail, mirror its sender and
-   * recipient exactly, carry BirdDog's settlement facts and, once the send's
+   * It must be BirdDog's single reply key for that mail, come from the exact
+   * Session it was sent to, reach the Agent that sent it (any of its
+   * Sessions), carry BirdDog's settlement facts and, once the send's
    * receipt is recorded, name that receipt's `commandId`. The result restores
    * the caller's own delegation path and the verified reply; it never reads
    * the reply's text or any settlement metadata.
@@ -824,13 +826,14 @@ export function createFleetCorrespondence(
       )
         return undefined;
     } else {
+      // Custody is the sending Agent's: its host may deliver a reply to the
+      // Agent's newest Session once the sending Session is gone.
       if (
         sent.from.kind !== "agent" ||
         mail.from.kind !== "agent" ||
         mail.from.agentId !== sent.to.agentId ||
         mail.from.sessionId !== sent.to.sessionId ||
-        mail.to.agentId !== sent.from.agentId ||
-        mail.to.sessionId !== sent.from.sessionId
+        mail.to.agentId !== sent.from.agentId
       )
         return undefined;
     }

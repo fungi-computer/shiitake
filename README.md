@@ -1,5 +1,91 @@
 # Shiitake by Fungi (`@fungi.computer/shiitake`)
 
+Shiitake runs AI agent conversations that survive restarts. A conversation (a
+Session) keeps its accepted work, messages and observations, and your host
+supplies storage, models and tools.
+
+```mermaid
+flowchart LR
+  Client[Terminal, browser or App] -->|send a prompt| Session[Session]
+  Session --> Agent[Shiitake Agent]
+  Agent -->|your model and tools| Host[Your host]
+  Agent -->|saved history| Store[(Your storage)]
+  Session -->|observe| Client
+```
+
+## Quick start
+
+Install it:
+
+```sh
+npm install @fungi.computer/shiitake
+```
+
+Node's built-in SQLite (Node 22.13 or newer) backs the public testing helper.
+This runs the real durable Agent with a deterministic faux model; no credentials
+or background timer are needed. Drive settlement explicitly.
+
+```ts
+import { memoryHost } from "@fungi.computer/shiitake/testing";
+
+const host = await memoryHost();
+try {
+  const receipt = await host.agent.session("example-session").send("Hello", {
+    requestId: "example-first-prompt",
+  });
+  const snapshot = await host.settle("example-session");
+  console.log(receipt.status, snapshot.terminals.at(-1)?.outcome);
+} finally {
+  await host.close();
+}
+```
+
+`memoryHost({ owner, model, extensions, tools })` accepts canonical inputs and
+borrows a supplied owner without closing its database. `extensions` may be a
+plain list; the test host then grants each extension exactly what it requests
+(`Shiitake.make` always takes explicit grants). `script` replaces `model` and
+`tools`: strings are replies, `callTool("bookmarks.add", input)` is a tool call
+that a scripted sandbox runs through the admitted operation, and
+`echoSystemPrompt()` replies with the system prompt the model received.
+`fauxModelSource(replies)` supplies deterministic responses for each model
+acquisition. `reconcile()` drives one canonical tick;
+`settle(sessionId, maxTicks)` accepts a 1–1,000 tick budget (default 1,000) and
+refuses when it is exhausted. This manually driven helper does not assert host
+wake delivery; the native runtime-law tests qualify that scheduling contract.
+The helper is **not isolation**: trusted callbacks retain the process's
+privileges, and submitted JavaScript is never evaluated.
+
+Production callers use `Shiitake.make(options)` with their storage and wake
+owner. Keep that host open while it owns active work. Closing it stops runtime
+resources; it does not erase SQLite data or turn acceptance into a completed
+reply.
+
+## Common tasks
+
+### Try an Agent with no provider account
+
+The Quick start uses a deterministic fake model and Node's built-in SQLite.
+
+### Decide how to run it
+
+See [Choose how to start](#choose-how-to-start).
+
+### Send work and watch it settle
+
+See [Accept, execute and observe](#accept-execute-and-observe).
+
+### Add extensions and control authority
+
+See [Extensions and authority](#extensions-and-authority).
+
+### Run a fleet of Agents
+
+See [Agent fleet](#agent-fleet).
+
+## Reference
+
+### Overview
+
 Fungi is an open-source workspace for AI agents: Apps that people and agents
 both use, Computers that keep their files, and permissions the system checks.
 Try it with one command, run it on your own Cloudflare account, or let us host
@@ -94,47 +180,6 @@ supplies:
 
 Construction needs an owner and a runtime host that meet their transaction and
 wake contracts. Existing host fixtures show deterministic and native adapters.
-
-## Quick start without a provider account
-
-Node's built-in SQLite (Node 22.13 or newer) backs the public testing helper.
-This runs the real durable Agent with a deterministic faux model; no credentials
-or background timer are needed. Drive settlement explicitly.
-
-```ts
-import { memoryHost } from "@fungi.computer/shiitake/testing";
-
-const host = await memoryHost();
-try {
-  const receipt = await host.agent.session("example-session").send("Hello", {
-    requestId: "example-first-prompt",
-  });
-  const snapshot = await host.settle("example-session");
-  console.log(receipt.status, snapshot.terminals.at(-1)?.outcome);
-} finally {
-  await host.close();
-}
-```
-
-`memoryHost({ owner, model, extensions, tools })` accepts canonical inputs and
-borrows a supplied owner without closing its database. `extensions` may be a
-plain list; the test host then grants each extension exactly what it requests
-(`Shiitake.make` always takes explicit grants). `script` replaces `model` and
-`tools`: strings are replies, `callTool("bookmarks.add", input)` is a tool call
-that a scripted sandbox runs through the admitted operation, and
-`echoSystemPrompt()` replies with the system prompt the model received.
-`fauxModelSource(replies)` supplies deterministic responses for each model
-acquisition. `reconcile()` drives one canonical tick;
-`settle(sessionId, maxTicks)` accepts a 1–1,000 tick budget (default 1,000) and
-refuses when it is exhausted. This manually driven helper does not assert host
-wake delivery; the native runtime-law tests qualify that scheduling contract.
-The helper is **not isolation**: trusted callbacks retain the process's
-privileges, and submitted JavaScript is never evaluated.
-
-Production callers use `Shiitake.make(options)` with their storage and wake
-owner. Keep that host open while it owns active work. Closing it stops runtime
-resources; it does not erase SQLite data or turn acceptance into a completed
-reply.
 
 ## Accept, execute and observe
 

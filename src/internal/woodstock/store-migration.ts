@@ -11,7 +11,7 @@ import {
 import { decodeStoredSessionEntry } from "./session-entry.js";
 
 /**
- * In-place upgrade of a Woodstock store from schema marker 1 to 5 to the
+ * In-place upgrade of a Woodstock store from schema marker 1 to 6 to the
  * current one. Every step keeps the person's Agents, Sessions and history; the
  * whole upgrade runs in the caller's transaction, so a store that cannot be
  * upgraded is left exactly as it was found.
@@ -25,6 +25,8 @@ import { decodeStoredSessionEntry } from "./session-entry.js";
  *   recovery window and `not_before`; extension timers became Watchdog jobs,
  *   so the timer table points at its job instead of holding a deadline; and
  *   two Local tables nothing reads any more are dropped.
+ * - 7: the Session-keyed conversation roster is dropped; a child's parent is
+ *   the `createdBy` on its own Agent record.
  *
  * The structural steps also look at the store's real shape, so they are
  * no-ops where they already hold.
@@ -311,6 +313,15 @@ function dropRetiredLocalTables(owner: SqliteOwner): void {
     owner.sql.exec(`DROP TABLE IF EXISTS ${table}`);
 }
 
+/**
+ * Each conversation's own list of the Agents it created or sent work to. A
+ * child's parent is now the `createdBy` on its own Agent record, so nothing
+ * reads the Session-keyed copy; its index goes with it.
+ */
+function dropConversationRoster(owner: SqliteOwner): void {
+  owner.sql.exec("DROP TABLE IF EXISTS oyster_conversation_agents");
+}
+
 type UpgradeStep = Readonly<{
   /** The marker whose build introduced this change. */
   marker: number;
@@ -324,6 +335,7 @@ const upgradeSteps: readonly UpgradeStep[] = [
   { marker: 6, apply: upgradeWatchdogJobs },
   { marker: 6, apply: upgradeExtensionTimers },
   { marker: 6, apply: dropRetiredLocalTables },
+  { marker: 7, apply: dropConversationRoster },
 ];
 
 const MarkerRowSchema = Schema.Struct({ version: Schema.Int });

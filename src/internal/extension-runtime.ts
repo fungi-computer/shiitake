@@ -75,6 +75,7 @@ import {
   hasPendingSessionSteer,
   readWorkSender,
   readSessionParent,
+  readSessionMaker,
   hasSuccessfulToolResult,
   advanceCursor,
   declareSessionDocument,
@@ -335,6 +336,8 @@ export function openExtensionRuntime(
     requestWake: Effect.Effect<void, ShiitakeError>;
     recipientStatus?: import("./effect-contracts.js").ShiitakeEffectOptions["recipientStatus"];
     recipientParent?: import("./effect-contracts.js").ShiitakeEffectOptions["recipientParent"];
+    /** The `createdBy` on this Agent's own record, when another Agent made it. */
+    createdBy?: string | undefined;
   }>,
 ): Effect.Effect<ExtensionRuntime, ShiitakeError> {
   const { owner } = input;
@@ -1106,8 +1109,25 @@ export function openExtensionRuntime(
             Effect.andThen(
               storeStep(
                 () =>
-                  readSessionParent(owner, decodeClientSessionId(sessionId)) ??
-                  null,
+                  readSessionParent(
+                    owner,
+                    decodeClientSessionId(sessionId),
+                    input.createdBy,
+                  ) ?? null,
+              ),
+            ),
+          ),
+        sessionMaker: (sessionId: string) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "run_tools")),
+            Effect.andThen(
+              storeStep(
+                () =>
+                  readSessionMaker(
+                    owner,
+                    decodeClientSessionId(sessionId),
+                    input.createdBy,
+                  ) ?? null,
               ),
             ),
           ),

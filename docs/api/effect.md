@@ -137,6 +137,7 @@ type ShiitakeEffectOptions = Readonly<{
   recipientParent?: (
     recipient,
   ) => Effect.Effect<AttentionRecipient | null, ExtensionStateError>;
+  createdBy?: string;
   retry?: RetryPolicy;
   modelStreamIdleTimeoutMs?: number;
 }>;

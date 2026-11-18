@@ -606,6 +606,7 @@ type ShiitakeOptions = Readonly<{
   extensions: ExtensionRosterV0;
   recipientStatus?: (recipient) => Promise<RecipientStatus>;
   recipientParent?: (recipient) => Promise<AttentionRecipient | null>;
+  createdBy?: string;
 }>;
 ```
 

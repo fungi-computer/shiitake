@@ -116,6 +116,7 @@ function readSessionWithContext(
             input?.before === undefined,
           ),
         }),
+        options.createdBy,
       );
     }),
     Effect.flatMap(({ snapshot, context }) => {

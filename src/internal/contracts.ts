@@ -290,6 +290,13 @@ export type ShiitakeOptions = Readonly<{
   recipientParent?: (
     recipient: import("../session-attention.js").AttentionRecipient,
   ) => Promise<import("../session-attention.js").AttentionRecipient | null>;
+  /**
+   * The Agent that made this one: the `createdBy` on this Agent's own record.
+   * Work no Agent mail sent then belongs to that Agent, so this Agent's
+   * questions and reports reach it rather than a person. Omitted for an Agent
+   * a person made.
+   */
+  createdBy?: string;
 }>;
 
 /**

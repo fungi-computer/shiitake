@@ -249,6 +249,7 @@ function hostedPort(
       hasPendingSteer: () => Effect.fail(unavailable("Steering")),
       workSender: () => Effect.fail(unavailable("Run sender")),
       sessionParent: () => Effect.fail(unavailable("Session parent")),
+      sessionMaker: () => Effect.fail(unavailable("Session maker")),
       recipientStatus: () => Effect.succeed("unknown" as const),
       recipientParent: () => Effect.fail(unavailable("Recipient parent")),
       sessionPosition: () => Effect.fail(unavailable("Session timeline")),

@@ -209,6 +209,12 @@ export type ShiitakeEffectOptions = Readonly<{
     import("../extensions.js").ExtensionStateError
   >;
   /**
+   * The Agent that made this one: the `createdBy` on this Agent's own record.
+   * Work no Agent mail sent then belongs to that Agent. Omitted for an Agent
+   * a person made.
+   */
+  createdBy?: string;
+  /**
    * Pi's bounded retry policy around each live assistant call. Omitted
    * means `piCodingAgentRetryDefaults` (Pi coding-agent's own numbers).
    */

@@ -11,6 +11,7 @@ Agents, Sessions and history survive the in-place upgrade.
 | `marker-3.agent.sqlite` | 3      | `1e7e73d94c3ee4191cc357227c60a46a8fe9ea3d` |
 | `marker-4.agent.sqlite` | 4      | `20a27d9c67fc4d245a42b790845756990afd2fd7` |
 | `marker-5.agent.sqlite` | 5      | `cbaff484459e1d5c1907d8e8042bf54fa583a5da` |
+| `marker-6.agent.sqlite` | 6      | `12e3e02165cf9f31b219f2d6f0bff29b8b75fc1a` |
 
 ## Which markers shipped
 
@@ -44,7 +45,7 @@ Nothing in the stores is anyone's own data. Each has an Agent named "Fixture
 Agent", three Sessions of scripted prompts and replies from a stub model, `list`
 and `read` tool calls over a note, an `execute` call that reads a one-pixel
 image (so its result carries image details), two long prompts and a compaction
-over them, and one loop timer. Markers 3 to 5 also hold one automatic retry.
+over them, and one loop timer. Markers 3 to 6 also hold one automatic retry.
 They were never copied from a person's `.fungi` folder, and must not be: a real
 store holds prompts, code and secrets.
 

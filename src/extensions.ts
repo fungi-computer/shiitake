@@ -530,8 +530,23 @@ export type ExtensionContextV0<
     ExtensionStateError,
     ExtensionRead
   >;
-  /** First delegator of this owner's Session, or null. Requires run_tools. */
+  /**
+   * Parent of this owner's Session: its first mail delegator, else the Agent
+   * that made this one. Null when neither exists. Requires run_tools.
+   */
   sessionParent: (
+    sessionId: string,
+  ) => Effect.Effect<
+    AttentionRecipient | null,
+    ExtensionStateError,
+    ExtensionRead
+  >;
+  /**
+   * The Agent that made this one (its `createdBy`), at the Session of it that
+   * last sent this Session work, else this Agent any work. Null for an Agent
+   * a person made. Requires run_tools.
+   */
+  sessionMaker: (
     sessionId: string,
   ) => Effect.Effect<
     AttentionRecipient | null,

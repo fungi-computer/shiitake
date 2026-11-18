@@ -1489,3 +1489,212 @@ it("never reports another Agent's mail to the Session's delegator", async () => 
     fixture.close();
   }
 });
+
+/** The made-by Agent's own record names the parent as its maker. */
+function madeByOptions(
+  store: SqliteOwner,
+  runtime: ShiitakeEffectOptions["runtime"],
+  faux: ReturnType<typeof fauxModel>,
+): ShiitakeEffectOptions {
+  return {
+    ...runtimeOptions(store, runtime, faux),
+    createdBy: parent.agentId,
+    extensions: {
+      roster: [continuer],
+      grants: [{ id: continuerId, capabilities: ["settled", "send"] }],
+    },
+  };
+}
+
+/** Each report on the maker's mail, in order. */
+const reportsOn = (posted: readonly BirdDogMail[], mailKey: string) =>
+  posted.filter(({ key }) => key.startsWith(mailKey + ":report:"));
+
+it("a made-by Agent's continuation, which no mail sent, reports to its maker", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("Working"),
+    fauxAssistantMessage("Continued"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(madeByOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("made-continued-1", "Start")),
+    );
+    for (let tick = 0; tick < 6; tick += 1) await runtime.reconcile();
+    const terminals = (
+      await Effect.runPromise(core.agent.session(child.sessionId).read())
+    ).terminals;
+    const continued = terminals.at(-1)?.commandId;
+    expect(terminals).toHaveLength(2);
+    expect(posted.map(({ key }) => key)).toEqual([
+      "made-continued-1:reply:0",
+      "made-continued-1:report:" + String(continued) + ":0",
+    ]);
+    expect(posted[1]).toMatchObject({
+      to: parent,
+      from: child,
+      content: "Continued",
+      reply: { commandId: continued, outcome: "completed" },
+    });
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});
+
+it.each(["failed", "cancelled"] as const)(
+  "a made-by Agent's own turn that ends %s reports it to its maker, never the person",
+  async (outcome) => {
+    const fixture = createNativeSqliteOwnerFixture();
+    const faux = fauxModel([]);
+    faux.setResponses([
+      fauxAssistantMessage("Working"),
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: "provider_error: overloaded",
+      }),
+    ]);
+    const posted: BirdDogMail[] = [];
+    const { room } = mailRoom(posted);
+    const runtime = manualRuntime();
+    const core = await Effect.runPromise(
+      openRuntimeCore(
+        {
+          ...madeByOptions(fixture.owner, runtime.runtime, faux),
+          extensions: noExtensions,
+        },
+        room,
+      ),
+    );
+    try {
+      await Effect.runPromise(
+        core.acceptMail(addressedMail("made-own-1", "Start")),
+      );
+      await runtime.reconcile();
+      await runtime.reconcile();
+      // A turn no Agent mail sent, such as a person's own message.
+      const own = await Effect.runPromise(
+        core.agent
+          .session(child.sessionId)
+          .send("Go on", { requestId: "own-turn" }),
+      );
+      if (outcome === "cancelled")
+        await Effect.runPromise(core.agent.session(child.sessionId).abort);
+      for (let tick = 0; tick < 4; tick += 1) await runtime.reconcile();
+      const reports = reportsOn(posted, "made-own-1");
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        key: "made-own-1:report:" + own.commandId + ":0",
+        to: parent,
+        reply: { commandId: own.commandId, outcome },
+      });
+      const [row] = (await Effect.runPromise(core.agent.listSessions()))
+        .sessions;
+      expect(row).toMatchObject({ sessionId: child.sessionId });
+      expect(row?.state).not.toBe("needs_you");
+    } finally {
+      await Effect.runPromise(core.agent.close);
+      fixture.close();
+    }
+  },
+);
+
+it("a made-by Agent's own turn interrupted by a restart reports it to its maker", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "shiitake-made-by-"));
+  const databasePath = join(directory, "agent.sqlite");
+  let fixture = createNativeSqliteOwnerFixture(databasePath);
+  const faux = fauxModel([]);
+  faux.setResponses([fauxAssistantMessage("Working")]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  let core: Effect.Success<ReturnType<typeof openRuntimeCore>> | undefined;
+  try {
+    const firstRuntime = manualRuntime();
+    const options = (runtime: ShiitakeEffectOptions["runtime"]) => ({
+      ...madeByOptions(fixture.owner, runtime, faux),
+      extensions: noExtensions,
+    });
+    core = await Effect.runPromise(
+      openRuntimeCore(options(firstRuntime.runtime), room),
+    );
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("made-interrupted-1", "Start")),
+    );
+    await firstRuntime.reconcile();
+    await firstRuntime.reconcile();
+    const own = await Effect.runPromise(
+      core.agent
+        .session(child.sessionId)
+        .send("Inspect the process", { requestId: "own-interrupted" }),
+    );
+    const workId = requireAcceptedWorkId(
+      fixture.owner,
+      child.sessionId,
+      own.commandId,
+    );
+    // The service died mid-turn and its restart budget is spent.
+    fixture.owner.sql.exec(
+      "UPDATE watchdog_jobs SET state = 'running', claim_token = ?, recovery_count = 2 WHERE job_id = ?",
+      "disappeared-claim",
+      workId,
+    );
+    await Effect.runPromise(core.agent.close);
+    core = undefined;
+    fixture.close();
+    fixture = createNativeSqliteOwnerFixture(databasePath);
+    const secondRuntime = manualRuntime();
+    core = await Effect.runPromise(
+      openRuntimeCore(options(secondRuntime.runtime), room),
+    );
+    for (let tick = 0; tick < 4; tick += 1) await secondRuntime.reconcile();
+    const reports = reportsOn(posted, "made-interrupted-1");
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      to: parent,
+      reply: { commandId: own.commandId, outcome: "interrupted" },
+    });
+  } finally {
+    await Effect.runPromise(core?.agent.close ?? Effect.void);
+    fixture.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+it("an Agent a person made still reports nothing for its own turns", async () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const faux = fauxModel([]);
+  faux.setResponses([
+    fauxAssistantMessage("Working"),
+    fauxAssistantMessage("Own work"),
+  ]);
+  const posted: BirdDogMail[] = [];
+  const { room } = mailRoom(posted);
+  const runtime = manualRuntime();
+  const core = await Effect.runPromise(
+    openRuntimeCore(runtimeOptions(fixture.owner, runtime.runtime, faux), room),
+  );
+  try {
+    await Effect.runPromise(
+      core.acceptMail(addressedMail("peer-own-1", "Start")),
+    );
+    await runtime.reconcile();
+    await runtime.reconcile();
+    await Effect.runPromise(
+      core.agent
+        .session(child.sessionId)
+        .send("Go on", { requestId: "peer-own-turn" }),
+    );
+    for (let tick = 0; tick < 4; tick += 1) await runtime.reconcile();
+    expect(posted.map(({ key }) => key)).toEqual(["peer-own-1:reply:0"]);
+  } finally {
+    await Effect.runPromise(core.agent.close);
+    fixture.close();
+  }
+});

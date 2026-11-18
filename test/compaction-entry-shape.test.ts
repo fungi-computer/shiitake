@@ -83,7 +83,7 @@ it("stores compaction model/data/head separately and derives context from model 
   }
 });
 
-it.each([0, 7])(
+it.each([0, 8])(
   "version-refuses obsolete or unknown store %s without rewriting its entries",
   (version) => {
     const fixture = createNativeSqliteOwnerFixture();

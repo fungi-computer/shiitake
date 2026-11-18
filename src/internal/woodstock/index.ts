@@ -59,6 +59,7 @@ import {
   prepareSessionStore,
   readSessionEntriesForWork,
   readSessionCommandAdmission,
+  repairDanglingToolCalls,
   settleSessionControls,
   takePendingSessionControls,
   readSessionEntryById,
@@ -501,6 +502,7 @@ export function readSession<A>(
   input: ReadOptions | undefined,
   projectExtensions: () => SessionExtensionSlots,
   complete: (snapshot: SessionSnapshot) => A,
+  createdBy?: string,
 ): Effect.Effect<A, ShiitakeError> {
   return storeEffect(() => {
     const id = decodeClientSessionId(sessionId);
@@ -510,7 +512,14 @@ export function readSession<A>(
       id,
       () =>
         complete(
-          readClientSnapshot(owner, id, options, activity(), projectExtensions),
+          readClientSnapshot(
+            owner,
+            id,
+            options,
+            activity(),
+            projectExtensions,
+            createdBy,
+          ),
         ),
       options.before === undefined
         ? undefined
@@ -725,17 +734,16 @@ function appendRecordedEntry(
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
   entry: StoredSessionEntry,
   findExisting: (row: StoredSessionRow) => boolean,
-  beforeAppend?: () => void,
+  /** Returns true when it appended durable history of its own. */
+  beforeAppend?: () => boolean,
 ): void {
-  const delivery = owner.transactionSync(() =>
-    appendRecordedEntryOwned(
-      owner,
-      accepted,
-      entry,
-      findExisting,
-      beforeAppend,
-    ),
-  );
+  const { delivery, appended } = owner.transactionSync(() => {
+    const appended = beforeAppend?.() ?? false;
+    return {
+      delivery: appendRecordedEntryOwned(owner, accepted, entry, findExisting),
+      appended,
+    };
+  });
   if (delivery === "new")
     publishOwnerObservation(
       owner,
@@ -744,6 +752,7 @@ function appendRecordedEntry(
         ? "settlement"
         : "durable",
     );
+  else if (appended) publishOwnerObservation(owner, accepted.sessionId);
 }
 
 /** Persist an operator-only sandbox diagnostic beside its accepted Session work. */
@@ -880,6 +889,10 @@ export function recordWorkSettlement(
           input.sessionId,
           input.workId,
         );
+        return (
+          input.outcome !== "completed" &&
+          repairDanglingToolCalls(owner, input.sessionId, input.workId) > 0
+        );
       },
     );
   });
@@ -917,19 +930,33 @@ function recordLifecycle(
             };
     if (entry.kind === "run_terminal" && diagnostic !== undefined)
       entry = { ...entry, diagnostic };
-    appendRecordedEntry(owner, accepted, entry, ({ entry: current }) => {
-      if (current.kind !== entry.kind) return false;
-      if (current.kind === "run_started" && entry.kind === "run_started")
-        return (
-          sameIdentity(current.run, entry.run) &&
-          sameContract(current.contract, contract)
-        );
-      if (current.kind === "turn_started" && entry.kind === "turn_started")
-        return sameIdentity(current.turn, entry.turn);
-      if (current.kind === "run_terminal" && entry.kind === "run_terminal")
-        return sameIdentity(current.terminal, entry.terminal);
-      return false;
-    });
+    appendRecordedEntry(
+      owner,
+      accepted,
+      entry,
+      ({ entry: current }) => {
+        if (current.kind !== entry.kind) return false;
+        if (current.kind === "run_started" && entry.kind === "run_started")
+          return (
+            sameIdentity(current.run, entry.run) &&
+            sameContract(current.contract, contract)
+          );
+        if (current.kind === "turn_started" && entry.kind === "turn_started")
+          return sameIdentity(current.turn, entry.turn);
+        if (current.kind === "run_terminal" && entry.kind === "run_terminal")
+          return sameIdentity(current.terminal, entry.terminal);
+        return false;
+      },
+      // A run that ended mid-tool answers its calls before its terminal.
+      event.type === "run_end" && event.outcome !== "completed"
+        ? () =>
+            repairDanglingToolCalls(
+              owner,
+              accepted.sessionId,
+              accepted.commandId,
+            ) > 0
+        : undefined,
+    );
   });
 }
 

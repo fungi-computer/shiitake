@@ -338,6 +338,8 @@ function liftOptions(
     Object.assign(base, { admission: options.admission });
   if (options.compaction !== undefined)
     Object.assign(base, { compaction: options.compaction });
+  if (options.createdBy !== undefined)
+    Object.assign(base, { createdBy: options.createdBy });
   const toolSource = options.tools;
   if (toolSource === undefined) return base;
   return { ...base, tools: liftTools(toolSource) };

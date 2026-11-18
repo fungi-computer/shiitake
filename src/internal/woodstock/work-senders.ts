@@ -25,14 +25,23 @@ const decodeRow = Schema.decodeUnknownSync(
   }),
 );
 const decodeRecipient = Schema.decodeUnknownSync(AttentionRecipientSchema);
+const decodeWorkRow = Schema.decodeUnknownSync(
+  Schema.Struct({ work_id: Schema.String }),
+);
 
-/** The first delegating Agent Session; later senders never move this relationship. */
+/**
+ * The Session's parent: the Agent Session whose mail first delegated it, else
+ * the Agent that made this one. Later senders never move this relationship.
+ */
 export function readSessionParent(
   owner: SqliteOwner,
   sessionId: string,
+  /** The `createdBy` on this Agent's own record, as its host names it. */
+  createdBy?: string,
 ): AttentionRecipient | undefined {
   const parent = readSessionDelegator(owner, sessionId)?.replyTo[0];
-  if (parent === undefined) return undefined;
+  if (parent === undefined)
+    return readSessionMaker(owner, sessionId, createdBy);
   const raw = owner.sql
     .exec(
       "SELECT agent_id, sender_session_id, name FROM session_work_senders WHERE session_id = ? AND agent_id = ? AND sender_session_id = ? LIMIT 1",
@@ -46,6 +55,52 @@ export function readSessionParent(
     sessionId: parent.sessionId,
     name: raw === undefined ? parent.agentId : decodeRow(raw).name,
   });
+}
+
+/**
+ * The Agent that made this one, at its Session that last sent this Session
+ * work, else at its Session that last sent this Agent any work. Its host
+ * delivers to that Agent's newest Session once the named one is gone. A maker
+ * that never sent this Agent work names no Session, so nothing waits on it.
+ */
+export function readSessionMaker(
+  owner: SqliteOwner,
+  sessionId: string,
+  createdBy: string | undefined,
+): AttentionRecipient | undefined {
+  if (createdBy === undefined) return undefined;
+  const raw = owner.sql
+    .exec(
+      "SELECT agent_id, sender_session_id, name FROM session_work_senders WHERE agent_id = ? ORDER BY session_id = ? DESC, rowid DESC LIMIT 1",
+      createdBy,
+      sessionId,
+    )
+    .toArray()[0];
+  if (raw === undefined) return undefined;
+  const row = decodeRow(raw);
+  return decodeRecipient({
+    agentId: row.agent_id,
+    sessionId: row.sender_session_id,
+    name: row.name,
+  });
+}
+
+/** This Session's works one Agent sent or continued, newest first, bounded. */
+export function readWorksSentBy(
+  owner: SqliteOwner,
+  sessionId: string,
+  agentId: string,
+  limit: number,
+): readonly string[] {
+  return owner.sql
+    .exec(
+      "SELECT work_id FROM session_work_senders WHERE session_id = ? AND agent_id = ? ORDER BY rowid DESC LIMIT ?",
+      sessionId,
+      agentId,
+      limit,
+    )
+    .toArray()
+    .map((row) => decodeWorkRow(row).work_id);
 }
 
 /**
@@ -122,6 +177,7 @@ export function readWaitingOnSender(
 /**
  * The Session's open attention that waits on any of these Agent Sessions,
  * newest first as stored, bounded: what a reply or report to them names.
+ * Custody is the Agent's, so any of its Sessions is named for its items.
  */
 export function readWaitingOn(
   owner: SqliteOwner,
@@ -131,9 +187,7 @@ export function readWaitingOn(
   return readSessionAttention(owner, sessionId)
     .filter((item) =>
       recipients.some(
-        (recipient) =>
-          item.waitingOn?.agentId === recipient.agentId &&
-          item.waitingOn.sessionId === recipient.sessionId,
+        (recipient) => item.waitingOn?.agentId === recipient.agentId,
       ),
     )
     .slice(0, maximumWaitingOnYou)

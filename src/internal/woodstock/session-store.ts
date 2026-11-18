@@ -1519,11 +1519,11 @@ export function deleteStoredSession(
 
 /**
  * The current marker covers Woodstock's application data and lifecycle tables.
- * A store marked 1 to 5 is upgraded in place by `store-migration.ts`, in the
+ * A store marked 1 to 6 is upgraded in place by `store-migration.ts`, in the
  * transaction that opens it; a store outside that range, or one this build
  * cannot read at all, needs explicit host custody and is never rewritten.
  */
-const currentWoodstockSchemaVersion = 6;
+const currentWoodstockSchemaVersion = 7;
 const oldestUpgradableWoodstockSchemaVersion = 1;
 const currentWoodstockProtocol = "shiitake.extension/v0";
 
@@ -3747,6 +3747,113 @@ function claimStreamingPlaceholders(
   return kept?.entry.kind === "message_start" && kept.entry.partial
     ? { messageId: kept.id, ...kept.entry.partial }
     : undefined;
+}
+
+/** Retained wording for a call its run never answered. */
+function interruptedToolText(call: Readonly<{ id: string; name: string }>) {
+  return `[interrupted] Tool "${call.name}" (id: ${call.id}) was still executing when the run was terminated.`;
+}
+
+/**
+ * The most tail rows the dangling-call scan visits. A work's last assistant
+ * turn and its answered results sit well inside this.
+ */
+const danglingTailLimit = 200;
+
+/**
+ * Persist one interrupted error result for every call of `workId`'s last
+ * assistant turn that has none, so the stored transcript is truthful and the
+ * next context needs no request-time repair. The scan walks back from the
+ * selected leaf, stops at the newest compaction and after
+ * `danglingTailLimit` rows; it never loads the whole Session. Returns the
+ * number of results appended: zero when the tail is already answered, so a
+ * second terminal or resume adds nothing. An error or aborted assistant turn
+ * is left alone: providers omit it, and a failed retry may still resume it.
+ * Callers hold the transaction that records the work's terminal.
+ */
+export function repairDanglingToolCalls(
+  owner: SqliteOwner,
+  sessionId: string,
+  workId: string,
+): number {
+  const rows = owner.sql
+    .exec(
+      `WITH RECURSIVE tail (id, parent_id, sequence, type, depth) AS (
+         SELECT entry.id, entry.parent_id, entry.sequence, entry.type, 1
+           FROM sessions
+           JOIN session_entries AS entry
+             ON entry.session_id = sessions.id AND entry.id = sessions.leaf_id
+          WHERE sessions.id = ?
+         UNION ALL
+         SELECT parent.id, parent.parent_id, parent.sequence, parent.type,
+                child.depth + 1
+           FROM tail AS child
+           CROSS JOIN session_entries AS parent
+          WHERE parent.id = child.parent_id AND parent.session_id = ?
+            AND +parent.sequence < child.sequence
+            AND child.type != 'compaction'
+            AND child.depth < ?
+       )
+       SELECT ${entryColumns}
+         FROM session_entries
+        WHERE session_id = ? AND work_id = ? AND type = 'message'
+          AND state = 'complete'
+          AND id IN (SELECT id FROM tail)
+        ORDER BY sequence DESC`,
+      sessionId,
+      sessionId,
+      danglingTailLimit,
+      sessionId,
+      workId,
+    )
+    .toArray()
+    .map((raw) => parseEntryRow(owner, raw));
+  const assistantIndex = rows.findIndex(
+    ({ entry }) => entry.kind === "message" && entry.value.role === "assistant",
+  );
+  const assistant = rows[assistantIndex]?.entry;
+  if (
+    assistant?.kind !== "message" ||
+    assistant.value.role !== "assistant" ||
+    assistant.value.stopReason === "error" ||
+    assistant.value.stopReason === "aborted"
+  )
+    return 0;
+  const answered = new Set(
+    rows
+      .slice(0, assistantIndex)
+      .flatMap(({ entry }) =>
+        entry.kind === "message" && entry.value.role === "toolResult"
+          ? [entry.value.toolCallId]
+          : [],
+      ),
+  );
+  const dangling = assistant.value.content.flatMap((part) =>
+    part.type === "toolCall" && !answered.has(part.id) ? [part] : [],
+  );
+  for (const call of dangling) {
+    const id = sessionIds.fact.generate();
+    appendSessionEntry(owner, {
+      sessionId,
+      id,
+      entry: {
+        kind: "message",
+        workId,
+        run: assistant.run,
+        turn: assistant.turn,
+        message: { kind: "tool_result", value: id, parent: assistant.message },
+        value: {
+          role: "toolResult",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: [{ type: "text", text: interruptedToolText(call) }],
+          isError: true,
+          timestamp: Date.now(),
+        },
+      },
+    });
+  }
+  return dangling.length;
 }
 
 /** Flush the live reply's bounded tail into its private placeholder row. */

@@ -278,7 +278,7 @@ describe.each(markers)(
 
       expect(upgradeWoodstockStore(owner)).toBe("upgraded");
 
-      expect(marker(owner)).toBe(6);
+      expect(marker(owner)).toBe(7);
       expect(readWoodstockStoreProtocol(owner)).toBe("v0");
       const after = readStore(owner);
       expect(after.identity).toEqual(before.identity);
@@ -319,7 +319,7 @@ describe.each(markers)(
           ]),
         );
       expect(definitions(upgraded.owner)).toEqual(definitions(fresh.owner));
-      expect(marker(upgraded.owner)).toBe(6);
+      expect(marker(upgraded.owner)).toBe(7);
     });
 
     it("lists its Sessions through the current reader once opened", async () => {
@@ -391,7 +391,7 @@ describe("an upgrade that cannot complete", () => {
     }).toEqual(before);
   });
 
-  it.each([0, 7])(
+  it.each([0, 8])(
     "refuses a store marked %s, untouched: no build wrote it",
     (version) => {
       // A real marker-3 store re-marked: no published or development build wrote these.
@@ -399,7 +399,7 @@ describe("an upgrade that cannot complete", () => {
       owner.sql.exec("UPDATE woodstock_schema SET version = ?", version);
       const before = readStore(owner);
       expect(readWoodstockStoreProtocol(owner)).toBe(
-        version === 7 ? "newer" : "unmarked",
+        version === 8 ? "newer" : "unmarked",
       );
       expect(upgradeWoodstockStore(owner)).toBe("unchanged");
       expect(
@@ -485,6 +485,51 @@ describe.each(markers)(
     });
   },
 );
+
+/**
+ * The Session-keyed roster exactly as marker-6 Oyster, Hub and Local hosts
+ * created and wrote it (`roster/conversation-agents.ts` before marker 7), with
+ * the delegated-command ledger beside it.
+ */
+const conversationRoster = [
+  "CREATE TABLE oyster_conversation_agents (parent_session_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT, at INTEGER NOT NULL, PRIMARY KEY (parent_session_id, agent_id)) STRICT",
+  "CREATE INDEX idx_oyster_conversation_agents_parent ON oyster_conversation_agents(parent_session_id, at)",
+  "INSERT INTO oyster_conversation_agents (parent_session_id, agent_id, session_id, at) VALUES ('session_parent_one', 'local_store_childchildchildchild1', NULL, 1794900000000), ('session_parent_one', 'local_store_peerpeerpeerpeerpeer1', 'session_peer_work', 1794900000100), ('session_parent_two', 'local_store_childchildchildchild1', 'session_child_main', 1794900000200)",
+  "CREATE TABLE oyster_delegated_commands (parent_session_id TEXT NOT NULL, agent_id TEXT NOT NULL, session_id TEXT NOT NULL, command_id TEXT NOT NULL PRIMARY KEY, at INTEGER NOT NULL) STRICT",
+  "INSERT INTO oyster_delegated_commands (parent_session_id, agent_id, session_id, command_id, at) VALUES ('session_parent_two', 'local_store_childchildchildchild1', 'session_child_main', 'session_fact_childwork000000001', 1794900000200)",
+] as const;
+
+describe("a real marker 6 store with the conversation roster", () => {
+  it("is upgradable, and the upgrade drops only the roster and its index", () => {
+    const { owner } = copyOf(6);
+    expect(marker(owner)).toBe(6);
+    expect(readWoodstockStoreProtocol(owner)).toBe("upgradable");
+    for (const statement of conversationRoster) owner.sql.exec(statement);
+    const before = readStore(owner);
+    const ledger = rowsOf(owner, "SELECT * FROM oyster_delegated_commands");
+    const kept = untouchedTables(owner);
+    kept.delete("oyster_conversation_agents");
+
+    expect(upgradeWoodstockStore(owner)).toBe("upgraded");
+
+    expect(marker(owner)).toBe(7);
+    expect(
+      rowsOf(
+        owner,
+        "SELECT name FROM sqlite_schema WHERE name LIKE '%oyster_conversation_agents%'",
+      ),
+    ).toEqual([]);
+    // Delegated command settlement stays keyed by command id.
+    expect(rowsOf(owner, "SELECT * FROM oyster_delegated_commands")).toEqual(
+      ledger,
+    );
+    expect(readStore(owner)).toEqual(before);
+    const after = untouchedTables(owner);
+    for (const [name, rows] of kept) expect(after.get(name)).toEqual(rows);
+    // A second open finds nothing left to do.
+    expect(upgradeWoodstockStore(owner)).toBe("unchanged");
+  });
+});
 
 describe("an extension stopped before the upgrade", () => {
   it("keeps its timer registered but cancels the wake, as stopping it does", () => {

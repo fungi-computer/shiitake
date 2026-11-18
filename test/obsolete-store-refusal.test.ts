@@ -180,7 +180,7 @@ it("upgrades Woodstock v5 with pre-scheduler Watchdog jobs in place, and still r
     expect(
       agent.owner.sql.exec("SELECT version FROM woodstock_schema").one()
         .version,
-    ).toBe(6);
+    ).toBe(7);
     expect(
       agent.owner.sql
         .exec(

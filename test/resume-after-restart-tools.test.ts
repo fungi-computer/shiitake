@@ -10,6 +10,89 @@ import { readFile } from "node:fs/promises";
 import { readSessionEntriesForWork } from "../src/internal/woodstock/index.js";
 import { createNativeSqliteOwnerFixture } from "./fixtures/native-sqlite-owner.fixture.js";
 
+type Snapshot = Awaited<ReturnType<typeof finished>>;
+
+/** Every stored result for the interrupted call, in transcript order. */
+function sendResults(snapshot: Snapshot) {
+  return snapshot.messages.flatMap(({ value }) =>
+    value.role === "toolResult" && value.toolCallId === "send-call"
+      ? [value]
+      : [],
+  );
+}
+
+const retainedInterrupted = [
+  {
+    type: "text",
+    text: '[interrupted] Tool "execute" (id: send-call) was still executing when the run was terminated.',
+  },
+];
+
+it(
+  "persists one interrupted result when a run is cancelled mid-tool",
+  () =>
+    withDatabase(async (path) => {
+      // The next prompt's model request rejects an unanswered or twice-answered call.
+      const snapshot = await finished(path, "cancel-mid-tool");
+      expectOutcome(snapshot, "cancelled");
+      expectOutcome(snapshot, "completed");
+      const results = sendResults(snapshot);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        isError: true,
+        toolName: "execute",
+        content: retainedInterrupted,
+      });
+      // The result is the call's answer, before the next prompt.
+      const roles = snapshot.messages.map(({ value }) => value.role);
+      expect(roles).toEqual([
+        "user",
+        "assistant",
+        "toolResult",
+        "user",
+        "assistant",
+      ]);
+      const again = await finished(path, "finish-answered");
+      expect(sendResults(again)).toEqual(results);
+    }),
+  45_000,
+);
+
+it(
+  "persists one interrupted result when a killed tool's run is cancelled, and adds none on the next resume",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-tool", "tool-started");
+      const cancelled = await finished(path, "cancel");
+      expectOutcome(cancelled, "cancelled");
+      const results = sendResults(cancelled);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        isError: true,
+        content: retainedInterrupted,
+      });
+      expect(sendResults(await finished(path))).toEqual(results);
+      expect(sendResults(await finished(path))).toEqual(results);
+    }),
+  60_000,
+);
+
+it(
+  "keeps the restart result as the only answer on a second resume",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-tool", "tool-started");
+      const resumed = await finished(path);
+      const results = sendResults(resumed);
+      expect(results).toHaveLength(1);
+      // The next prompt's request carries exactly that one answer.
+      const next = await finished(path, "finish-answered");
+      expectOutcome(next, "completed");
+      expect(sendResults(next)).toEqual(results);
+    }),
+  45_000,
+);
+
 it(
   "does not repeat an unsafe tool and continues with an interrupted result",
   () =>

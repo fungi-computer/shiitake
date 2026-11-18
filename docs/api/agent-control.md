@@ -307,6 +307,7 @@ Host-only identity and admitted command metadata for one delegated send.
 
 ```ts
 type AgentControlDirectory = Readonly<{
+  callerAgentId?: () => string;
   list: (signal, options?) => Promise<readonly AgentControlAgent[]>;
   send?: (
     input,
@@ -314,7 +315,6 @@ type AgentControlDirectory = Readonly<{
     signal,
     invocation?,
   ) => Promise<Accepted | Held>;
-  sentSessions?: (sourceSessionId, agentId) => readonly string[];
   recall?: (input, sourceSessionId, signal) => Promise<CancelResult>;
   answer?: (
     input,
