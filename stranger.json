@@ -213,7 +213,7 @@
   "docs": {
     "sigil": "agent",
     "home": {
-      "lead": "The Agent behind Fungi. Run it in your terminal with your own Claude or ChatGPT subscription, or host its durable Sessions in your own TypeScript app.",
+      "lead": "The Agent behind Fungi. Run it in your terminal with your own ChatGPT subscription, or host its durable Sessions in your own TypeScript app.",
       "example": {
         "file": "home.ts",
         "title": "Run your first Session",
@@ -224,7 +224,7 @@
           {
             "title": "Run it in your terminal",
             "href": "/use-the-cli/",
-            "description": "npm i -g @fungi.computer/spore, then run fungi in your project with your Claude or ChatGPT subscription."
+            "description": "npm i -g @fungi.computer/spore, then run fungi in your project with your ChatGPT subscription."
           },
           {
             "title": "Embed it in your app",
@@ -292,7 +292,7 @@
         },
         {
           "title": "Start in your project",
-          "body": "Run this in your project folder. Choose your Claude or ChatGPT subscription, finish browser sign-in, then send your first prompt. A Fungi account is optional.",
+          "body": "Run this in your project folder. Choose your ChatGPT subscription, finish browser sign-in, then send your first prompt. A Fungi account is optional.",
           "code": {
             "code": "fungi",
             "lang": "sh"
