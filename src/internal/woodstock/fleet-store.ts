@@ -95,7 +95,7 @@ export function createFleetDirectoryStore(sql: WatchdogSqliteOwner["sql"]) {
     list: () =>
       input.sql
         .exec(
-          "SELECT agent_id, name, actor_user_id, created_by, created_at, updated_at FROM hub_team_agents ORDER BY created_at DESC, agent_id DESC",
+          "SELECT agent_id, name, actor_user_id, created_by, created_at, updated_at FROM hub_team_agents ORDER BY created_at, agent_id",
         )
         .toArray(),
     rename(agentId: string, name: string, now: number) {

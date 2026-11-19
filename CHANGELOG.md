@@ -1,5 +1,16 @@
 # @fungi.computer/shiitake
 
+## 0.21.6
+
+### Patch Changes
+
+- Changes since 0.21.5:
+
+  - fix(agents): list agents oldest first on oyster and the hub
+
+- Updated dependencies
+  - @fungi.computer/veil@0.10.2
+
 ## 0.21.5
 
 ### Patch Changes

@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { z } from "zod";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import {
@@ -232,6 +232,41 @@ it("reads accepted delegated work locally until a remote settlement is durably o
       }).outstanding(),
     ).resolves.toBeUndefined();
   } finally {
+    fixture.close();
+  }
+});
+
+it("lists Agents oldest first, with the id as the tiebreak for one creation instant", () => {
+  const fixture = createNativeSqliteOwnerFixture();
+  const grant: AgentGrant = {
+    agents: "all",
+    actions: ["create", "read"],
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    provenance: { actor: "member-ada" },
+  };
+  const now = vi.spyOn(Date, "now");
+  try {
+    const directory = createAgentDirectory(fixture.owner.sql);
+    const create = (name: string, at: number) => {
+      now.mockReturnValue(at);
+      return directory.create(grant, {
+        requestId: name,
+        name,
+        configuration: "none",
+      }).agent;
+    };
+    const oldest = create("Oldest", 1000);
+    const tied = ["Tie a", "Tie b", "Tie c", "Tie d", "Tie e"].map((name) =>
+      create(name, 2000),
+    );
+    const newest = create("Newest", 3000);
+    expect(directory.list(grant).map(({ agentId }) => agentId)).toEqual([
+      oldest.agentId,
+      ...tied.map(({ agentId }) => agentId).sort(),
+      newest.agentId,
+    ]);
+  } finally {
+    now.mockRestore();
     fixture.close();
   }
 });
