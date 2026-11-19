@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.21.7
+
+### Patch Changes
+
+- Changes since 0.21.6:
+
+  - fix(shiitake): close an Agent while a host job is running
+
 ## 0.21.6
 
 ### Patch Changes

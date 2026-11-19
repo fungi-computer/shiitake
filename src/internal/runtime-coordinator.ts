@@ -209,7 +209,14 @@ export function openRuntimeCoordinator(
             if (job.lane === extensionTimerLane) return Effect.succeed(true);
             const custody = runCustody.get(job.jobId);
             runCustody.delete(job.jobId);
-            if (custody?.released !== true) return Effect.succeed(false);
+            // Only a Session run registers custody, as its executor starts and
+            // before it acquires anything foreign. A job with none (a host job,
+            // or a Session run interrupted before its executor started) owns
+            // nothing the interruption could have left behind: its execution
+            // has ended. A started run has custody, released until a foreign
+            // acquisition or release fails to drain.
+            if (custody === undefined) return Effect.succeed(true);
+            if (!custody.released) return Effect.succeed(false);
             // A foreign load the interruption left pending proves a drain only
             // once it settles, within the same grace a finalizer gets.
             return custody.pending.length === 0
@@ -690,8 +697,15 @@ export function openRuntimeCoordinator(
               [
                 Effect.exit(
                   watchdog.close.pipe(
-                    Effect.mapError(() =>
-                      runtimeFailure("Runtime execution did not drain"),
+                    Effect.mapError(
+                      (cause) =>
+                        new ShiitakeError(
+                          "runtime",
+                          "rejected",
+                          "Runtime execution did not drain",
+                          undefined,
+                          cause,
+                        ),
                     ),
                   ),
                 ),
