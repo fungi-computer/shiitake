@@ -1,5 +1,16 @@
 # @fungi.computer/shiitake
 
+## 0.21.9
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.23.1
+  - @fungi.computer/knapsack@0.4.21
+  - @fungi.computer/veil@0.11.1
+
 ## 0.21.8
 
 ### Patch Changes
