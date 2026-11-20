@@ -1,5 +1,12 @@
 # @fungi.computer/shiitake
 
+## 0.21.12
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/veil@0.11.3
+
 ## 0.21.11
 
 ### Patch Changes
