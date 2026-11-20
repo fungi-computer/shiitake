@@ -1,5 +1,16 @@
 # @fungi.computer/shiitake
 
+## 0.21.15
+
+### Patch Changes
+
+- Changes since 0.21.14:
+
+  - fix(veil): hold back only text that could begin a stored value
+
+- Updated dependencies
+  - @fungi.computer/veil@0.11.5
+
 ## 0.21.14
 
 ### Patch Changes

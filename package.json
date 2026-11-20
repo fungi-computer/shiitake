@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/shiitake",
-  "version": "0.21.14",
+  "version": "0.21.15",
   "author": "Levi <levi@technomancy.dev>",
   "description": "Shiitake by Fungi: open-source AI agents with durable conversations, tools and permissions checked by the system.",
   "type": "module",
@@ -110,7 +110,7 @@
     "@earendil-works/pi-ai": "1.5.2",
     "@fungi.computer/gills": "0.4.0",
     "@fungi.computer/agar": "0.25.0",
-    "@fungi.computer/veil": "0.11.4"
+    "@fungi.computer/veil": "0.11.5"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260828.1",

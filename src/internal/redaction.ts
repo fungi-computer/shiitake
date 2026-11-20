@@ -211,8 +211,8 @@ const muleFailure = (cause: unknown): MuleError => ({
 /**
  * Mule's tool-result door for this owner: each text part and the result's
  * application data. A terminal result is redacted whole. A live update
- * snapshot also holds back its last possible secret prefix, since the next
- * snapshot may complete it.
+ * snapshot also holds back a tail that begins a stored value, since the next
+ * snapshot may complete it; text no value can begin shows at once.
  */
 export function toolResultRedaction(
   owner: SqliteOwner,
