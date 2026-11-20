@@ -14,6 +14,8 @@ import { parseAccepted, parseSessionSnapshot } from "../dist/client.js";
 const { fetch, AbortSignal, Headers, DOMException } = globalThis;
 
 const root = fileURLToPath(new URL("../../..", import.meta.url));
+// A fresh checkout has no .botanical yet.
+await mkdir(resolve(root, ".botanical"), { recursive: true });
 const evidence = await mkdtemp(
   resolve(root, ".botanical/shiitake-durable-wake-restart-"),
 );
@@ -123,6 +125,42 @@ function fetchTarget(url, options) {
   return fetch(url, options);
 }
 
+/** The socket code under a failed fetch, when there is one. */
+function fetchCauseCode(cause) {
+  return cause instanceof TypeError &&
+    cause.cause instanceof Error &&
+    "code" in cause.cause
+    ? cause.cause.code
+    : undefined;
+}
+
+/**
+ * One readiness probe: the Worker's health body, or null while the listener
+ * is still coming up. Wrangler listens before its Worker is ready, so a
+ * refused or reset connection and a slow answer all mean "not yet". The
+ * timeout covers the body too, so the body is read inside the same guard.
+ */
+async function probeHealth(entry) {
+  try {
+    const response = await fetch(`${endpoint}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    return response.ok ? await response.json() : null;
+  } catch (cause) {
+    const code = fetchCauseCode(cause);
+    if (
+      code === "ECONNREFUSED" ||
+      code === "ECONNRESET" ||
+      code === "UND_ERR_SOCKET" ||
+      (cause instanceof DOMException && cause.name === "TimeoutError")
+    ) {
+      entry.lastReadinessFailure = code ?? cause.name;
+      return null;
+    }
+    throw cause;
+  }
+}
+
 async function start() {
   const environment = Object.fromEntries(
     ["PATH", "HOME", "USER", "TMPDIR", "LD_LIBRARY_PATH"]
@@ -167,29 +205,12 @@ async function start() {
   child.stderr.on("data", (data) => (entry.log += data));
   server = { child, entry, exited };
   receipt.processes.push(entry);
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     assert.equal(entry.exit, null, "Owned Wrangler exited before readiness");
-    const response = await fetch(`${endpoint}/health`, {
-      signal: AbortSignal.timeout(1000),
-    }).catch((cause) => {
-      if (
-        !(
-          cause instanceof TypeError &&
-          cause.cause instanceof Error &&
-          "code" in cause.cause &&
-          cause.cause.code === "ECONNREFUSED"
-        ) &&
-        !(cause instanceof DOMException && cause.name === "TimeoutError")
-      )
-        throw cause;
-      entry.lastReadinessFailure = cause.name;
-      return null;
-    });
-    if (response?.ok) {
-      assert.deepEqual(await response.json(), {
-        service: "shiitake-durable-wake-witness",
-      });
+    const health = await probeHealth(entry);
+    if (health !== null) {
+      assert.deepEqual(health, { service: "shiitake-durable-wake-witness" });
       return;
     }
     await delay(100);
@@ -212,12 +233,7 @@ async function stop(abrupt = false) {
     const response = await fetch(`${endpoint}/health`, {
       signal: AbortSignal.timeout(300),
     }).catch((cause) => {
-      const code =
-        cause instanceof TypeError &&
-        cause.cause instanceof Error &&
-        "code" in cause.cause
-          ? cause.cause.code
-          : undefined;
+      const code = fetchCauseCode(cause);
       if (code === "ECONNREFUSED") return null;
       // A pooled socket can reset during SIGKILL. Retry it; only a refused
       // fresh connection proves that the listener has closed.
@@ -239,6 +255,22 @@ async function stop(abrupt = false) {
   }
   assert.equal(entry.listenerClosed, true, "Owned Wrangler listener closed");
   server = undefined;
+}
+
+/** What failed, in words: its kind, message and the socket code under it. */
+function failure(error) {
+  if (!(error instanceof Error))
+    return { errorKind: "NonErrorThrown", message: String(error) };
+  return {
+    errorKind: error.name,
+    message: error.message,
+    cause: fetchCauseCode(error) ?? null,
+    at:
+      error.stack
+        ?.split("\n")
+        .slice(1, 4)
+        .map((line) => line.trim()) ?? [],
+  };
 }
 
 async function readObserver(owner) {
@@ -565,10 +597,7 @@ try {
 } catch (error) {
   observationEndedAt ??= Date.now();
   receipt.status = "failed";
-  receipt.failures.push({
-    stage: "durable-wake-proof",
-    errorKind: error instanceof Error ? error.name : "NonErrorThrown",
-  });
+  receipt.failures.push({ stage: "durable-wake-proof", ...failure(error) });
   receipt.witness = {
     accepted,
     entered,
@@ -591,10 +620,7 @@ try {
     await stop();
   } catch (error) {
     receipt.status = "failed";
-    receipt.failures.push({
-      stage: "durable-wake-cleanup",
-      errorKind: error instanceof Error ? error.name : "NonErrorThrown",
-    });
+    receipt.failures.push({ stage: "durable-wake-cleanup", ...failure(error) });
     process.exitCode = 1;
   }
   for (const [index, entry] of receipt.processes.entries()) {
