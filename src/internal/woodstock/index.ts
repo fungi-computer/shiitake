@@ -697,9 +697,7 @@ function appendRecordedEntryOwned(
   accepted: Pick<AcceptedCommand, "sessionId" | "commandId">,
   entry: PersistableSessionEntry,
   findExisting: (row: StoredSessionRow) => boolean,
-  beforeAppend?: () => void,
 ): "new" | "replay" {
-  beforeAppend?.();
   const existing = readSessionEntriesForWork(
     owner,
     accepted.sessionId,

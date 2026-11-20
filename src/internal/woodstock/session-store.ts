@@ -13,6 +13,7 @@ import type {
   Usage,
   MuleResume,
 } from "@fungi.computer/mule/effect";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type { WatchdogCancellationResult } from "@fungi.computer/watchdog/effect";
 
@@ -3767,6 +3768,24 @@ function interruptedToolText(call: Readonly<{ id: string; name: string }>) {
  */
 const danglingTailLimit = 200;
 
+/** The bounded walk back from the leaf; binds the Session twice and the limit. */
+const danglingTailQuery = `WITH RECURSIVE tail (id, parent_id, sequence, type, depth) AS (
+         SELECT entry.id, entry.parent_id, entry.sequence, entry.type, 1
+           FROM sessions
+           JOIN session_entries AS entry
+             ON entry.session_id = sessions.id AND entry.id = sessions.leaf_id
+          WHERE sessions.id = ?
+         UNION ALL
+         SELECT parent.id, parent.parent_id, parent.sequence, parent.type,
+                child.depth + 1
+           FROM tail AS child
+           CROSS JOIN session_entries AS parent
+          WHERE parent.id = child.parent_id AND parent.session_id = ?
+            AND +parent.sequence < child.sequence
+            AND child.type != 'compaction'
+            AND child.depth < ?
+       )`;
+
 /**
  * Persist one interrupted error result for every call of `workId`'s last
  * assistant turn that has none, so the stored transcript is truthful and the
@@ -3785,22 +3804,7 @@ export function repairDanglingToolCalls(
 ): number {
   const rows = owner.sql
     .exec(
-      `WITH RECURSIVE tail (id, parent_id, sequence, type, depth) AS (
-         SELECT entry.id, entry.parent_id, entry.sequence, entry.type, 1
-           FROM sessions
-           JOIN session_entries AS entry
-             ON entry.session_id = sessions.id AND entry.id = sessions.leaf_id
-          WHERE sessions.id = ?
-         UNION ALL
-         SELECT parent.id, parent.parent_id, parent.sequence, parent.type,
-                child.depth + 1
-           FROM tail AS child
-           CROSS JOIN session_entries AS parent
-          WHERE parent.id = child.parent_id AND parent.session_id = ?
-            AND +parent.sequence < child.sequence
-            AND child.type != 'compaction'
-            AND child.depth < ?
-       )
+      `${danglingTailQuery}
        SELECT ${entryColumns}
          FROM session_entries
         WHERE session_id = ? AND work_id = ? AND type = 'message'
@@ -3818,6 +3822,32 @@ export function repairDanglingToolCalls(
   const assistantIndex = rows.findIndex(
     ({ entry }) => entry.kind === "message" && entry.value.role === "assistant",
   );
+  if (assistantIndex < 0) {
+    // No assistant turn of this work in the visited tail. If the walk stopped
+    // at its limit, the turn may lie beyond it: say so rather than leave a
+    // call unanswered without a trace.
+    const visited = Number(
+      owner.sql
+        .exec(
+          `${danglingTailQuery} SELECT COUNT(*) AS rows FROM tail`,
+          sessionId,
+          sessionId,
+          danglingTailLimit,
+        )
+        .one().rows,
+    );
+    if (visited >= danglingTailLimit)
+      Effect.runSync(
+        Effect.logWarning("shiitake_dangling_tail_unfound").pipe(
+          Effect.annotateLogs({
+            session: sessionId,
+            work: workId,
+            limit: danglingTailLimit,
+          }),
+        ),
+      );
+    return 0;
+  }
   const assistant = rows[assistantIndex]?.entry;
   if (
     assistant?.kind !== "message" ||
