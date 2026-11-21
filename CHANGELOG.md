@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.22.6
+
+### Patch Changes
+
+- Changes since 0.22.5:
+
+  - fix(deployment): wait for the setup chat, fail a send with its cause
+
 ## 0.22.5
 
 ### Patch Changes

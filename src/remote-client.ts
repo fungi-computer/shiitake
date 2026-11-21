@@ -321,7 +321,14 @@ function parseResponse<A>(
       const response = await send(signal);
       return { response, body: await response.text() };
     },
-    catch: () => unavailable(`${description} request failed`),
+    catch: (cause) =>
+      new ShiitakeError(
+        "runtime",
+        "unavailable",
+        `${description} request failed: ${cause instanceof Error ? cause.message : "the connection was lost"}`,
+        undefined,
+        cause,
+      ),
   }).pipe(
     Effect.flatMap(({ response, body }) => {
       if (!response.ok)
