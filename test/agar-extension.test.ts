@@ -3,13 +3,13 @@ import {
   defineExtension,
   ExtensionId,
 } from "@fungi.computer/shiitake/extensions";
-import { agentExtensionMethodNames } from "@fungi.computer/shiitake/hosted";
 import { expect, test } from "vitest";
 import * as z from "zod";
 
 import { agentExtensionMethods } from "../src/agar-extension.js";
 import { buildAppApi } from "@fungi.computer/agar/backend-declaration";
 import {
+  agentExtensionMethodNames,
   defineAppBackend,
   defineAppMethod,
 } from "@fungi.computer/agar/backend-definition";

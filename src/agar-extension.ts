@@ -1,6 +1,5 @@
 import type { RosteredExtensionV0 } from "./extensions.js";
 import {
-  agentExtensionMethodNames,
   hostAgentExtension,
   hostedCallInputSchema,
   hostedCallOutputSchema,
@@ -10,6 +9,7 @@ import {
   hostedToolsOutputSchema,
 } from "./hosted.js";
 import {
+  agentExtensionMethodNames,
   defineAppMethod,
   type AppBackendMethod,
 } from "@fungi.computer/agar/backend-definition";

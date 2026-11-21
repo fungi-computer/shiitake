@@ -104,21 +104,91 @@ type HostedAgentExtension = Readonly<{
 The guest side of one hosted extension. Inputs are already parsed by the App
 method door with the schemas above; outputs are bounded here.
 
-## Variables
+---
 
-### agentExtensionMethodNames
+### HostedAppAttachment
 
 ```ts
-const agentExtensionMethodNames: Readonly<{
-  prompt: "agentExtensionPrompt";
-  tools: "agentExtensionTools";
-  call: "agentExtensionCall";
+type HostedAppAttachment = Readonly<{
+  bindingName: string;
+  installationId: string;
+  level: "read" | "write";
+  cacheKey: string;
 }>;
 ```
 
-App method names a hosted extension's backend serves.
+One hosted extension a host attached to this Agent, as the host decided it.
 
 ---
+
+### HostedAppCallResult
+
+```ts
+type HostedAppCallResult =
+  | Readonly<{
+      kind: "ok";
+      value: unknown;
+    }>
+  | Readonly<{
+      kind: "refused";
+      reason: string;
+    }>;
+```
+
+One guest call's answer from the host's App door; the composer parses `value`.
+
+---
+
+### HostedAppReport
+
+```ts
+type HostedAppReport<Attachment> =
+  | Readonly<{
+      kind: "prompt_failed";
+      cause: unknown;
+    }>
+  | Readonly<{
+      kind: "tools_failed";
+      attachment: Attachment;
+      cause: unknown;
+    }>
+  | Readonly<{
+      kind: "tools_skipped";
+      attachment: Attachment;
+      outcome: string;
+    }>;
+```
+
+A guest failure the host records; none of them fails the run.
+
+#### Type Parameters
+
+| Type Parameter                                                       |
+| -------------------------------------------------------------------- |
+| `Attachment` _extends_ [`HostedAppAttachment`](#hostedappattachment) |
+
+---
+
+### HostedAppExtensionsPorts
+
+```ts
+type HostedAppExtensionsPorts<Attachment> = Readonly<{
+  attachments: (sessionId) => Promise<readonly Attachment[] | null>;
+  call: (attachment, method, input, deadlineAt) => Promise<HostedAppCallResult>;
+  report: (report) => void;
+  guestBudgetMs: number;
+}>;
+```
+
+The host's side of [hostedAppExtensions](#hostedappextensions).
+
+#### Type Parameters
+
+| Type Parameter                                                       |
+| -------------------------------------------------------------------- |
+| `Attachment` _extends_ [`HostedAppAttachment`](#hostedappattachment) |
+
+## Variables
 
 ### hostedExtensionCapabilities
 
@@ -359,6 +429,27 @@ const hostedCallOutputSchema: ZodObject<
 
 `agentExtensionCall` output: the operation's JSON result.
 
+---
+
+### hostedAgentExtensionsId
+
+```ts
+const hostedAgentExtensionsId: string & Brand<"ExtensionId">;
+```
+
+The one roster member that brings attached hosted extensions to a run.
+
+---
+
+### hostedAgentExtensionsGrant
+
+```ts
+const hostedAgentExtensionsGrant: ExtensionGrantV0;
+```
+
+The host grant for [hostedAppExtensions](#hostedappextensions); a host may add a
+grant key.
+
 ## Functions
 
 ### hostAgentExtension()
@@ -380,3 +471,35 @@ fails instead of silently dropping it.
 #### Returns
 
 [`HostedAgentExtension`](#hostedagentextension)
+
+---
+
+### hostedAppExtensions()
+
+```ts
+function hostedAppExtensions<Attachment>(
+  ports,
+): DefinedExtensionV0<Readonly<Record<never, never>>, unknown, unknown>;
+```
+
+Serve the prompt sections and tools of every hosted extension a host attached to
+this Agent. Every guest call goes through the host's App door, which owns the
+attachment, grantor, admission and Release checks. A guest failure becomes a
+marker or a missing namespace; it never fails the run.
+
+#### Type Parameters
+
+| Type Parameter                                                                                                                                        |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Attachment` _extends_ `Readonly`\<\{ `bindingName`: `string`; `installationId`: `string`; `level`: `"read"` \| `"write"`; `cacheKey`: `string`; \}\> |
+
+#### Parameters
+
+| Parameter | Type                                                                    |
+| --------- | ----------------------------------------------------------------------- |
+| `ports`   | [`HostedAppExtensionsPorts`](#hostedappextensionsports)\<`Attachment`\> |
+
+#### Returns
+
+[`DefinedExtensionV0`](extensions.md#definedextensionv0)\<`Readonly`\<`Record`\<`never`,
+`never`\>\>, `unknown`, `unknown`\>

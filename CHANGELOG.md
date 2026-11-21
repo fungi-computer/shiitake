@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.22.0
+
+### Minor Changes
+
+- Changes since 0.21.16:
+
+  - feat(oyster): compose attached hosted extensions on a standalone Agent
+
 ## 0.21.16
 
 ### Patch Changes
