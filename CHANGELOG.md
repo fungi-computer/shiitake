@@ -1,5 +1,19 @@
 # @fungi.computer/shiitake
 
+## 0.22.4
+
+### Patch Changes
+
+- Changes since 0.22.3:
+
+  - fix(shiitake): keep hosted extensions out of the model runtime
+
+- Updated dependencies
+  - @fungi.computer/agar@0.27.2
+  - @fungi.computer/knapsack@0.4.27
+  - @fungi.computer/mycelium@0.4.12
+  - @fungi.computer/veil@0.11.9
+
 ## 0.22.3
 
 ### Patch Changes

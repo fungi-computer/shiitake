@@ -12,11 +12,9 @@ import {
   invokeModuleOperation,
   remoteModule,
 } from "@fungi.computer/mycelium/remote";
-import {
-  CapabilityFailed,
-  Mycelium,
-  type InvocationContext,
-} from "@fungi.computer/mycelium";
+import type { InvocationContext } from "@fungi.computer/mycelium";
+import { Mycelium } from "@fungi.computer/mycelium/define";
+import { CapabilityFailed } from "@fungi.computer/mycelium/sandbox-failure";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
