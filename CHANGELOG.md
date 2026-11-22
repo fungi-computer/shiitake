@@ -1,5 +1,12 @@
 # @fungi.computer/shiitake
 
+## 0.22.9
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.28.3
+
 ## 0.22.8
 
 ### Patch Changes
