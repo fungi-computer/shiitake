@@ -9,6 +9,7 @@ import type { StoredSessionEntry } from "../src/internal/woodstock/session-entry
 import * as woodstock from "../src/internal/woodstock/session-store.js";
 import { compactionEntryFixture } from "./fixtures/compaction-entry.fixture.js";
 import { writeLargeSession } from "./fixtures/large-session.fixture.js";
+import { scaledBudgetMs } from "../../../tooling/repository/scripts/proof-budget.mjs";
 import { damageOutsideWoodstock } from "./fixtures/lineage-damage.fixture.js";
 import {
   createNativeSqliteOwnerFixture,
@@ -143,23 +144,32 @@ describe("the settled context and footer read the kept window, not history (Node
     });
   }
 
-  it("takes the same three statements at 500 and 2,000 turns with the same answer", () => {
-    const small = settledRead(500);
-    const large = settledRead(2_000);
-    for (const read of [small, large]) {
-      expect(read.context.value.map(({ id }) => id)).toEqual(read.expectedIds);
-      expect(woodstock.buildSessionContext(read.context.value)).toEqual(
-        read.expectedMessages,
-      );
-      // The leaf, one walk from it to the kept entry, then the deciding
-      // facts' indexes, which find none here and so walk nothing.
-      expect(read.context.operations).toBe(3);
-      expect(read.footer.value).toBeNull();
-      // The leaf, then the preference index: no preference, no walk.
-      expect(read.footer.operations).toBe(2);
-    }
-    expect(large.context.value).toHaveLength(small.context.value.length);
-  });
+  // Building and fully reading 2,500 turns is the proof's own setup: about a
+  // second on an idle host, several times that on a loaded Gate. Its budget
+  // scales with host load; the statement counts it asserts do not.
+  it(
+    "takes the same three statements at 500 and 2,000 turns with the same answer",
+    () => {
+      const small = settledRead(500);
+      const large = settledRead(2_000);
+      for (const read of [small, large]) {
+        expect(read.context.value.map(({ id }) => id)).toEqual(
+          read.expectedIds,
+        );
+        expect(woodstock.buildSessionContext(read.context.value)).toEqual(
+          read.expectedMessages,
+        );
+        // The leaf, one walk from it to the kept entry, then the deciding
+        // facts' indexes, which find none here and so walk nothing.
+        expect(read.context.operations).toBe(3);
+        expect(read.footer.value).toBeNull();
+        // The leaf, then the preference index: no preference, no walk.
+        expect(read.footer.operations).toBe(2);
+      }
+      expect(large.context.value).toHaveLength(small.context.value.length);
+    },
+    scaledBudgetMs(5_000),
+  );
 
   it("reads a preference inside the window without the history behind it", () => {
     withFixture(({ owner }) => {

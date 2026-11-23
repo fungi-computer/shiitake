@@ -22,19 +22,6 @@ function replayCloseResult(
   });
 }
 
-function closeCoordinatorThenExtensions(
-  coordinatorClose: Effect.Effect<void, ShiitakeError>,
-  extensionClose: Effect.Effect<void, ShiitakeError>,
-): Effect.Effect<void, ShiitakeError> {
-  return Effect.matchCauseEffect(coordinatorClose, {
-    onFailure: (coordinatorCause) =>
-      Effect.exit(extensionClose).pipe(
-        Effect.andThen(Effect.failCause(coordinatorCause)),
-      ),
-    onSuccess: () => extensionClose,
-  });
-}
-
 /** Compose one idempotent close action for the constructed agent. */
 export function composeAgentClose(
   coordinatorClose: Effect.Effect<void, ShiitakeError>,
@@ -45,7 +32,8 @@ export function composeAgentClose(
   const runClose = (
     running: RunningClose,
   ): Effect.Effect<void, ShiitakeError> =>
-    closeCoordinatorThenExtensions(coordinatorClose, extensionClose).pipe(
+    coordinatorClose.pipe(
+      Effect.onExit(() => extensionClose),
       Effect.exit,
       Effect.flatMap((result) =>
         Effect.sync(() => {
