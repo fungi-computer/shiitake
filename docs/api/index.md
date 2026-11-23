@@ -488,6 +488,7 @@ type ToolSource = Readonly<{
   sources?: readonly CapabilitySource[];
   sandbox: Sandbox;
   access?: ToolAccess;
+  recoverInterruptedTool?: (input) => Promise<string | undefined>;
 }>;
 ```
 
@@ -708,6 +709,18 @@ type CommandSettlement = Readonly<{
 ```
 
 Exact accepted-work facts, independent of the current Session branch or page.
+
+---
+
+### InterruptedToolCall
+
+```ts
+type InterruptedToolCall = Parameters<
+  NonNullable<MuleRunInput["recoverInterruptedTool"]>
+>[0];
+```
+
+The tool call a restart interrupted, as Mule names it.
 
 ---
 

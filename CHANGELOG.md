@@ -1,5 +1,23 @@
 # @fungi.computer/shiitake
 
+## 0.23.0
+
+### Minor Changes
+
+- Changes since 0.22.13:
+
+  - feat(shiitake): export the interrupted tool call type
+  - feat(shiitake): let a host recover an interrupted tool call's account
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/mule@0.4.0
+  - @fungi.computer/mycelium@0.5.0
+  - @fungi.computer/knapsack@0.4.30
+  - @fungi.computer/veil@0.11.12
+
 ## 0.22.13
 
 ### Patch Changes

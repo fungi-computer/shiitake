@@ -370,6 +370,7 @@ type CloudflareShiitakeTools = Readonly<{
   sandbox: Sandbox;
   execution?: ExecutionOptions;
   access?: ToolAccess;
+  recoverInterruptedTool?: ToolSource["recoverInterruptedTool"];
 }>;
 ```
 

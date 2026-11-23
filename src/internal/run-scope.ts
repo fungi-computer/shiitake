@@ -463,6 +463,23 @@ export function runAcceptedCommand(
               );
             },
           };
+          const recover = options.tools?.recoverInterruptedTool;
+          if (recover !== undefined)
+            Object.assign(input, {
+              recoverInterruptedTool: (
+                call: Parameters<
+                  NonNullable<MuleRunInput["recoverInterruptedTool"]>
+                >[0],
+              ) =>
+                recover({ sessionId: prepared.command.sessionId, call }).pipe(
+                  Effect.mapError((cause): MuleError => ({
+                    _tag: "MuleError",
+                    phase: "control",
+                    message: "Interrupted tool recovery failed",
+                    cause,
+                  })),
+                ),
+            });
           return muleEffect
             .run(
               acquired.stream === undefined

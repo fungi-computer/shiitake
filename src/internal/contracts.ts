@@ -160,6 +160,19 @@ export type ToolSource = Readonly<{
    * interprets them. Absent is full access.
    */
   access?: ToolAccess;
+  /**
+   * After a restart, say what became of a tool call that had started and is not
+   * safe to replay, in plain words for the model, or `undefined` to keep the
+   * default "interrupted" text. Called only for such a call; a rejection keeps
+   * the default.
+   */
+  recoverInterruptedTool?: (
+    input: Readonly<{
+      sessionId: string;
+      call: import("./effect-contracts.js").InterruptedToolCall;
+      signal: AbortSignal;
+    }>,
+  ) => Promise<string | undefined>;
 }>;
 
 /** Promise host for scheduling the opaque durable reconciler. */

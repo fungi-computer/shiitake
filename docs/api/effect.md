@@ -87,6 +87,9 @@ type ToolSourceEffect = Readonly<{
   sources: readonly CapabilitySource[];
   sandbox: Sandbox;
   access?: ToolAccess;
+  recoverInterruptedTool?: (
+    input,
+  ) => Effect.Effect<string | undefined, ShiitakeError>;
 }>;
 ```
 
@@ -979,6 +982,12 @@ Re-exports [StandardHostMetaSchema](index.md#standardhostmetaschema)
 ### ToolSource
 
 Re-exports [ToolSource](index.md#toolsource)
+
+---
+
+### InterruptedToolCall
+
+Re-exports [InterruptedToolCall](index.md#interruptedtoolcall)
 
 ---
 

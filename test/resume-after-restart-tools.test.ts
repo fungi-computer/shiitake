@@ -115,6 +115,33 @@ it(
 );
 
 it(
+  "stores the host's account of an interrupted unsafe tool once, never reruns it, and does not ask again",
+  () =>
+    withDatabase(async (path) => {
+      await killed(path, "crash-tool", "tool-started");
+      const snapshot = await finished(path, "finish-recovered");
+      expectOutcome(snapshot, "completed");
+      const result = toolResult(snapshot, "send-call");
+      if (result?.role !== "toolResult")
+        throw new Error("Missing recovered result");
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        {
+          type: "text",
+          text: "The command finished while the Hub restarted: exit code 0.",
+        },
+      ]);
+      // A second start finds the answer stored and does not ask the host again.
+      const again = await finished(path, "finish-recovered");
+      expect(sendResults(again)).toEqual(sendResults(snapshot));
+      expect(await readFile(path + ".recovered", "utf8")).toBe(
+        "restart:send-call\n",
+      );
+    }),
+  60_000,
+);
+
+it(
   "replays a safe tool once, and a second restart reuses its committed result",
   () =>
     withDatabase(async (path) => {

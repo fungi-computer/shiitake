@@ -81,6 +81,7 @@ export type {
   ShiitakeEffectSendOptions,
   ShiitakeEffectWatch,
   ToolSourceEffect,
+  InterruptedToolCall,
 } from "./internal/effect-contracts.js";
 export type { SessionSummary } from "./client.js";
 export type {

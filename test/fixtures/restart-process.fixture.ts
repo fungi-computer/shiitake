@@ -238,7 +238,7 @@ faux.setResponses(
         ),
         answeredOnce,
       ]
-    : mode === "finish-answered"
+    : mode === "finish-answered" || mode === "finish-recovered"
       ? [answeredOnce]
       : [fauxAssistantMessage("complete")],
 );
@@ -381,6 +381,13 @@ const agent = await makeAgent({
   runtime: runtime.runtime,
   tools: {
     ...dependencies.tools,
+    recoverInterruptedTool: ({ sessionId, call }) => {
+      if (mode !== "finish-recovered") return Promise.resolve(undefined);
+      appendFileSync(databasePath + ".recovered", `${sessionId}:${call.id}\n`);
+      return Promise.resolve(
+        "The command finished while the Hub restarted: exit code 0.",
+      );
+    },
     sandbox: {
       execute: () => {
         if (mode !== "cancel-mid-tool") process.send?.("tool-started");
@@ -485,7 +492,11 @@ if (mode?.startsWith("crash-") || mode === "cancel-mid-tool")
     requestId: "restart-command",
     text: "Finish after restart",
   });
-if (mode === "finish-history" || mode === "finish-answered")
+if (
+  mode === "finish-history" ||
+  mode === "finish-answered" ||
+  mode === "finish-recovered"
+)
   await agent.session("restart").command({
     type: "prompt",
     delivery: "followUp",

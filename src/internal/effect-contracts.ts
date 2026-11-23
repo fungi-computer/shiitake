@@ -131,6 +131,18 @@ export type ToolSourceEffect = Readonly<{
    * interprets them. Absent is full access.
    */
   access?: ToolAccess;
+  /**
+   * After a restart, say what became of a tool call that had started and is not
+   * safe to replay, in plain words for the model, or `undefined` to keep the
+   * default "interrupted" text. Called only for such a call; a failure keeps
+   * the default.
+   */
+  recoverInterruptedTool?: (
+    input: Readonly<{
+      sessionId: string;
+      call: InterruptedToolCall;
+    }>,
+  ) => Effect.Effect<string | undefined, ShiitakeError>;
 }>;
 
 /** Effect-native owner for scheduling the opaque durable reconciler. */
@@ -406,3 +418,10 @@ export type ShiitakeEffectOwner = ShiitakeEffectAgent &
      */
     withMeta: (meta: Json) => ShiitakeEffectAgent;
   }>;
+
+/** The tool call a restart interrupted, as Mule names it. */
+export type InterruptedToolCall = Parameters<
+  NonNullable<
+    import("@fungi.computer/mule/effect").MuleRunInput["recoverInterruptedTool"]
+  >
+>[0];

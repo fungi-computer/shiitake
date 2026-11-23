@@ -100,6 +100,7 @@ export type {
   StandardHostMetaSchema,
   ToolSource,
 } from "./internal/contracts.js";
+export type { InterruptedToolCall } from "./internal/effect-contracts.js";
 export type {
   BorrowedCompactionViewV0,
   CompactionHandoffErrorV0,

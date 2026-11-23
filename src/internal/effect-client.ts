@@ -39,6 +39,24 @@ import type {
   ShiitakeOptions,
 } from "./contracts.js";
 
+/** Adapt the host's Promise recovery hook; its failure is a typed Shiitake error. */
+export function liftRecovery(
+  recover: NonNullable<ShiitakeOptions["tools"]>["recoverInterruptedTool"] & {},
+): NonNullable<
+  NonNullable<ShiitakeEffectOptions["tools"]>["recoverInterruptedTool"]
+> {
+  return ({ sessionId, call }) =>
+    Effect.tryPromise({
+      try: (signal) => recover({ sessionId, call, signal }),
+      catch: () =>
+        new ShiitakeError(
+          "runtime",
+          "rejected",
+          "Interrupted tool recovery failed",
+        ),
+    });
+}
+
 /** Adapt a Promise tool configuration for both initial open and reload. */
 export function liftTools(
   toolSource: NonNullable<ShiitakeOptions["tools"]>,
@@ -49,9 +67,18 @@ export function liftTools(
     sandbox: fromTypedSandbox(toolSource.sandbox),
     access: toolSource.access ?? {},
   };
+  const recovering =
+    toolSource.recoverInterruptedTool === undefined
+      ? tools
+      : {
+          ...tools,
+          recoverInterruptedTool: liftRecovery(
+            toolSource.recoverInterruptedTool,
+          ),
+        };
   return toolSource.execution === undefined
-    ? tools
-    : { ...tools, execution: toolSource.execution };
+    ? recovering
+    : { ...recovering, execution: toolSource.execution };
 }
 
 /** Run one Shiitake Effect through its sole Promise error adaptation. */

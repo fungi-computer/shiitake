@@ -1,4 +1,5 @@
 import { liftHostJobs } from "./internal/promise-facade.js";
+import { liftRecovery } from "./internal/effect-client.js";
 import type {
   ShiitakeHostJobs,
   ShiitakeOptions,
@@ -42,6 +43,7 @@ import type {
   StoragePressureCheck,
   CompactionOptions,
   ToolAccess,
+  ToolSource,
 } from "./internal/contracts.js";
 import {
   runShiitakePromise,
@@ -134,6 +136,7 @@ export type CloudflareShiitakeTools = Readonly<{
    * interprets them. Absent is full access.
    */
   access?: ToolAccess;
+  recoverInterruptedTool?: ToolSource["recoverInterruptedTool"];
 }>;
 
 /**
@@ -474,9 +477,16 @@ function configuredTools(
     sandbox: fromTypedSandbox(tools.sandbox),
     access: tools.access ?? {},
   };
+  const withRecovery =
+    tools.recoverInterruptedTool === undefined
+      ? configured
+      : {
+          ...configured,
+          recoverInterruptedTool: liftRecovery(tools.recoverInterruptedTool),
+        };
   return tools.execution === undefined
-    ? configured
-    : { ...configured, execution: tools.execution };
+    ? withRecovery
+    : { ...withRecovery, execution: tools.execution };
 }
 
 function effectOptions(
