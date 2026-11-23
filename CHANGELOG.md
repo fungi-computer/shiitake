@@ -1,5 +1,17 @@
 # @fungi.computer/shiitake
 
+## 0.22.11
+
+### Patch Changes
+
+- Changes since 0.22.10:
+
+  - fix(shiitake): show every other agent text surface once too
+  - fix(parakeet): show an agent reply once when the model sends commentary and
+    a final answer
+
+- @fungi.computer/agar@0.28.5
+
 ## 0.22.10
 
 ### Patch Changes

@@ -19,6 +19,7 @@ import type {
   SessionExtensionSlots,
   SessionSnapshot,
 } from "../../client.js";
+import { assistantTextBlocks } from "@fungi.computer/mule/assistant-text";
 import { ShiitakeError } from "../../errors.js";
 import {
   decodeClientReadOptions,
@@ -357,10 +358,7 @@ export function loadAcceptedRun(
 }
 
 function assistantText(message: AssistantMessage): string {
-  return message.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("")
-    .trim();
+  return assistantTextBlocks(message.content).join("").trim();
 }
 
 /** Read the last exact completed assistant text produced by accepted work. */

@@ -9,6 +9,7 @@ import type {
   UserMessage,
 } from "@fungi.computer/mule/effect";
 import * as Schema from "effect/Schema";
+import { assistantTextBlocks } from "@fungi.computer/mule/assistant-text";
 
 const isString = Schema.is(Schema.String);
 
@@ -132,11 +133,10 @@ function serializeUserMessage(message: Extract<Message, { role: "user" }>) {
 function serializeAssistantMessage(
   message: Extract<Message, { role: "assistant" }>,
 ): string[] {
-  const text: string[] = [];
+  const text = [...assistantTextBlocks(message.content)];
   const calls: string[] = [];
   for (const block of message.content) {
-    if (block.type === "text") text.push(block.text);
-    else if (block.type === "toolCall") {
+    if (block.type === "toolCall") {
       const args = Object.entries(block.arguments)
         .map(([key, value]) => `${key}=${JSON.stringify(value)}`)
         .join(", ");

@@ -1,3 +1,4 @@
+import { assistantTextBlocks } from "@fungi.computer/mule/assistant-text";
 import type { Json } from "../../extensions.js";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { readSessionAttention } from "./session-attention.js";
@@ -813,10 +814,9 @@ export function projectCommandSettlement(
     content:
       terminal.outcome === "cancelled"
         ? ""
-        : (last?.content
-            .flatMap((part) => (part.type === "text" ? [part.text] : []))
-            .join("")
-            .trim() ?? ""),
+        : last === undefined
+          ? ""
+          : assistantTextBlocks(last.content).join("").trim(),
     usage: answers.map(({ provider, model, usage }) => ({
       provider,
       model,

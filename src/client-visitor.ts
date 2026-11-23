@@ -3,6 +3,7 @@ import {
   messageAuthor,
   FungiMessageMetaSchema,
 } from "@fungi.computer/agar/agents";
+import { assistantTextBlocks } from "@fungi.computer/mule/assistant-text";
 import type { SessionPendingPrompt, SessionSnapshot } from "./client.js";
 
 /** The host decides which Agent work may be delivered to this participant. */
@@ -282,10 +283,7 @@ export function visitorView(
         text: userText(value),
       });
     } else if (value.role === "assistant") {
-      const text = value.content
-        .flatMap((part) => (part.type === "text" ? [part.text] : []))
-        .join("")
-        .trim();
+      const text = assistantTextBlocks(value.content).join("").trim();
       if (text.length > 0)
         lines.push({
           id,
