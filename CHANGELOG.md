@@ -1,5 +1,24 @@
 # @fungi.computer/shiitake
 
+## 0.23.1
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/cairn@0.1.1
+  - @fungi.computer/carrier@0.2.8
+  - @fungi.computer/knapsack@0.4.31
+  - @fungi.computer/mycelium@0.5.1
+  - @fungi.computer/agar@0.29.1
+  - @fungi.computer/mule@0.4.1
+  - @fungi.computer/veil@0.11.13
+  - @fungi.computer/watchdog@0.1.7
+  - @fungi.computer/seam@0.2.9
+  - @fungi.computer/bird-dog@0.3.10
+
 ## 0.23.0
 
 ### Minor Changes
