@@ -1,5 +1,12 @@
 # @fungi.computer/shiitake
 
+## 0.23.3
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/knapsack@0.4.33
+
 ## 0.23.2
 
 ### Patch Changes
