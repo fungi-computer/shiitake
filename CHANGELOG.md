@@ -1,5 +1,14 @@
 # @fungi.computer/shiitake
 
+## 0.23.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/mycelium@0.5.3
+  - @fungi.computer/knapsack@0.4.34
+  - @fungi.computer/veil@0.11.15
+
 ## 0.23.3
 
 ### Patch Changes
