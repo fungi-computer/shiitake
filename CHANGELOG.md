@@ -1,5 +1,11 @@
 # @fungi.computer/shiitake
 
+## 0.23.5
+
+### Patch Changes
+
+- @fungi.computer/agar@0.29.3
+
 ## 0.23.4
 
 ### Patch Changes
