@@ -1,5 +1,16 @@
 # @fungi.computer/shiitake
 
+## 0.24.4
+
+### Patch Changes
+
+- Changes since 0.24.3:
+
+  - fix(parakeet): only the person's own answer is their bubble, and a parked
+    answer shows once
+  - fix(parakeet): a question card takes the keys at once and the answer shows
+    as the person's message
+
 ## 0.24.3
 
 ### Patch Changes

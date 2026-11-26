@@ -144,6 +144,13 @@ export type ClientExtensionContextV1 = Readonly<{
   /** Report the original attachment error to the host's notice and log owner. */
   onError: (error: Error) => void;
 }>;
+/**
+ * A short line a client describes a message or tool call with. A bare string is
+ * a system line; `own` marks words the person said themselves, which a timeline
+ * may draw as their message.
+ */
+export type ClientDescribedLineV1 =
+  string | Readonly<{ text: string; own: boolean }>;
 /** Installed client protocol; projection decoding remains inside the author closure. */
 export type ClientEntryV1 = Readonly<{
   protocol: "shiitake.client/v1";
@@ -168,7 +175,15 @@ export type ClientEntryV1 = Readonly<{
   describeMessage?: (
     origin: Readonly<{ correlation: string | null }>,
     slot: ExtensionSlotV0 | undefined,
-  ) => string | undefined;
+  ) => ClientDescribedLineV1 | undefined;
+  /**
+   * What the person answered a tool call of this extension, so a timeline can
+   * show it as their own message after the call. Same limits as describeMessage.
+   */
+  describeToolCall?: (
+    toolCallId: string,
+    slot: ExtensionSlotV0 | undefined,
+  ) => ClientDescribedLineV1 | undefined;
 }>;
 const entrySchema: Schema.Codec<ClientEntryV1, unknown> = Schema.Struct({
   protocol: Schema.Literal("shiitake.client/v1"),
@@ -189,6 +204,12 @@ const entrySchema: Schema.Codec<ClientEntryV1, unknown> = Schema.Struct({
   describeMessage: Schema.optionalKey(
     Schema.declare<NonNullable<ClientEntryV1["describeMessage"]>>(
       (value): value is NonNullable<ClientEntryV1["describeMessage"]> =>
+        Predicate.isFunction(value),
+    ),
+  ),
+  describeToolCall: Schema.optionalKey(
+    Schema.declare<NonNullable<ClientEntryV1["describeToolCall"]>>(
+      (value): value is NonNullable<ClientEntryV1["describeToolCall"]> =>
         Predicate.isFunction(value),
     ),
   ),
@@ -215,7 +236,11 @@ export function defineClientEntry<C extends CommandsV0, P, PI>(
     describeMessage?: (
       origin: Readonly<{ correlation: string | null }>,
       view: ExtensionViewV0<P>,
-    ) => string | undefined;
+    ) => ClientDescribedLineV1 | undefined;
+    describeToolCall?: (
+      toolCallId: string,
+      view: ExtensionViewV0<P>,
+    ) => ClientDescribedLineV1 | undefined;
   }>,
 ): ClientEntryV1 {
   if (client.contribute !== undefined && contract.projection === null)
@@ -235,6 +260,14 @@ export function defineClientEntry<C extends CommandsV0, P, PI>(
         origin: Readonly<{ correlation: string | null }>,
         slot: ExtensionSlotV0 | undefined,
       ) => describeMessage(origin, viewExtension(contract, slot)),
+    });
+  const describeToolCall = client.describeToolCall;
+  if (describeToolCall !== undefined)
+    Object.assign(entry, {
+      describeToolCall: (
+        toolCallId: string,
+        slot: ExtensionSlotV0 | undefined,
+      ) => describeToolCall(toolCallId, viewExtension(contract, slot)),
     });
   if (attach !== undefined)
     Object.assign(entry, {
