@@ -1,5 +1,18 @@
 # @fungi.computer/shiitake
 
+## 0.24.2
+
+### Patch Changes
+
+- Changes since 0.24.1:
+
+  - perf(grove): cut the first view by about 95 KB gzip
+
+- Updated dependencies
+  - @fungi.computer/mycelium@0.5.7
+  - @fungi.computer/knapsack@0.4.38
+  - @fungi.computer/veil@0.11.19
+
 ## 0.24.1
 
 ### Patch Changes

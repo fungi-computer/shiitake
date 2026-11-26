@@ -21,7 +21,7 @@ import type {
   ModuleRegistration,
   Sandbox,
 } from "@fungi.computer/mycelium";
-import { fromTypedSandbox } from "@fungi.computer/mycelium/effect";
+import { fromTypedSandbox } from "@fungi.computer/mycelium/typed-sandbox";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Redacted from "effect/Redacted";

@@ -2,7 +2,7 @@ import { CompactionInstructionsSchema } from "../client-boundary.js";
 import { HostMetaSchema } from "../host-meta.js";
 import type { ModelMessage } from "../../client.js";
 import { userContextMessage, VerifiedAgentReplySchema } from "./agent-reply.js";
-import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
+import { SandboxFailureEventSchema } from "@fungi.computer/mycelium/sandbox-failure-event";
 import { ModelFailureSchema } from "@fungi.computer/mule/effect";
 import type {
   AssistantMessage,

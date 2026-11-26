@@ -4,7 +4,9 @@ import {
 } from "./session-attention.js";
 import type { CommandSettlement } from "./internal/contracts.js";
 import { PromptImageSchema } from "./internal/client-boundary.js";
-import { SandboxFailureEventSchema } from "@fungi.computer/mycelium";
+// The narrow entry: the package root would load the sandbox compiler (and its
+// script parser) into every browser window that only reads a failure event.
+import { SandboxFailureEventSchema } from "@fungi.computer/mycelium/sandbox-failure-event";
 import * as Schema from "effect/Schema";
 
 import type {
