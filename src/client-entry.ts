@@ -156,6 +156,15 @@ export type ClientEntryV1 = Readonly<{
   ) => Effect.Effect<void, Error, Scope.Scope>;
   /** Synchronously produce V1 data from the observed slot; the host admits it once. */
   contribute?: (slot: ExtensionSlotV0 | undefined) => ClientContributionV1;
+  /**
+   * What one of this extension's own messages means to the person, read from
+   * its observed slot, so a timeline can show a short line instead of the text
+   * the Agent needs. Absent or undefined leaves the message as it is.
+   */
+  describeMessage?: (
+    origin: Readonly<{ correlation: string | null }>,
+    slot: ExtensionSlotV0 | undefined,
+  ) => string | undefined;
 }>;
 const entrySchema: Schema.Codec<ClientEntryV1, unknown> = Schema.Struct({
   protocol: Schema.Literal("shiitake.client/v1"),
@@ -170,6 +179,12 @@ const entrySchema: Schema.Codec<ClientEntryV1, unknown> = Schema.Struct({
   contribute: Schema.optionalKey(
     Schema.declare<NonNullable<ClientEntryV1["contribute"]>>(
       (value): value is NonNullable<ClientEntryV1["contribute"]> =>
+        Predicate.isFunction(value),
+    ),
+  ),
+  describeMessage: Schema.optionalKey(
+    Schema.declare<NonNullable<ClientEntryV1["describeMessage"]>>(
+      (value): value is NonNullable<ClientEntryV1["describeMessage"]> =>
         Predicate.isFunction(value),
     ),
   ),
@@ -193,6 +208,10 @@ export function defineClientEntry<C extends CommandsV0, P, PI>(
       context: ClientExtensionContextV1,
     ) => void | Promise<void> | Effect.Effect<void, Error, Scope.Scope>;
     contribute?: (view: ExtensionViewV0<P>) => ClientContributionV1;
+    describeMessage?: (
+      origin: Readonly<{ correlation: string | null }>,
+      view: ExtensionViewV0<P>,
+    ) => string | undefined;
   }>,
 ): ClientEntryV1 {
   if (client.contribute !== undefined && contract.projection === null)
@@ -205,6 +224,14 @@ export function defineClientEntry<C extends CommandsV0, P, PI>(
     Object.assign(entry, { promptPresentation: client.promptPresentation });
   const attach = client.attach;
   const contribute = client.contribute;
+  const describeMessage = client.describeMessage;
+  if (describeMessage !== undefined)
+    Object.assign(entry, {
+      describeMessage: (
+        origin: Readonly<{ correlation: string | null }>,
+        slot: ExtensionSlotV0 | undefined,
+      ) => describeMessage(origin, viewExtension(contract, slot)),
+    });
   if (attach !== undefined)
     Object.assign(entry, {
       attach: (context: ClientExtensionContextV1) =>

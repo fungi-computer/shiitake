@@ -1,5 +1,13 @@
 # @fungi.computer/shiitake
 
+## 0.23.7
+
+### Patch Changes
+
+- Changes since 0.23.6:
+
+  - fix(shiitake): let a client entry describe its extension's own messages
+
 ## 0.23.6
 
 ### Patch Changes

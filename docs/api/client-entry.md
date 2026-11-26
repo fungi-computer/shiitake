@@ -63,6 +63,7 @@ type ClientEntryV1 = Readonly<{
   promptPresentation?: "footer";
   attach?: (context) => Effect.Effect<void, Error, Scope.Scope>;
   contribute?: (slot) => ClientContributionV1;
+  describeMessage?: (origin, slot) => string | undefined;
 }>;
 ```
 
@@ -285,6 +286,7 @@ const parseClientEntryV1: (
   promptPresentation?: "footer";
   attach?: (context) => Effect<void, Error, Scope>;
   contribute?: (slot) => object;
+  describeMessage?: (origin, slot) => string | undefined;
 }> = decodeEntry;
 ```
 
@@ -302,7 +304,8 @@ Admit exactly V1; installed executable code is not sandboxed.
 `Readonly`\<\{ `protocol`: `"shiitake.client/v1"`; `id`: `string` &
 `Brand`\<`"ExtensionId"`\>; `promptPresentation?`: `"footer"`; `attach?`:
 (`context`) => `Effect`\<`void`, `Error`, `Scope`\>; `contribute?`: (`slot`) =>
-`object`; \}\>
+`object`; `describeMessage?`: (`origin`, `slot`) => `string` \| `undefined`;
+\}\>
 
 ## Functions
 
@@ -324,10 +327,10 @@ One typed author seam, usable with ordinary async attachment code.
 
 #### Parameters
 
-| Parameter  | Type                                                                                                                                                                                                                                                                                                 |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `contract` | [`ExtensionContractV0`](extensions.md#extensioncontractv0)\<`C`, `P`, `PI`\>                                                                                                                                                                                                                         |
-| `client`   | `Readonly`\<\{ `promptPresentation?`: [`ClientEntryV1`](#cliententryv1)\[`"promptPresentation"`\]; `attach?`: (`context`) => \| `void` \| `Promise`\<`void`\> \| `Effect.Effect`\<`void`, `Error`, `Scope.Scope`\>; `contribute?`: (`view`) => [`ClientContributionV1`](#clientcontributionv1); \}\> |
+| Parameter  | Type                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contract` | [`ExtensionContractV0`](extensions.md#extensioncontractv0)\<`C`, `P`, `PI`\>                                                                                                                                                                                                                                                                                            |
+| `client`   | `Readonly`\<\{ `promptPresentation?`: [`ClientEntryV1`](#cliententryv1)\[`"promptPresentation"`\]; `attach?`: (`context`) => \| `void` \| `Promise`\<`void`\> \| `Effect.Effect`\<`void`, `Error`, `Scope.Scope`\>; `contribute?`: (`view`) => [`ClientContributionV1`](#clientcontributionv1); `describeMessage?`: (`origin`, `view`) => `string` \| `undefined`; \}\> |
 
 #### Returns
 
