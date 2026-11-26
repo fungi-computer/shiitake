@@ -159,7 +159,11 @@ export type ClientEntryV1 = Readonly<{
   /**
    * What one of this extension's own messages means to the person, read from
    * its observed slot, so a timeline can show a short line instead of the text
-   * the Agent needs. Absent or undefined leaves the message as it is.
+   * the Agent needs. Absent or undefined leaves the message as it is. A host
+   * built before this field existed rejects an entry that carries it as an
+   * unknown key, so an entry that sets it needs a host from this release or later.
+   * A host shows only a short string and keeps the original message when the
+   * hook throws or returns anything else.
    */
   describeMessage?: (
     origin: Readonly<{ correlation: string | null }>,
