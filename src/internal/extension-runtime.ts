@@ -1076,6 +1076,46 @@ export function openExtensionRuntime(
               }),
             ),
           ),
+        peerProjection: (extensionId: string, sessionId: string) =>
+          requireRead(member.admitted.id).pipe(
+            Effect.andThen(grantGuard(member, "projection")),
+            Effect.andThen(
+              storeStep(() => {
+                const peer = [...members.values()].find(
+                  (candidate) => candidate.admitted.id === extensionId,
+                );
+                const hook = peer?.hooks?.project;
+                const projection =
+                  peer?.admitted.definition.contract.projection;
+                if (
+                  peer === undefined ||
+                  peer === member ||
+                  peer.status !== "running" ||
+                  !peer.admitted.grants.has("projection") ||
+                  hook === undefined ||
+                  projection === null ||
+                  projection === undefined
+                )
+                  return Option.none<Json>();
+                const before = projecting;
+                projecting = peer.admitted.id;
+                try {
+                  const projected = invokeSyncHandler(
+                    () => hook(decodeClientSessionId(sessionId)),
+                    undefined,
+                  );
+                  if (Option.isNone(projected)) return Option.none<Json>();
+                  return Option.some(
+                    Schema.decodeUnknownSync(JsonValueSchema)(
+                      Schema.encodeSync(projection.schema)(projected.value),
+                    ),
+                  );
+                } finally {
+                  projecting = before;
+                }
+              }),
+            ),
+          ),
         hasPendingSteer: (run: Pick<RunIdentityV0, "sessionId" | "workId">) =>
           requireRead(member.admitted.id).pipe(
             Effect.andThen(grantGuard(member, "run_tools")),

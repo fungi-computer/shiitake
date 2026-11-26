@@ -1,5 +1,14 @@
 # @fungi.computer/shiitake
 
+## 0.24.0
+
+### Minor Changes
+
+- Changes since 0.23.9:
+
+  - fix(oyster): keep the starter seed lint clean and refresh shiitake docs
+  - feat(shiitake): withdraw asks and tick plan steps when a goal ends
+
 ## 0.23.9
 
 ### Patch Changes

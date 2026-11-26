@@ -514,6 +514,15 @@ export type ExtensionContextV0<
   sessionPosition: (
     sessionId: string,
   ) => Effect.Effect<number, ExtensionStateError, ExtensionRead>;
+  /**
+   * Another running extension's encoded projection for one Session, read-only:
+   * what its own observation slot would show, never its raw state. None when
+   * the peer is absent, stopped or projects nothing. Requires projection.
+   */
+  peerProjection: (
+    extensionId: string,
+    sessionId: string,
+  ) => Effect.Effect<Option.Option<Json>, ExtensionStateError, ExtensionRead>;
   /** Observe accepted steering without consuming Mule's next control delivery. Requires run_tools. */
   hasPendingSteer: (
     run: Pick<RunIdentityV0, "sessionId" | "workId">,

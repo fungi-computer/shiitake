@@ -1298,6 +1298,10 @@ type ExtensionContextV0<S, Config, D> = Readonly<{
   sessionPosition: (
     sessionId,
   ) => Effect.Effect<number, ExtensionStateError, ExtensionRead>;
+  peerProjection: (
+    extensionId,
+    sessionId,
+  ) => Effect.Effect<Option.Option<Json>, ExtensionStateError, ExtensionRead>;
   hasPendingSteer: (
     run,
   ) => Effect.Effect<boolean, ExtensionStateError, ExtensionRead>;

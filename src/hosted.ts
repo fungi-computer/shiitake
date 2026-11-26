@@ -253,6 +253,7 @@ function hostedPort(
       recipientStatus: () => Effect.succeed("unknown" as const),
       recipientParent: () => Effect.fail(unavailable("Recipient parent")),
       sessionPosition: () => Effect.fail(unavailable("Session timeline")),
+      peerProjection: () => Effect.fail(unavailable("A peer projection")),
       hasSuccessfulToolResult: () => Effect.fail(unavailable("A tool result")),
       observe: () => Effect.die(unavailable("Observation")),
       isObserved: () => false,
