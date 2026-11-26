@@ -1,5 +1,14 @@
 # @fungi.computer/shiitake
 
+## 0.23.9
+
+### Patch Changes
+
+- @fungi.computer/agar@0.29.4
+  - @fungi.computer/knapsack@0.4.36
+  - @fungi.computer/mycelium@0.5.5
+  - @fungi.computer/veil@0.11.17
+
 ## 0.23.8
 
 ### Patch Changes
